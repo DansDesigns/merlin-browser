@@ -1,0 +1,4 @@
+1.4.3
+Vertical tabs put the close button on the right, so favicons stay put while
+the strip expands. The page area now has rounded corners, adjustable in
+Settings, Appearance.

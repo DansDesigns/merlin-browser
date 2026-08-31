@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Merlin (Frameless)
+GenericName=Web Browser
+Comment=Merlin with the system title bar hidden
+Exec=merlin-browser --no-decorations %U
+Icon=merlin-browser
+Terminal=false
+Categories=Network;WebBrowser;
+StartupNotify=true
+StartupWMClass=merlin-browser

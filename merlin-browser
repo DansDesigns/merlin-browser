@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""Merlin Browser launcher."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(os.path.realpath(__file__))))
+
+from merlin.app import main
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -1,0 +1,35 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Merlin
+GenericName=Web Browser
+Comment=Chromium-engine browser with no Rust, a window-decoration toggle and a real media player
+Exec=merlin-browser %U
+Icon=merlin-browser
+Terminal=false
+Categories=Network;WebBrowser;
+Keywords=browser;internet;web;www;merlin;
+StartupNotify=true
+StartupWMClass=merlin-browser
+MimeType=text/html;text/xml;application/xhtml+xml;application/xml;x-scheme-handler/http;x-scheme-handler/https;x-scheme-handler/about;x-scheme-handler/unknown;video/mp4;video/x-matroska;video/quicktime;audio/mpeg;audio/flac;
+Actions=frameless;decorated;private;newwindow;codecs;
+
+[Desktop Action frameless]
+Name=Open without window decorations
+Exec=merlin-browser --no-decorations %U
+
+[Desktop Action decorated]
+Name=Open with window decorations
+Exec=merlin-browser --decorations %U
+
+[Desktop Action private]
+Name=New private window
+Exec=merlin-browser --private
+
+[Desktop Action newwindow]
+Name=New window
+Exec=merlin-browser
+
+[Desktop Action codecs]
+Name=Show codec report
+Exec=merlin-browser merlin://start --codecs

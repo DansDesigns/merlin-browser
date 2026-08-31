@@ -1,0 +1,32 @@
+# Merlin Browser dependencies.
+#
+# Verified on 2026-08-26 by scanning every shared library mapped into a running
+# Merlin process: neither of these paths loads any Rust.
+#
+# ---------------------------------------------------------------------------
+# Path 1 (RECOMMENDED): install the engine from your distribution, not pip.
+#   Distro builds enable proprietary codecs against system FFmpeg, so H.264 and
+#   AAC work. Skip this file entirely and run:
+#
+#     Debian/Ubuntu  sudo apt install python3-pyqt6 python3-pyqt6.qtwebengine
+#     Fedora         sudo dnf install python3-qt6 python3-qt6-webengine
+#     Arch           sudo pacman -S python-pyqt6 python-pyqt6-webengine
+#     openSUSE       sudo zypper install python3-qt6 python3-qt6-webengine
+#
+# ---------------------------------------------------------------------------
+# Path 2: pip wheels. Newer engine, but no H.264, no AAC, no HEVC, because Qt's
+#   own binaries are built without the patent-encumbered codecs. Everything else
+#   (AV1, VP9, VP8, Opus, Vorbis, MP3, FLAC) works. Pair with mpv for the rest.
+PyQt6>=6.6
+PyQt6-WebEngine>=6.6
+
+# ---------------------------------------------------------------------------
+# Windows: run install.bat instead. There is no distro package, so pip is the
+#   only route and the engine will lack H.264, AAC and HEVC. Verified: the
+#   Windows wheel (Qt 6.11.2, Chromium 140) contains no Rust either. Install a
+#   player, which matters more on Windows than on Linux:
+#     winget install mpv.net        or      winget install VideoLAN.VLC
+#
+# Optional, for the external-player fallback. Neither involves Rust:
+#   mpv     (C)       sudo apt install mpv
+#   yt-dlp  (Python)  pip install --user yt-dlp

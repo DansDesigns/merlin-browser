@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Generated from the same geometry as merlin.ico and merlin.png. The hat
+       band is a baked intersection rather than a clip-path, because Qt renders
+       SVG Tiny and silently ignores clip-path, which flattens the mark. -->
+  <defs>
+    <radialGradient id="sky" cx="24" cy="16" r="48" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2a2350"/><stop offset="1" stop-color="#12101f"/>
+    </radialGradient>
+    <linearGradient id="felt" x1="14" y1="4" x2="50" y2="26" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9273f5"/><stop offset="1" stop-color="#4b32ab"/>
+    </linearGradient>
+    <linearGradient id="hair" x1="20" y1="30" x2="40" y2="58" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#cfd0e6"/>
+    </linearGradient>
+  </defs>
+  <circle cx="32" cy="32" r="30" fill="url(#sky)"/>
+  <ellipse cx="32" cy="32" rx="10.5" ry="10" fill="#1b1636"/>
+  <path d="M17.00 30.00 C14.60 41.00 18.20 52.00 24.20 56.20 C27.80 58.80 30.00 58.20 32.00 58.00 C34.00 58.20 36.20 58.80 40.00 56.40 C45.80 52.00 49.40 41.00 47.00 30.00 C45.00 36.00 39.00 42.40 32.00 42.40 C25.00 42.40 19.00 36.00 17.00 30.00 Z" fill="url(#hair)" fill-rule="nonzero"/>
+  <path d="M21.60 28.20 C23.40 25.00 27.60 24.40 30.40 26.20 C28.00 25.80 24.60 26.60 22.80 29.40 L21.60 28.20 M42.40 28.20 C40.60 25.00 36.40 24.40 33.60 26.20 C36.00 25.80 39.40 26.60 41.20 29.40 L42.40 28.20 Z" fill="#ffffff" fill-rule="nonzero"/>
+  <circle cx="26.6" cy="29.6" r="2.05" fill="#7de3ff"/>
+  <circle cx="37.4" cy="29.6" r="2.05" fill="#7de3ff"/>
+  <circle cx="26.05" cy="29.0" r="0.72" fill="#ffffff" fill-opacity="0.82"/>
+  <circle cx="36.85" cy="29.0" r="0.72" fill="#ffffff" fill-opacity="0.82"/>
+  <path d="M32.00 34.40 C27.40 34.00 22.40 35.20 19.80 39.20 C18.90 40.80 19.60 42.00 21.00 41.60 C22.60 41.00 23.40 40.00 24.60 39.40 C27.00 38.20 29.60 38.40 32.00 38.60 L32.00 34.40 M32.00 34.40 C36.60 34.00 41.60 35.20 44.20 39.20 C45.10 40.80 44.40 42.00 43.00 41.60 C41.40 41.00 40.60 40.00 39.40 39.40 C37.00 38.20 34.40 38.40 32.00 38.60 L32.00 34.40 Z" fill="#ffffff" fill-rule="nonzero"/>
+  <ellipse cx="32" cy="23.7" rx="21" ry="4.7" fill="#3a2694"/>
+  <path d="M15.20 23.60 C18.40 15.00 23.40 7.60 30.20 4.40 C35.00 2.40 40.20 4.60 38.80 8.60 C38.00 11.00 35.60 12.20 33.80 12.80 C39.40 15.60 45.20 19.00 48.80 23.60 C43.00 26.40 21.00 26.40 15.20 23.60 Z" fill="url(#felt)"/>
+  <path d="M17.27 18.75 L18.33 18.53 L19.60 18.31 L20.94 18.10 L22.35 17.92 L23.83 17.77 L25.36 17.64 L26.95 17.54 L28.59 17.46 L30.28 17.42 L32.00 17.40 L33.72 17.42 L35.41 17.46 L37.05 17.54 L38.64 17.64 L40.17 17.77 L41.65 17.92 L42.83 18.07 L43.15 18.30 L44.21 19.10 L45.23 19.94 L46.21 20.80 L47.13 21.70 L48.00 22.63 L48.80 23.60 L48.25 23.84 L47.61 24.07 L46.91 24.28 L46.13 24.47 L45.29 24.65 L44.39 24.82 L43.44 24.97 L42.44 25.11 L41.39 25.23 L40.30 25.34 L39.18 25.44 L38.03 25.52 L36.85 25.58 L35.66 25.63 L34.45 25.67 L33.23 25.69 L32.00 25.70 L30.77 25.69 L29.55 25.67 L28.34 25.63 L27.15 25.58 L25.97 25.52 L24.82 25.44 L23.70 25.34 L22.61 25.23 L21.56 25.11 L20.56 24.97 L19.61 24.82 L18.71 24.65 L17.87 24.47 L17.09 24.28 L16.39 24.07 L15.75 23.84 L15.20 23.60 L15.72 22.25 L16.27 20.93 L16.85 19.63 L17.27 18.75 Z" fill="#f0c04a"/>
+  <path d="M32.00 18.60 L32.67 20.67 L34.85 20.67 L33.09 21.95 L33.76 24.03 L32.00 22.75 L30.24 24.03 L30.91 21.95 L29.15 20.67 L31.33 20.67 L32.00 18.60 Z" fill="#fff3cf"/>
+  <circle cx="32" cy="32" r="28.9" fill="none" stroke="#7b5cf0" stroke-width="2.2"/>
+</svg>
