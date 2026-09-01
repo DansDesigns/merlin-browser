@@ -145,7 +145,7 @@ echo "  ==========================================================="
 
 [[ -f "$SRC/merlin/app.py" ]] || { say "Run this from the extracted folder."; exit 1; }
 
-SRC_VERSION="$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' "$SRC/merlin/brand.py" | head -1)"
+SRC_VERSION="$(head -1 "$SRC/version.txt" 2>/dev/null | tr -d '\r' | awk '{print $1}')"
 say "Installing version ${SRC_VERSION:-unknown} from $SRC"
 
 # ------------------------------------------------------------------ python

@@ -57,10 +57,13 @@ echo   If this window closes on its own, open a Command Prompt, change to
 echo   this folder and run install.bat from there: the error stays on screen.
 echo.
 
-rem Plain findstr, no nested quoting. brand.py contains: APP_VERSION = "1.5.7"
-rem so token 3 is the quoted version and %%~v strips the quotes.
+rem The version comes from version.txt, whose first line is the version.
 set "SRCVER="
-for /f "tokens=3" %%v in ('findstr /b /c:"APP_VERSION = " "%SRC%\merlin\brand.py" 2^>nul') do set "SRCVER=%%~v"
+if exist "%SRC%\version.txt" (
+  for /f "usebackq tokens=1 delims= " %%v in ("%SRC%\version.txt") do (
+    if not defined SRCVER set "SRCVER=%%v"
+  )
+)
 if defined SRCVER echo   Installing version %SRCVER% from %SRC%
 echo.
 
@@ -356,33 +359,89 @@ call :bar
 )
 del "%PS1%" >nul 2>&1
 
-rem ------------------------------------------------------- icon cache
-rem Windows keeps a cache of icons keyed by executable path. Merlin.exe existed
-rem in earlier installs carrying the interpreter's icon, so the cache holds that
-rem against this path and keeps serving it even though the file now has the
-rem right icon embedded and the shortcut points at it. Rebuilding the cache is
-rem the only thing that shifts it.
-echo.
-echo        Refreshing the Windows icon cache
-ie4uinit.exe -show >nul 2>&1
-if errorlevel 1 ie4uinit.exe -ClearIconCache >nul 2>&1
-del /f /q "%LOCALAPPDATA%\IconCache.db" >nul 2>&1
-del /f /q "%LOCALAPPDATA%\Microsoft\Windows\Explorer\iconcache*.db" >nul 2>&1
-call :bar
+rem Stamp the App User Model ID onto each shortcut. Windows ties a running
+rem window to a shortcut carrying the same ID, and then uses that shortcut's
+rem icon for the taskbar button. WScript.Shell cannot write this property, so
+rem it needs the shell property store. Entirely best effort: the shortcuts
+rem already work without it and nothing here can undo them.
+set "PS2=%TEMP%\merlin-appid.ps1"
+> "%PS2%" echo $ErrorActionPreference = 'SilentlyContinue'
+>>"%PS2%" echo $code = @'
+>>"%PS2%" echo using System;
+>>"%PS2%" echo using System.Runtime.InteropServices;
+>>"%PS2%" echo namespace MerlinShell {
+>>"%PS2%" echo   [ComImport, Guid("00021401-0000-0000-C000-000000000046")]
+>>"%PS2%" echo   public class ShellLink { }
+>>"%PS2%" echo   [ComImport, Guid("0000010b-0000-0000-C000-000000000046"),
+>>"%PS2%" echo    InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+>>"%PS2%" echo   public interface IPersistFile {
+>>"%PS2%" echo     void GetClassID(out Guid id);
+>>"%PS2%" echo     [PreserveSig] int IsDirty();
+>>"%PS2%" echo     void Load([MarshalAs(UnmanagedType.LPWStr)] string f, uint m);
+>>"%PS2%" echo     void Save([MarshalAs(UnmanagedType.LPWStr)] string f, [MarshalAs(UnmanagedType.Bool)] bool r);
+>>"%PS2%" echo     void SaveCompleted([MarshalAs(UnmanagedType.LPWStr)] string f);
+>>"%PS2%" echo     void GetCurFile([MarshalAs(UnmanagedType.LPWStr)] out string f);
+>>"%PS2%" echo   }
+>>"%PS2%" echo   [StructLayout(LayoutKind.Sequential, Pack = 4)]
+>>"%PS2%" echo   public struct PropertyKey { public Guid fmtid; public uint pid; }
+>>"%PS2%" echo   [StructLayout(LayoutKind.Explicit)]
+>>"%PS2%" echo   public struct PropVariant {
+>>"%PS2%" echo     [FieldOffset(0)] public ushort vt;
+>>"%PS2%" echo     [FieldOffset(8)] public IntPtr p;
+>>"%PS2%" echo   }
+>>"%PS2%" echo   [ComImport, Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99"),
+>>"%PS2%" echo    InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+>>"%PS2%" echo   public interface IPropertyStore {
+>>"%PS2%" echo     void GetCount(out uint c);
+>>"%PS2%" echo     void GetAt(uint i, out PropertyKey k);
+>>"%PS2%" echo     void GetValue(ref PropertyKey k, out PropVariant v);
+>>"%PS2%" echo     void SetValue(ref PropertyKey k, ref PropVariant v);
+>>"%PS2%" echo     void Commit();
+>>"%PS2%" echo   }
+>>"%PS2%" echo   public static class Stamp {
+>>"%PS2%" echo     public static void Apply(string lnk, string appId) {
+>>"%PS2%" echo       var link = new ShellLink();
+>>"%PS2%" echo       ((IPersistFile)link).Load(lnk, 2);
+>>"%PS2%" echo       var store = (IPropertyStore)link;
+>>"%PS2%" echo       var key = new PropertyKey();
+>>"%PS2%" echo       key.fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");
+>>"%PS2%" echo       key.pid = 5;
+>>"%PS2%" echo       var val = new PropVariant();
+>>"%PS2%" echo       val.vt = 31;
+>>"%PS2%" echo       val.p = Marshal.StringToCoTaskMemUni(appId);
+>>"%PS2%" echo       store.SetValue(ref key, ref val);
+>>"%PS2%" echo       store.Commit();
+>>"%PS2%" echo       ((IPersistFile)link).Save(lnk, true);
+>>"%PS2%" echo       Marshal.FreeCoTaskMem(val.p);
+>>"%PS2%" echo     }
+>>"%PS2%" echo   }
+>>"%PS2%" echo }
+>>"%PS2%" echo '@
+>>"%PS2%" echo Add-Type -TypeDefinition $code ^| Out-Null
+>>"%PS2%" echo $id = 'DansDesigns.Merlin.Browser'
+>>"%PS2%" echo $targets = @()
+>>"%PS2%" echo $targets += (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Merlin Browser.lnk')
+>>"%PS2%" echo $targets += (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Merlin Browser (Frameless).lnk')
+>>"%PS2%" echo $pinned = Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'
+>>"%PS2%" echo if (Test-Path $pinned) { $targets += (Get-ChildItem $pinned -Filter *.lnk ^| ForEach-Object { $_.FullName }) }
+>>"%PS2%" echo foreach ($t in $targets) {
+>>"%PS2%" echo   if (Test-Path $t) {
+>>"%PS2%" echo     try { [MerlinShell.Stamp]::Apply($t, $id); Write-Output ("        tagged " + [IO.Path]::GetFileName($t)) } catch { }
+>>"%PS2%" echo   }
+>>"%PS2%" echo }
 
+echo        Tagging shortcuts so Windows links them to the running window
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PS2%" 2>nul
+del "%PS2%" >nul 2>&1
+
+rem ------------------------------------------------------- icon cache
+rem Ask the shell to rebuild its icon cache. This is a request to Explorer, it
+rem does not stop or restart anything. An earlier version of this installer
+rem killed explorer.exe to force the refresh, which is not acceptable in an
+rem installer and has been removed.
 echo.
-echo        Explorer has to restart to pick up the rebuilt cache. Your windows
-echo        and files stay open; only the taskbar and desktop redraw.
-choice /c YN /n /m "        Restart Explorer now? [Y/N] "
-if errorlevel 2 (
-  echo        Skipped. If the taskbar still shows the old icon, sign out and
-  echo        back in, or run: ie4uinit.exe -show
-) else (
-  taskkill /f /im explorer.exe >nul 2>&1
-  timeout /t 1 >nul
-  start explorer.exe
-  echo        Explorer restarted.
-)
+echo        Asking Windows to refresh its icon cache
+ie4uinit.exe -show >nul 2>&1
 call :bar
 
 rem ----------------------------------------------------------------- 5. PATH

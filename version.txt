@@ -1,1 +1,5 @@
-0.56
+1.5.1
+Fixes the Windows icon step, which ran before the application files were
+copied and so never embedded anything. The installer progress bar now uses
+the console window height rather than the scrollback height, and every step
+prints the command it runs.

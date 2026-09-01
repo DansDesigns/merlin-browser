@@ -57,8 +57,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+APP_ID = "DansDesigns.Merlin.Browser"
+
+
 def set_windows_app_id() -> None:
-    """Claim a distinct taskbar identity. Off unless asked for.
+    """Claim the taskbar identity the installer stamped on the shortcuts.
 
     An explicit Application User Model ID makes Windows resolve a taskbar
     button's icon by looking for a Start Menu shortcut carrying the same ID,
@@ -73,7 +76,7 @@ def set_windows_app_id() -> None:
 
     Set MERLIN_APP_ID=1 if you want an explicit one anyway.
     """
-    if os.name != "nt" or os.environ.get("MERLIN_APP_ID") != "1":
+    if os.name != "nt" or os.environ.get("MERLIN_APP_ID") == "0":
         return
     try:
         import ctypes
@@ -81,7 +84,11 @@ def set_windows_app_id() -> None:
 
         from .brand import APP_NAME, APP_VERSION
 
-        app_id = f"DansDesigns.{APP_NAME}.Browser.{APP_VERSION.split('.')[0]}"
+        # Must match the id the installer stamps onto the shortcuts, or
+        # Windows has nothing to tie the running window to. No version in it:
+        # the id has to stay the same across updates or every release would
+        # look like a different application and pin separately.
+        app_id = APP_ID
         func = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
         func.argtypes = [wintypes.LPCWSTR]
         func.restype = ctypes.HRESULT
@@ -153,8 +160,8 @@ def run_icon_check() -> int:
         else:
             verdict = "NOT PRESENT: this executable still has its original icon"
         print("Icon in the exe:", verdict)
-        print("App ID         :", "set" if os.environ.get("MERLIN_APP_ID") == "1"
-              else "not set (Merlin.exe provides the identity)")
+        print("App ID         :", "not set (MERLIN_APP_ID=0)"
+              if os.environ.get("MERLIN_APP_ID") == "0" else APP_ID)
         probe = QWidget()
         probe.setWindowTitle("Merlin icon check")
         probe.resize(200, 100)
@@ -281,6 +288,17 @@ def main(argv: list[str] | None = None) -> int:
     from PyQt6.QtWidgets import QApplication
 
     mark("Qt imported")
+    # Hand over to a Merlin already running, unless this is meant to be its
+    # own session. Done before QApplication so the second process costs almost
+    # nothing when it is only carrying a link.
+    share = (settings.get("single_instance", True)
+             and not args.private and not args.tor and not args.app)
+    if share:
+        from . import single
+
+        if single.hand_off(list(args.urls), args.profile):
+            return 0
+
     app = QApplication([sys.argv[0]])
     mark("QApplication created")
     app.setApplicationName("Merlin Browser")
@@ -395,6 +413,14 @@ def main(argv: list[str] | None = None) -> int:
             window.tabs.setCurrentIndex(0)
     if not opened:
         window.new_tab(settings.get("home_page"))
+
+    if share:
+        from . import single
+
+        instance_server = single.InstanceServer(args.profile, app)
+        if instance_server.listen():
+            instance_server.urls_received.connect(window.adopt_urls)
+            app.setProperty("merlin_instance_server", instance_server)
 
     window.show()
 

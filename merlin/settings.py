@@ -100,6 +100,7 @@ DEFAULTS = {
     "custom_search_url": "",           # must contain {} where the query goes
     "search_keywords_enabled": True,
     "restore_session": True,
+    "single_instance": True,           # links reuse the window already open
     "last_session": [],
     "default_zoom": 1.0,
     # --- privacy / shields ---

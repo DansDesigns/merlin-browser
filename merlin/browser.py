@@ -299,11 +299,19 @@ class BrowserWindow(QMainWindow):
         self.btn_bookmarks.setMenu(self.bookmarks_menu)
         self.toolbar.addWidget(self.btn_bookmarks)
 
+        self.btn_downloads = QToolButton(self)
+        self.btn_downloads.setToolTip("Downloads (Ctrl+J)")
+        self.btn_downloads.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.downloads_menu = QMenu(self)
+        self.btn_downloads.setMenu(self.downloads_menu)
+
         self.btn_menu = QToolButton(self)
         self.btn_menu.setToolTip("Menu")
         self.btn_menu.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.btn_menu.setMenu(self._main_menu())
         self.toolbar.addWidget(self.btn_menu)
+        self.toolbar.addWidget(self.btn_downloads)
 
         self.window_buttons = WindowButtons(self, self)
         self.window_buttons_action = self.toolbar.addWidget(self.window_buttons)
@@ -337,6 +345,8 @@ class BrowserWindow(QMainWindow):
 
         self.apply_icons()
         self._fill_bookmarks_menu()
+        self.downloads: list[dict] = []
+        self._fill_downloads_menu()
 
         self.status = self.statusBar()
         self.status_label = QLabel("", self)
@@ -474,6 +484,7 @@ class BrowserWindow(QMainWindow):
             ("Ctrl+Shift+D", lambda: self.settings.toggle("hide_window_decorations")),
             ("Ctrl+Shift+L", lambda: self.settings.toggle("dark_ui")),
             ("Ctrl+Shift+I", lambda: self.toggle_pin()),
+            ("Ctrl+J", self.show_downloads),
             ("Ctrl+F", self.show_find),
             ("Escape", self.on_escape),
             ("Ctrl+D", self.toggle_bookmark),
@@ -554,6 +565,7 @@ class BrowserWindow(QMainWindow):
             if name:
                 self.tabs.setTabIcon(i, icons.themed_icon(name, dark, 16))
         self.btn_bookmarks.setIcon(icons.themed_icon("bookmarks", dark))
+        self.btn_downloads.setIcon(icons.themed_icon("download", dark))
         self.btn_shields.setIcon(icons.themed_icon("shield", dark))
         self._update_bookmark_button()
         for button, name in (
@@ -794,6 +806,17 @@ class BrowserWindow(QMainWindow):
             f"{name} was added to your applications.\n\n"
             "It opens in its own window, without browser chrome, and always "
             "loads the live site.")
+
+    def adopt_urls(self, urls: list) -> None:
+        """Open URLs handed over by another instance, and come to the front."""
+        for url in urls:
+            self.new_tab(url)
+        if not urls:
+            self.new_tab()
+        if self.isMinimized():
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
 
     def toggle_pin(self, index: int | None = None) -> None:
         """Pin or unpin a tab, holding it at the start of the strip."""
@@ -1492,6 +1515,59 @@ class BrowserWindow(QMainWindow):
         super().closeEvent(event)
 
     # ------------------------------------------------------------ downloads
+    def _fill_downloads_menu(self) -> None:
+        """Rebuild the downloads list.
+
+        Built when downloads change rather than from aboutToShow: clearing a
+        menu while it is opening deletes actions the popup is still using.
+        """
+        menu = self.downloads_menu
+        if menu.isVisible():
+            return
+        menu.clear()
+        dark = bool(self.settings.get("dark_ui"))
+        if not self.downloads:
+            empty = menu.addAction("No downloads yet")
+            empty.setEnabled(False)
+        for item in reversed(self.downloads[-20:]):
+            name = os.path.basename(item["path"])
+            state = item["state"]
+            label = name if state == "done" else f"{name}  ({state})"
+            action = menu.addAction(icons.themed_icon("download", dark), label)
+            action.setToolTip(item["path"])
+            if state == "done":
+                action.triggered.connect(
+                    lambda _c=False, p=item["path"]: self.open_download(p))
+            else:
+                action.setEnabled(False)
+        if self.downloads:
+            menu.addSeparator()
+            folder = menu.addAction("Open downloads folder")
+            folder.triggered.connect(self.open_downloads_folder)
+            clear = menu.addAction("Clear list")
+            clear.triggered.connect(self.clear_downloads)
+
+    def open_download(self, path: str) -> None:
+        if os.path.exists(path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        else:
+            self.status_label.setText("That file has been moved or deleted")
+
+    def open_downloads_folder(self) -> None:
+        folder = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DownloadLocation)
+        if self.downloads:
+            folder = os.path.dirname(self.downloads[-1]["path"]) or folder
+        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+
+    def clear_downloads(self) -> None:
+        self.downloads.clear()
+        self._fill_downloads_menu()
+
+    def show_downloads(self) -> None:
+        self._fill_downloads_menu()
+        self.btn_downloads.showMenu()
+
     def handle_download(self, download) -> None:
         default_dir = QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.DownloadLocation) or os.path.expanduser("~")
@@ -1504,11 +1580,15 @@ class BrowserWindow(QMainWindow):
         download.setDownloadDirectory(os.path.dirname(path))
         download.setDownloadFileName(os.path.basename(path))
         download.accept()
+        entry = {"path": path, "state": "downloading"}
+        self.downloads.append(entry)
+        self._fill_downloads_menu()
         self.status_label.setText(f"Downloading {os.path.basename(path)}...")
 
         def finished():
+            entry["state"] = "done"
+            self._fill_downloads_menu()
             self.status_label.setText(f"Saved {os.path.basename(path)}")
-            QDesktopServices.setUrlHandler  # no-op reference, keeps linters quiet
 
         download.isFinishedChanged.connect(finished)
 

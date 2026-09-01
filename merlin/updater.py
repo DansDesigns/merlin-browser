@@ -25,7 +25,7 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal
 from .brand import APP_VERSION
 
 REPO_OWNER = "DansDesigns"
-REPO_NAME = "merlin_browser"
+REPO_NAME = "merlin-browser"
 REPO_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}"
 RELEASES_URL = f"{REPO_URL}/releases"
 

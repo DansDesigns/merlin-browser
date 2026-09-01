@@ -52,6 +52,9 @@ PATHS = {
                  '<path d="M8.5 5.5 H18.5 V15.5" ' + _STROKE + '/>'),
     "play":     ('<path d="M8 5.5 L18 12 L8 18.5 Z" fill="{c}" stroke="{c}" '
                  'stroke-width="1.5" stroke-linejoin="round"/>'),
+    "download": ('<path d="M12 4 V15" ' + _STROKE + '/>'
+                 '<path d="M7.5 11 L12 15.5 L16.5 11" ' + _STROKE + '/>'
+                 '<path d="M5 19 H19" ' + _STROKE + '/>'),
     "search":   ('<circle cx="11" cy="11" r="6" ' + _STROKE + '/>'
                  '<path d="M15.5 15.5 L20 20" ' + _STROKE + '/>'),
 }
