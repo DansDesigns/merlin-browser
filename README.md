@@ -6,7 +6,7 @@ Merlin is a browser shell: the interface, tab handling, content blocking, media
 handling and privacy policy are its own, while page rendering is done by
 Chromium through Qt WebEngine.
 
-![version](https://img.shields.io/badge/version-1.5.45-6f8ff0)
+![version](https://img.shields.io/badge/version-0.56-6f8ff0)
 
 ## Features
 
