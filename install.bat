@@ -14,6 +14,32 @@ rem ===========================================================================
 
 title Merlin Browser installer
 set "TOTAL_STEPS=7"
+set "CUR_STEP=0"
+set "CUR_LABEL=Starting"
+
+rem Grab an ESC character so the bar can be pinned to the bottom line with a
+rem scroll region, the same way the Linux installer does it. Windows 10 and 11
+rem consoles understand these; if yours does not, VT_OK stays 0 and the bar is
+rem simply printed under each step instead.
+set "ESC="
+for /f %%e in ('echo prompt $E ^| cmd') do set "ESC=%%e"
+set "VT_OK=0"
+if defined ESC set "VT_OK=1"
+rem The window height, not the buffer height. "mode con" reports Lines: 9001
+rem for the scrollback buffer, and reserving line 9001 puts the bar somewhere
+rem off screen, which is why it vanished as soon as output scrolled.
+set "ROWS="
+for /f "usebackq tokens=*" %%r in (`powershell -NoProfile -Command "$Host.UI.RawUI.WindowSize.Height" 2^>nul`) do set "ROWS=%%r"
+if not defined ROWS set "ROWS=25"
+if %ROWS% LSS 10 set "ROWS=25"
+set /a "SCROLL_ROWS=ROWS-1"
+if "%VT_OK%"=="1" (
+  rem The scrolling region must END one line above the bar. Setting it to
+  rem 1;ROWS included the bar's own line, so pip's output scrolled straight
+  rem over it and the bar was lost as soon as anything long printed.
+  <nul set /p "=%ESC%[1;%SCROLL_ROWS%r"
+  <nul set /p "=%ESC%[1;1H"
+)
 
 set "SRC=%~dp0"
 if "%SRC:~-1%"=="\" set "SRC=%SRC:~0,-1%"
@@ -24,8 +50,18 @@ set "STARTMENU=%APPDATA%\Microsoft\Windows\Start Menu\Programs"
 echo.
 echo  ===========================================================
 echo    Merlin Browser
-echo    Chromium engine, no Rust, real media player
+echo    Chromium engine, tabbed, with a built-in content blocker
 echo  ===========================================================
+echo.
+echo   If this window closes on its own, open a Command Prompt, change to
+echo   this folder and run install.bat from there: the error stays on screen.
+echo.
+
+rem Plain findstr, no nested quoting. brand.py contains: APP_VERSION = "1.5.7"
+rem so token 3 is the quoted version and %%~v strips the quotes.
+set "SRCVER="
+for /f "tokens=3" %%v in ('findstr /b /c:"APP_VERSION = " "%SRC%\merlin\brand.py" 2^>nul') do set "SRCVER=%%~v"
+if defined SRCVER echo   Installing version %SRCVER% from %SRC%
 echo.
 
 if not exist "%SRC%\merlin\app.py" (
@@ -84,42 +120,42 @@ set "VPYW=%VENV%\Scripts\pythonw.exe"
 
 call :step 2 "Creating an isolated environment"
 echo        %VENV%
-if exist "%VENV%" rmdir /s /q "%VENV%"
+if exist "%VENV%" (
+  echo        Removing the previous environment first...
+  rmdir /s /q "%VENV%"
+)
 mkdir "%TARGET%" 2>nul
-echo        This takes a few seconds...
+echo        This takes a few seconds.
+echo        $ %PY% -m venv "%VENV%"
 %PY% -m venv "%VENV%"
 if errorlevel 1 goto :venvfail
 if not exist "%VPY%" goto :venvfail
 echo        Created.
+call :bar
 
 call :step 3 "Installing PyQt6 and the web engine, about 150 MB"
 echo        pip prints its own progress below. This is the slow part,
 echo        usually one to three minutes depending on your connection.
 echo.
-echo        Updating pip inside the environment...
-"%VPY%" -m pip install --quiet --upgrade pip >nul 2>&1
+echo        Updating pip inside the environment
+echo        $ "%VPY%" -m pip install --upgrade pip
+"%VPY%" -m pip install --upgrade pip
+call :bar
+echo.
+echo        Downloading and installing PyQt6 and Qt WebEngine
+echo        $ "%VPY%" -m pip install PyQt6 PyQt6-WebEngine
 "%VPY%" -m pip install --progress-bar on PyQt6 PyQt6-WebEngine
 if errorlevel 1 goto :pipfail
-"%VPY%" -c "import PyQt6.QtWebEngineWidgets" >nul 2>&1
+call :bar
+echo.
+echo        Checking the engine imports
+"%VPY%" -c "import PyQt6.QtWebEngineWidgets; from PyQt6.QtCore import QT_VERSION_STR; print('        Qt ' + QT_VERSION_STR + ' ready')"
 if errorlevel 1 goto :pipfail
-echo        Engine installed and importable.
 
-rem A normal Windows application is an .exe the shortcut points at directly.
-rem pythonw.exe copied alongside its own DLLs inside the venv's Scripts folder
-rem is exactly that: same interpreter, but its own process name, its own
-rem taskbar identity, and something Windows can actually pin.
-set "MERLINEXE=%VENV%\Scripts\Merlin.exe"
-set "MERLINCON=%VENV%\Scripts\Merlin-console.exe"
-copy /y "%VPYW%" "%MERLINEXE%" >nul 2>&1
-copy /y "%VPY%"  "%MERLINCON%" >nul 2>&1
-if not exist "%MERLINEXE%" (
-  echo        Could not create Merlin.exe; falling back to pythonw.exe.
-  set "MERLINEXE=%VPYW%"
-)
-if not exist "%MERLINCON%" set "MERLINCON=%VPY%"
 goto :depsdone
 
 :venvfail
+call :endui
 echo.
 echo  [X] Could not create the virtualenv. Check that the venv module exists:
 echo          %PY% -m venv --help
@@ -128,6 +164,7 @@ pause
 exit /b 1
 
 :pipfail
+call :endui
 echo.
 echo  [X] Could not install PyQt6. Run this by hand to see why:
 echo          "%VPY%" -m pip install PyQt6 PyQt6-WebEngine
@@ -141,14 +178,17 @@ rem ----------------------------------------------------------------- 4. copy
 call :step 4 "Copying files to %TARGET%"
 if exist "%APPDIR%" rmdir /s /q "%APPDIR%"
 mkdir "%APPDIR%" 2>nul
-xcopy /e /i /q /y "%SRC%\merlin" "%APPDIR%\merlin" >nul
+echo        $ xcopy "%SRC%\merlin" "%APPDIR%\merlin"
+xcopy /e /i /y "%SRC%\merlin" "%APPDIR%\merlin" | findstr /v /c:"File(s) copied"
 if errorlevel 1 (
+  call :endui
   echo  [X] Copy failed.
   pause
   exit /b 1
 )
 copy /y "%SRC%\merlin-run.py" "%APPDIR%\merlin-run.py" >nul
 if errorlevel 1 (
+  call :endui
   echo  [X] merlin-run.py is missing from the download.
   pause
   exit /b 1
@@ -161,6 +201,42 @@ if exist "%SRC%\uninstall.bat" copy /y "%SRC%\uninstall.bat" "%TARGET%\uninstall
 rem merlin-run.py puts its own folder on sys.path, so there is no .pth file,
 rem no PYTHONPATH and no site-packages lookup to go wrong.
 set "RUNPY=%APPDIR%\merlin-run.py"
+
+rem Merlin.exe: a copy of the interpreter, so the browser runs as its own
+rem application rather than as Python. Built here, after the app files exist,
+rem because the icon has to be written into it straight away and RUNPY only
+rem exists at this point.
+set "MERLINEXE=%VENV%\Scripts\Merlin.exe"
+set "MERLINCON=%VENV%\Scripts\Merlin-console.exe"
+echo.
+echo        Creating Merlin.exe
+copy /y "%VPYW%" "%MERLINEXE%" >nul 2>&1
+copy /y "%VPY%"  "%MERLINCON%" >nul 2>&1
+if not exist "%MERLINEXE%" (
+  echo.
+  echo  [!] Merlin.exe could not be created. Windows will show the Python icon
+  echo      because the browser will be running as pythonw.exe. This is almost
+  echo      always antivirus blocking the copy of an executable.
+  echo      Allow %VENV%\Scripts and run this installer again.
+  echo.
+  set "MERLINEXE=%VPYW%"
+  set "MERLINCON=%VPY%"
+) else (
+  echo        Created %MERLINEXE%
+  rem Nothing has run Merlin.exe yet, so it cannot be locked: write the icon in
+  rem now, before the verification step below executes it for the first time.
+  echo        Writing the Merlin icon into it
+  "%VPY%" "%RUNPY%" --embed-icon "%MERLINEXE%"
+  if errorlevel 1 (
+    echo.
+    echo  [!] The icon could not be written into Merlin.exe. The taskbar will
+    echo      fall back to the interpreter's icon. Settings, Advanced shows the
+    echo      current state.
+    echo.
+  )
+)
+call :bar
+
 
 > "%TARGET%\merlin-browser.cmd" (
   echo @echo off
@@ -187,11 +263,14 @@ set "RUNPY=%APPDIR%\merlin-run.py"
 echo        Done.
 
 rem prove it actually starts before promising the user a Start Menu entry
+
 echo.
-echo        Verifying that Merlin starts...
-"%VPY%" "%RUNPY%" --version >nul 2>&1
+echo        Verifying that Merlin starts
+echo        $ "%MERLINCON%" "%RUNPY%" --version
+"%MERLINCON%" "%RUNPY%" --version
 if errorlevel 1 (
   echo.
+  call :endui
   echo  [X] Merlin will not start. The error was:
   echo.
   "%VPY%" "%RUNPY%" --version
@@ -245,6 +324,25 @@ set "PS1=%TEMP%\merlin-shortcuts.ps1"
 >>"%PS1%" echo     New-MerlinShortcut ([Environment]::GetFolderPath('Desktop') + '\Merlin Browser.lnk') ($q + $runpy + $q) 'Merlin Browser'
 >>"%PS1%" echo }
 
+rem Refresh any existing pinned taskbar entry as well. Pinning copies the
+rem shortcut into User Pinned\TaskBar, which the installer has never touched,
+rem so a pin made against an older build kept pointing at the old target and
+rem showing the old icon however many times Merlin was reinstalled.
+>>"%PS1%" echo $pinned = Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'
+>>"%PS1%" echo if (Test-Path $pinned) {
+>>"%PS1%" echo     Get-ChildItem -Path $pinned -Filter *.lnk ^| ForEach-Object {
+>>"%PS1%" echo         $existing = $shell.CreateShortcut($_.FullName)
+>>"%PS1%" echo         if ($existing.TargetPath -like '*Merlin*' -or $existing.Arguments -like '*merlin-run.py*') {
+>>"%PS1%" echo             $existing.TargetPath   = $exe
+>>"%PS1%" echo             $existing.Arguments    = $q + $runpy + $q
+>>"%PS1%" echo             $existing.WorkingDirectory = $work
+>>"%PS1%" echo             $existing.IconLocation = $ico
+>>"%PS1%" echo             $existing.Save()
+>>"%PS1%" echo             Write-Output ("        refreshed pinned entry " + $_.Name)
+>>"%PS1%" echo         }
+>>"%PS1%" echo     }
+>>"%PS1%" echo }
+
 powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%"
 if errorlevel 1 (
   echo.
@@ -254,14 +352,45 @@ if errorlevel 1 (
   echo.
 ) else (
   echo        Each shortcut was read back and its target confirmed to exist.
+call :bar
 )
 del "%PS1%" >nul 2>&1
+
+rem ------------------------------------------------------- icon cache
+rem Windows keeps a cache of icons keyed by executable path. Merlin.exe existed
+rem in earlier installs carrying the interpreter's icon, so the cache holds that
+rem against this path and keeps serving it even though the file now has the
+rem right icon embedded and the shortcut points at it. Rebuilding the cache is
+rem the only thing that shifts it.
+echo.
+echo        Refreshing the Windows icon cache
+ie4uinit.exe -show >nul 2>&1
+if errorlevel 1 ie4uinit.exe -ClearIconCache >nul 2>&1
+del /f /q "%LOCALAPPDATA%\IconCache.db" >nul 2>&1
+del /f /q "%LOCALAPPDATA%\Microsoft\Windows\Explorer\iconcache*.db" >nul 2>&1
+call :bar
+
+echo.
+echo        Explorer has to restart to pick up the rebuilt cache. Your windows
+echo        and files stay open; only the taskbar and desktop redraw.
+choice /c YN /n /m "        Restart Explorer now? [Y/N] "
+if errorlevel 2 (
+  echo        Skipped. If the taskbar still shows the old icon, sign out and
+  echo        back in, or run: ie4uinit.exe -show
+) else (
+  taskkill /f /im explorer.exe >nul 2>&1
+  timeout /t 1 >nul
+  start explorer.exe
+  echo        Explorer restarted.
+)
+call :bar
 
 rem ----------------------------------------------------------------- 5. PATH
 call :step 6 "Adding Merlin to your user PATH"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
  "$p=[Environment]::GetEnvironmentVariable('Path','User'); if ($p -notlike '*%TARGET%*') { [Environment]::SetEnvironmentVariable('Path', ($p.TrimEnd(';') + ';%TARGET%'), 'User') }" >nul 2>&1
 echo        Open a new terminal before using the merlin-browser command.
+call :bar
 
 rem --------------------------------------------------------------- 6. player
 call :step 7 "Looking for a media player"
@@ -298,13 +427,17 @@ echo        Found %PLAYER%. H.264, HEVC and AAC will play through it.
 rem ------------------------------------------------------------------- done
 echo.
 echo  ===========================================================
-echo    Installed to %TARGET%
+echo    Installed version %SRCVER% to %TARGET%
 echo  ===========================================================
 echo.
 echo    Launch           Start Menu, or:  merlin-browser
 echo    No decorations   merlin-browser --no-decorations
 echo    Codec report     merlin-console --codecs
 echo    If it won't start      "%TARGET%\merlin-debug.cmd"
+echo.
+echo    If a pinned taskbar entry still shows the old icon, unpin and re-pin
+echo    it once. Windows caches icons against the pinned shortcut as well as
+echo    the executable, and only re-pinning clears that one.
 echo    Icon diagnostics       merlin-console --icon-check
 echo    Uninstall        "%TARGET%\uninstall.bat"
 echo.
@@ -317,27 +450,51 @@ if errorlevel 2 goto :finish
 start "" "%MERLINEXE%" "%RUNPY%"
 :finish
 
+call :endui
 echo.
 echo  Done.
-timeout /t 3 >nul
+echo.
+pause
 endlocal
 exit /b 0
 
 rem --------------------------------------------------------------------------
-rem  :step <number> <label>
-rem  Prints a heading and a progress bar, so the window is never just a cursor.
+rem  :bar   redraw the pinned bar with the current step and label
 rem --------------------------------------------------------------------------
-:step
+:bar
 setlocal EnableDelayedExpansion
-set /a "num=%~1"
+set /a "num=%CUR_STEP%"
 set /a "pct=num*100/%TOTAL_STEPS%"
 set /a "filled=num*34/%TOTAL_STEPS%"
-set "bar="
+set "track="
 for /l %%i in (1,1,34) do (
-  if %%i leq !filled! (set "bar=!bar!#") else (set "bar=!bar!.")
+  if %%i leq !filled! (set "track=!track!#") else (set "track=!track!.")
 )
+if "%VT_OK%"=="1" (
+  <nul set /p "=!ESC!7!ESC![%ROWS%;1H!ESC![2K  [!track!] !pct!%%  %CUR_LABEL%!ESC!8"
+)
+title Merlin installer  [!track!] !pct!%%  -  %CUR_LABEL%
+endlocal
+goto :eof
+
+rem --------------------------------------------------------------------------
+rem  :step <number> <label>
+rem  Heading in the scrolling area, bar pinned on the reserved bottom line.
+rem --------------------------------------------------------------------------
+:step
+set "CUR_STEP=%~1"
+set "CUR_LABEL=%~2"
 echo.
 echo  [%~1/%TOTAL_STEPS%] %~2
-echo  [!bar!] !pct!%%
-endlocal
+call :bar
+goto :eof
+
+rem --------------------------------------------------------------------------
+rem  :endui   release the scroll region and clear the pinned line
+rem --------------------------------------------------------------------------
+:endui
+if "%VT_OK%"=="1" (
+  <nul set /p "=%ESC%7%ESC%[%ROWS%;1H%ESC%[2K%ESC%8%ESC%[r"
+)
+title Merlin Browser installer
 goto :eof

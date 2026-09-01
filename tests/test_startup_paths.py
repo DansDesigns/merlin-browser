@@ -120,6 +120,116 @@ late = [n for n, line in imported_at.items()
         if n in used_at and used_at[n] < line]
 check("nothing in main() is used before it is imported", not late, str(late))
 
+# --- icon resource structures, which the installer writes into Merlin.exe ---
+from merlin.winexe import build_group, parse_ico
+
+with open(path, "rb") as fh:
+    ico = fh.read()
+images = parse_ico(ico)
+check("icon parses into images", len(images) >= 5, f"{len(images)} entries")
+check("payload sizes match the directory",
+      all(len(payload) == entry["size"] for entry, payload in images))
+group = build_group(images)
+check("group directory is 6 + 14n bytes", len(group) == 6 + 14 * len(images))
+rejected = 0
+for blob in (b"", b"\x01\x00\x02\x00\x01\x00", ico[:10], ico[:len(ico)//2]):
+    try:
+        parse_ico(blob)
+    except ValueError:
+        rejected += 1
+check("malformed icons are rejected, not crashed on", rejected == 4)
+
+# --- web app shortcut text is built without touching the filesystem ---
+from merlin import webapps
+
+check("slugify strips path-hostile characters",
+      webapps.slugify("a/b c:d") == "a-b-c-d", webapps.slugify("a/b c:d"))
+check("powershell literal escapes quotes",
+      webapps._ps("it's") == "'it''s'", webapps._ps("it's"))
+
+# --- proxy flags must survive being packed into one env var -----------------
+from merlin import privacy
+
+flags = privacy.proxy_flags("socks5://127.0.0.1:9050")
+check("proxy flags contain no spaces inside a value",
+      all(" " not in f for f in flags), str(flags))
+check("no proxy flags when no proxy", privacy.proxy_flags("") == [])
+check("tor url is empty when no daemon is running",
+      privacy.tor_proxy_url(0) == "" or privacy.find_tor_port() != 0)
+
+# --- web app shortcuts are passed to PowerShell without a temp file ---------
+import base64
+
+from merlin import webapps
+
+sample = "$link.Arguments = " + webapps._ps('"C:\\a b\\run.py" --app "https://x"')
+encoded = base64.b64encode(sample.encode("utf-16-le")).decode("ascii")
+check("encoded command round trips",
+      base64.b64decode(encoded).decode("utf-16-le") == sample)
+
+import re as _re
+
+root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+
+# --- batch quoting hazards --------------------------------------------------
+# A PowerShell call with \" escapes inside a for /f broke install.bat twice:
+# cmd has no backslash escape, so the quotes ended the string early and the
+# rest of the line was parsed as commands.
+def batch_quoting_problems(text):
+    found = []
+    for number, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        if stripped.startswith("rem") or not stripped:
+            continue
+        # `if "%VAR:~-1%"=="\"` is the trailing-backslash idiom, not an escape
+        if '\\"' in line and '=="\\"' not in line.replace(" ", ""):
+            found.append((number, "backslash-escaped quote"))
+        if "for /f" in line:
+            inner = line.split("(", 1)[-1]
+            for match in _re.finditer(r"\^(.)", inner):
+                if match.group(1) not in "<>&|^":
+                    found.append((number, f"caret eats {match.group(1)!r}"))
+    return found
+
+
+for name in ("install.bat", "uninstall.bat"):
+    text = open(os.path.join(root, name), encoding="utf-8").read()
+    issues = batch_quoting_problems(text)
+    check(f"{name} has no cmd quoting hazards", not issues, str(issues))
+
+# --- installer variables must be set before they are used -------------------
+
+def first_use_before_set(text, names, set_pattern, use_pattern):
+    late = []
+    for name in names:
+        sets = [m.start() for m in _re.finditer(set_pattern.format(n=name), text)]
+        uses = [m.start() for m in _re.finditer(use_pattern.format(n=name), text)]
+        if uses and (not sets or min(uses) < min(sets)):
+            late.append(name)
+    return late
+
+
+bat = open(os.path.join(root, "install.bat"), encoding="utf-8").read()
+bat_names = sorted(set(_re.findall(r'set "([A-Z_][A-Z0-9_]*)=', bat)))
+late_bat = first_use_before_set(
+    bat, bat_names, r'set "{n}=', r'%{n}%')
+# CUR_STEP and CUR_LABEL are written by :step and read by :bar, which is a
+# subroutine defined after them; that ordering is fine.
+late_bat = [n for n in late_bat if n not in ("CUR_STEP", "CUR_LABEL", "ESC")]
+check("install.bat sets every variable before using it", not late_bat,
+      str(late_bat))
+
+# install.sh is executed during testing, so a syntax check is enough here;
+# install.bat cannot be run on this platform, which is why it gets the static
+# variable-order check above. That check exists because an empty %RUNPY% was
+# passed to the icon step, and python read the working directory as a script.
+import subprocess as _sp
+
+sh_path = os.path.join(root, "install.sh")
+syntax = _sp.run(["bash", "-n", sh_path], capture_output=True)
+check("install.sh parses", syntax.returncode == 0,
+      syntax.stderr.decode()[:120])
+
 print()
 if failures:
     print(f"{len(failures)} FAILED: {', '.join(failures)}")

@@ -9,7 +9,7 @@ from PyQt6.QtGui import QColor, QFont, QIcon
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QPlainTextEdit, QPushButton, QSizePolicy, QTabWidget, QToolButton,
+    QPlainTextEdit, QPushButton, QSizePolicy, QSlider, QTabWidget, QToolButton,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -551,19 +551,24 @@ class SettingsDialog(QDialog):
 
         corner_row = QHBoxLayout()
         corner_row.addWidget(QLabel("Page corner rounding", page))
-        self.corner_box = QComboBox(page)
-        self._corner_values = [(0, "Square"), (6, "Slight"), (10, "Rounded"),
-                               (16, "Very rounded")]
-        for _value, label in self._corner_values:
-            self.corner_box.addItem(label)
-        current_radius = int(self.settings.get("page_corner_radius", 10) or 0)
-        for i, (value, _l) in enumerate(self._corner_values):
-            if value == current_radius:
-                self.corner_box.setCurrentIndex(i)
-        self.corner_box.currentIndexChanged.connect(
-            lambda i: self.settings.set("page_corner_radius",
-                                        self._corner_values[i][0]))
-        corner_row.addWidget(self.corner_box, 1)
+        self.corner_slider = QSlider(Qt.Orientation.Horizontal, page)
+        self.corner_slider.setRange(0, 28)
+        self.corner_slider.setSingleStep(1)
+        self.corner_slider.setPageStep(2)
+        self.corner_slider.setTickInterval(4)
+        self.corner_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.corner_slider.setValue(int(self.settings.get("page_corner_radius", 10) or 0))
+        self.corner_value = QLabel("", page)
+        self.corner_value.setFixedWidth(58)
+
+        def corner_changed(value):
+            self.corner_value.setText("Square" if value == 0 else f"{value} px")
+            self.settings.set("page_corner_radius", value)
+
+        self.corner_slider.valueChanged.connect(corner_changed)
+        corner_changed(self.corner_slider.value())
+        corner_row.addWidget(self.corner_slider, 1)
+        corner_row.addWidget(self.corner_value)
         layout.addLayout(corner_row)
 
         bg_row = QHBoxLayout()
@@ -1041,6 +1046,44 @@ class SettingsDialog(QDialog):
             lambda: self.settings.set("chromium_flags", flags.text().strip()))
         form.addRow("Extra engine flags", flags)
 
+        from . import privacy
+
+        proxy_box = QComboBox(page)
+        self._proxy_modes = [
+            ("none", "No proxy"),
+            ("tor", "Tor, via a local daemon"),
+            ("custom", "Custom proxy"),
+        ]
+        for _key, label in self._proxy_modes:
+            proxy_box.addItem(label)
+        current_mode = self.settings.get("proxy_mode", "none")
+        for i, (key, _l) in enumerate(self._proxy_modes):
+            if key == current_mode:
+                proxy_box.setCurrentIndex(i)
+        proxy_box.currentIndexChanged.connect(
+            lambda i: self.settings.set("proxy_mode", self._proxy_modes[i][0]))
+        form.addRow("Proxy", proxy_box)
+
+        proxy_url = QLineEdit(self.settings.get("proxy_url"), page)
+        proxy_url.setPlaceholderText("socks5://127.0.0.1:1080")
+        proxy_url.editingFinished.connect(
+            lambda: self.settings.set("proxy_url", proxy_url.text().strip()))
+        form.addRow("Proxy address", proxy_url)
+
+        port = privacy.find_tor_port()
+        proxy_note = QLabel(
+            ("Tor daemon detected on 127.0.0.1:%d." % port if port
+             else "No local Tor daemon found on 127.0.0.1:9050 or :9150.")
+            + "\n\nRouting through Tor hides your address from sites, but it "
+              "is not Tor Browser: that also normalises screen size, fonts and "
+              "timezone so its users look alike. Merlin does not, so sites can "
+              "still fingerprint this browser.\n\n"
+              "Proxy changes take effect when Merlin restarts. A Tor window "
+              "from the menu starts its own process straight away.", page)
+        proxy_note.setWordWrap(True)
+        proxy_note.setStyleSheet("color:#9a9ba1; font-size:12px;")
+        form.addRow(proxy_note)
+
         clear_history = QPushButton("Clear browsing history", page)
         clear_history.clicked.connect(self.window_ref.clear_history)
         form.addRow(clear_history)
@@ -1048,6 +1091,46 @@ class SettingsDialog(QDialog):
         clear_cache = QPushButton("Clear cache and cookies", page)
         clear_cache.clicked.connect(self.window_ref.clear_cache)
         form.addRow(clear_cache)
+
+        # Shown in the dialog rather than behind a console flag, because
+        # "which build am I actually running, and did the Windows icon step
+        # work" are the two questions that keep needing an answer.
+        import sys as _sys
+
+        from .brand import APP_VERSION, icon_path
+
+        lines = [f"Version: {APP_VERSION}",
+                 f"Package: {os.path.dirname(os.path.abspath(cfg.__file__))}",
+                 f"Running as: {os.path.basename(_sys.executable)}"]
+        if os.name == "nt":
+            from .winexe import build_group, group_size_in_exe, parse_ico
+
+            expected = 0
+            path = icon_path()
+            if path:
+                try:
+                    with open(path, "rb") as fh:
+                        expected = len(build_group(parse_ico(fh.read())))
+                except Exception:                        # noqa: BLE001
+                    expected = 0
+            embedded = group_size_in_exe(_sys.executable)
+            if not os.path.basename(_sys.executable).lower().startswith("merlin"):
+                lines.append("Taskbar icon: running under the interpreter, not "
+                             "Merlin.exe, so Windows uses Python's icon")
+            elif embedded and embedded == expected:
+                lines.append("Taskbar icon: embedded in Merlin.exe correctly")
+            elif embedded:
+                lines.append(f"Taskbar icon: Merlin.exe holds a {embedded}-byte "
+                             f"icon, expected {expected}")
+            else:
+                lines.append("Taskbar icon: NOT embedded; Merlin.exe still has "
+                             "the interpreter's icon")
+        diagnostics = QLabel("\n".join(lines), page)
+        diagnostics.setWordWrap(True)
+        diagnostics.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        diagnostics.setStyleSheet("color:#9a9ba1; font-size:12px;")
+        form.addRow(diagnostics)
 
         paths = QLabel(
             f"Config: {cfg.CONFIG_DIR}\nData: {cfg.DATA_DIR}\nCache: {cfg.CACHE_DIR}",

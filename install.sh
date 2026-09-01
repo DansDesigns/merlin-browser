@@ -145,6 +145,9 @@ echo "  ==========================================================="
 
 [[ -f "$SRC/merlin/app.py" ]] || { say "Run this from the extracted folder."; exit 1; }
 
+SRC_VERSION="$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' "$SRC/merlin/brand.py" | head -1)"
+say "Installing version ${SRC_VERSION:-unknown} from $SRC"
+
 # ------------------------------------------------------------------ python
 PYTHON="$(command -v python3 || true)"
 [[ -n "$PYTHON" ]] || { say "python3 not found. Install it and try again."; exit 1; }
@@ -353,7 +356,7 @@ status "Done"
 ui_done
 echo
 echo "  ==========================================================="
-echo "   Installed. Mode: $MODE"
+echo "   Installed version ${SRC_VERSION:-unknown}. Mode: $MODE"
 echo "  ==========================================================="
 echo
 say "Launch           merlin-browser"

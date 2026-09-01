@@ -47,7 +47,9 @@ del "%STARTMENU%\Merlin Browser.lnk" >nul 2>&1
 del "%STARTMENU%\Merlin Browser (Frameless).lnk" >nul 2>&1
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
  "Remove-Item ([Environment]::GetFolderPath('Desktop')+'\Merlin Browser.lnk') -ErrorAction SilentlyContinue" >nul 2>&1
-echo   Shortcuts removed.
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+ "$p = Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'; if (Test-Path $p) { $s = New-Object -ComObject WScript.Shell; Get-ChildItem $p -Filter *.lnk ^| ForEach-Object { $l = $s.CreateShortcut($_.FullName); if ($l.TargetPath -like '*Merlin*') { Remove-Item $_.FullName -Force } } }" >nul 2>&1
+echo   Shortcuts removed, including any pinned taskbar entry.
 
 set "MERLIN_TARGET=%TARGET%"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^

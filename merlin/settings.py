@@ -117,12 +117,17 @@ DEFAULTS = {
     "player_args": "",
     "auto_offer_player": True,         # offer when the engine cannot decode
     "libvlc_ack": False,               # user acknowledged the in-process note
+    # --- web apps ---
+    "web_apps": [],                    # {name, url, icon, shortcut}
     # --- input ---
     "swipe_navigation": True,          # two-finger swipe = back / forward
     "invert_swipe": False,
     # --- updates ---
     "check_updates_on_start": True,
     "last_seen_version": "",
+    # --- proxy ---
+    "proxy_mode": "none",              # none | tor | custom
+    "proxy_url": "",                   # socks5://host:port or http://host:port
     # --- engine ---
     "user_agent": "",                  # empty = QtWebEngine default
     "chromium_flags": "",              # extra flags appended at launch

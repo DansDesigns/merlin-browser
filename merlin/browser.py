@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 from . import adblock, icons, media, settings as cfg
 from .gestures import SwipeNavigator
 from .updater import RELEASES_URL, Updater
+from . import webapps
 from .playertab import PlayerTab
 from .store import Bookmarks, History
 from .swipeui import SwipeIndicator
@@ -200,7 +201,7 @@ class BrowserWindow(QMainWindow):
     def __init__(self, app: QApplication, settings: cfg.Settings,
                  profile: QWebEngineProfile, filter_engine, filter_loader,
                  interceptor, history: History, bookmarks: Bookmarks,
-                 private: bool = False):
+                 private: bool = False, via_tor: bool = False):
         super().__init__()
         self.app = app
         self.settings = settings
@@ -211,6 +212,7 @@ class BrowserWindow(QMainWindow):
         self.history = history
         self.bookmarks = bookmarks
         self.private = private
+        self.via_tor = via_tor
         self._frameless = False
         self._pseudo_max = False
         self._restore_rect = None
@@ -221,7 +223,8 @@ class BrowserWindow(QMainWindow):
         self.updater = Updater(self.settings, self)
         self.updater.available.connect(self._on_update_available)
 
-        self.setWindowTitle("Merlin Browser" + (" (Private)" if private else ""))
+        suffix = " (Tor)" if via_tor else (" (Private)" if private else "")
+        self.setWindowTitle(f"{APP_NAME} Browser{suffix}")
         window_icon = self.app.windowIcon()
         if not window_icon.isNull():
             self.setWindowIcon(window_icon)
@@ -313,6 +316,7 @@ class BrowserWindow(QMainWindow):
         self.tabs.newTabRequested.connect(lambda: self.new_tab())
         self.tabs.setOrientation(self.settings.get("tab_orientation", "horizontal"))
         self.tabs.set_corner_radius(self.settings.get("page_corner_radius", 10))
+        self.tabs.set_palette("dark" if self.settings.get("dark_ui") else "light")
         for bar in (self.tabs.h_bar, self.tabs.v_strip):
             bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             bar.customContextMenuRequested.connect(
@@ -337,6 +341,13 @@ class BrowserWindow(QMainWindow):
         self.status = self.statusBar()
         self.status_label = QLabel("", self)
         self.status.addWidget(self.status_label, 1)
+        if self.via_tor:
+            marker = QLabel("  Tor  ", self)
+            marker.setToolTip("Traffic in this window goes through Tor")
+            marker.setStyleSheet(
+                "background:#7d4698; color:#ffffff; border-radius:6px;"
+                " padding:1px 8px; font-weight:600;")
+            self.status.addPermanentWidget(marker)
         # no permanent engine label: the status bar is for what you are doing
         # right now, and "Chromium engine" never changes
 
@@ -409,6 +420,7 @@ class BrowserWindow(QMainWindow):
         add("New tab", lambda: self.new_tab(), "Ctrl+T")
         add("New window", self.new_window, "Ctrl+N")
         add("New private window", self.new_private_window, "Ctrl+Shift+N")
+        add("New Tor window", self.new_tor_window)
         menu.addSeparator()
 
         self.act_dark = QAction("Dark mode", self, checkable=True)
@@ -435,6 +447,7 @@ class BrowserWindow(QMainWindow):
         menu.addSeparator()
         add("Play page with Merlin's player", lambda: self.open_in_player(),
             "Ctrl+Shift+P")
+        add("Install this page as an app", self.install_web_app)
         add("Codec report", self.show_codecs)
         add("History", self.show_history, "Ctrl+H")
         add("Bookmarks", self.show_bookmarks, "Ctrl+Shift+O")
@@ -460,6 +473,7 @@ class BrowserWindow(QMainWindow):
             ("F11", self.toggle_fullscreen),
             ("Ctrl+Shift+D", lambda: self.settings.toggle("hide_window_decorations")),
             ("Ctrl+Shift+L", lambda: self.settings.toggle("dark_ui")),
+            ("Ctrl+Shift+I", lambda: self.toggle_pin()),
             ("Ctrl+F", self.show_find),
             ("Escape", self.on_escape),
             ("Ctrl+D", self.toggle_bookmark),
@@ -741,6 +755,58 @@ class BrowserWindow(QMainWindow):
         if self._closed_tabs:
             self.new_tab(self._closed_tabs.pop())
 
+    def install_web_app(self) -> None:
+        """Turn the current page into a standalone app with its own shortcut."""
+        from PyQt6.QtWidgets import QInputDialog
+
+        view = self.current()
+        if view is None or not hasattr(view, "url"):
+            return
+        url = view.url().toString()
+        if not url or url.startswith(("about:", "data:")):
+            QMessageBox.information(
+                self, "Nothing to install",
+                "Open the page you want as an app first.")
+            return
+
+        suggested = view.title() or QUrl(url).host()
+        name, ok = QInputDialog.getText(self, "Install as app", "App name:",
+                                        text=suggested[:48])
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+
+        slug = webapps.slugify(name)
+        icon_path = webapps.save_icon(view.icon(), slug)
+        installed, where = webapps.install(name, url, icon_path)
+        if not installed:
+            QMessageBox.warning(self, "Could not install", where)
+            return
+
+        entry = {"name": name, "url": url, "icon": icon_path, "shortcut": where}
+        apps = [a for a in self.settings.get("web_apps", [])
+                if a.get("shortcut") != where]
+        apps.append(entry)
+        self.settings.set("web_apps", apps)
+        self.status_label.setText(f"Installed {name}")
+        QMessageBox.information(
+            self, "App installed",
+            f"{name} was added to your applications.\n\n"
+            "It opens in its own window, without browser chrome, and always "
+            "loads the live site.")
+
+    def toggle_pin(self, index: int | None = None) -> None:
+        """Pin or unpin a tab, holding it at the start of the strip."""
+        if index is None:
+            index = self.tabs.currentIndex()
+        if index < 0:
+            return
+        widget = self.tabs.widget(index)
+        self.tabs.set_pinned(index, not self.tabs.is_pinned(index))
+        moved = self.tabs.indexOf(widget)
+        self.status_label.setText(
+            "Tab pinned" if self.tabs.is_pinned(moved) else "Tab unpinned")
+
     def cycle_tab(self, delta: int) -> None:
         count = self.tabs.count()
         if count:
@@ -750,6 +816,10 @@ class BrowserWindow(QMainWindow):
         index = self.tabs.tab_at_global(global_pos)
         menu = QMenu(self)
         if index >= 0:
+            pinned = self.tabs.is_pinned(index)
+            menu.addAction("Unpin tab" if pinned else "Pin tab",
+                           lambda: self.toggle_pin(index))
+            menu.addSeparator()
             menu.addAction("Reload", lambda: self.tabs.widget(index).reload())
             menu.addAction("Duplicate", lambda: self.new_tab(
                 self.tabs.widget(index).url().toString()))
@@ -994,6 +1064,7 @@ class BrowserWindow(QMainWindow):
         elif key == "dark_ui":
             apply_theme(self.app, bool(value))
             self.apply_icons()
+            self.tabs.set_palette("dark" if value else "light")
             if hasattr(self, "act_dark"):
                 self.act_dark.setChecked(bool(value))
         elif key in ("start_background", "start_tiles"):
@@ -1325,6 +1396,51 @@ class BrowserWindow(QMainWindow):
         self.app.setProperty("merlin_windows",
                              (self.app.property("merlin_windows") or []) + [window])
         return window
+
+    def new_tor_window(self) -> None:
+        """Open a separate Merlin routed through a local Tor daemon."""
+        from . import privacy
+
+        if not privacy.tor_available():
+            started = False
+            if privacy.tor_binary():
+                answer = QMessageBox.question(
+                    self, "Start Tor?",
+                    "Tor is installed but not running. Start it now?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes)
+                if answer == QMessageBox.StandardButton.Yes:
+                    self.status_label.setText("Starting Tor...")
+                    QApplication.processEvents()
+                    started, message = privacy.start_tor()
+                    self.status_label.setText(message)
+            if not started:
+                QMessageBox.information(
+                    self, "Tor is not running",
+                    "Merlin routes through a Tor daemon running on this "
+                    "machine; it does not bundle one.\n\n"
+                    + privacy.install_hint())
+                return
+
+        answer = QMessageBox.question(
+            self, "Open a Tor window?",
+            "Traffic in the new window goes through Tor, so sites see an exit "
+            "node's address instead of yours, and DNS is resolved at the Tor "
+            "end.\n\n"
+            "This is not Tor Browser. Tor Browser also makes its users look "
+            "alike, by normalising screen size, fonts, timezone and much else. "
+            "Merlin does not, so a site can still fingerprint this browser. "
+            "Treat it as hiding your address, not as anonymity.\n\n"
+            "Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        ok, message = privacy.launch_tor_window()
+        self.status_label.setText(message)
+        if not ok:
+            QMessageBox.warning(self, "Could not open a Tor window", message)
 
     def _apply_cookie_filter(self) -> None:
         store = self.profile.cookieStore()

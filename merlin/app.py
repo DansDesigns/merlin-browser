@@ -34,10 +34,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--private", action="store_true",
                         help="open an off-the-record window")
+    parser.add_argument("--tor", action="store_true",
+                        help="route this window's traffic through a local Tor "
+                             "daemon (implies --private)")
+    parser.add_argument("--proxy", metavar="URL",
+                        help="route through a proxy, e.g. socks5://127.0.0.1:1080")
     parser.add_argument("--app", metavar="URL",
                         help="open URL in a frameless single-purpose window")
     parser.add_argument("--profile", metavar="NAME", default="merlin",
                         help="named storage profile (default: merlin)")
+    parser.add_argument("--embed-icon", metavar="EXE",
+                        help="write Merlin's icon into a Windows executable")
     parser.add_argument("--icon-check", action="store_true",
                         help="report how the application icon resolves and exit")
     parser.add_argument("--timings", action="store_true",
@@ -129,8 +136,25 @@ def run_icon_check() -> int:
         print("Qt can read    :", sizes or "NOTHING, Qt could not decode it")
 
     if os.name == "nt":
-        print("App ID         :", "set" if os.environ.get("MERLIN_APP_ID") != "0"
-              else "skipped by MERLIN_APP_ID=0")
+        from .winexe import build_group, group_size_in_exe, parse_ico
+
+        expected = 0
+        if path:
+            try:
+                with open(path, "rb") as fh:
+                    expected = len(build_group(parse_ico(fh.read())))
+            except Exception:                            # noqa: BLE001
+                expected = 0
+        embedded = group_size_in_exe(sys.executable)
+        if embedded and embedded == expected:
+            verdict = "matches merlin.ico"
+        elif embedded:
+            verdict = f"present but {embedded} bytes, expected {expected}"
+        else:
+            verdict = "NOT PRESENT: this executable still has its original icon"
+        print("Icon in the exe:", verdict)
+        print("App ID         :", "set" if os.environ.get("MERLIN_APP_ID") == "1"
+              else "not set (Merlin.exe provides the identity)")
         probe = QWidget()
         probe.setWindowTitle("Merlin icon check")
         probe.resize(200, 100)
@@ -145,7 +169,7 @@ def run_icon_check() -> int:
     return 0
 
 
-def build_chromium_flags(settings: cfg.Settings) -> str:
+def build_chromium_flags(settings: cfg.Settings, args=None) -> str:
     flags = [
         "--enable-features=WebRTCPipeWireCapturer,OverlayScrollbar",
         "--disable-features=Translate,MediaRouter,OptimizationHints",
@@ -155,6 +179,21 @@ def build_chromium_flags(settings: cfg.Settings) -> str:
     ]
     if settings.get("block_webrtc_leak"):
         flags.append("--force-webrtc-ip-handling-policy=default_public_interface_only")
+    from . import privacy
+
+    proxy_url = ""
+    if args is not None and getattr(args, "proxy", None):
+        proxy_url = args.proxy
+    elif args is not None and getattr(args, "tor", False):
+        proxy_url = privacy.tor_proxy_url()
+    else:
+        mode = settings.get("proxy_mode", "none")
+        if mode == "tor":
+            proxy_url = privacy.tor_proxy_url()
+        elif mode == "custom":
+            proxy_url = (settings.get("proxy_url") or "").strip()
+    flags += privacy.proxy_flags(proxy_url)
+
     extra = (settings.get("chromium_flags") or "").strip()
     if extra:
         flags.append(extra)
@@ -196,6 +235,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{APP_NAME} Browser {APP_VERSION}")
         return 0
 
+    if args.embed_icon:
+        from .brand import icon_path
+        from .winexe import set_exe_icon
+
+        ok, message = set_exe_icon(args.embed_icon, icon_path())
+        print(("OK: " if ok else "Failed: ") + message)
+        return 0 if ok else 1
+
     if args.icon_check:
         set_windows_app_id()
         return run_icon_check()
@@ -211,7 +258,20 @@ def main(argv: list[str] | None = None) -> int:
     settings = cfg.Settings()
 
     # --- must happen before QtWebEngine spins up -------------------------
-    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = build_chromium_flags(settings)
+    if args.tor:
+        args.private = True
+        from . import privacy
+
+        if not privacy.tor_available():
+            # Never start unproxied when Tor was asked for: the window would
+            # look like a Tor window and carry the user's own address.
+            print("Merlin: --tor was requested but no Tor daemon is listening "
+                  f"on 127.0.0.1:{privacy.TOR_PORTS[0]} or "
+                  f":{privacy.TOR_PORTS[1]}.\n\n"
+                  + privacy.install_hint(), file=sys.stderr)
+            return 3
+
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = build_chromium_flags(settings, args)
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
 
     from PyQt6.QtCore import QTimer
@@ -277,7 +337,9 @@ def main(argv: list[str] | None = None) -> int:
     mark("history and bookmarks open")
 
     window = BrowserWindow(app, settings, profile, filter_engine, filter_loader,
-                           interceptor, history, bookmarks)
+                           interceptor, history, bookmarks,
+                           private=bool(args.private or args.tor),
+                           via_tor=bool(args.tor))
 
     def adopt_engine(engine):
         """Swap the freshly parsed rules in once the worker finishes."""

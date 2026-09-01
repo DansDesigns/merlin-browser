@@ -1,26 +1,11 @@
-"""All branding lives here, so renaming the project is a one-file change.
-
-Merlin is the smallest British falcon and breeds on Dartmoor, which puts it in
-the same family as Kestrel without colliding with an existing browser. Checked
-before choosing: Falkon, Otter, Lynx, Puffin, Dolphin, Basilisk, SeaMonkey,
-Ladybird, Sleipnir and BlackHawk are all taken, which rules out falcon, hawk and
-most of the obvious mammals.
-
-To rename, edit the five constants below and run ./rename.sh <newname>, which
-also moves the package directory and rewrites the desktop entries. Config paths
-follow APP_SLUG, so a rename starts the user from a clean profile unless they
-move ~/.config/<oldslug> across themselves.
-
-Alternatives kept in reserve, all clear in the browser namespace: Shrike,
-Chough, Marten, Dipper.
-"""
+"""Names, version and icon lookup, kept in one place."""
 from __future__ import annotations
 
 APP_NAME = "Merlin"
 APP_TAGLINE = "Merlin Browser"
 APP_SLUG = "merlin"              # config dirs, desktop file, executable name
 APP_SCHEME = "merlin"            # merlin://start
-APP_VERSION = "1.4.3"
+APP_VERSION = "1.5.8"
 
 # Sibling project, referenced in About only.
 FAMILY_NOTE = "Part of the same aviary as Kestrel."
