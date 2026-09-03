@@ -1,3 +1,3 @@
 """Merlin Browser - a Chromium-engine browser shell in Python + Qt/C++."""
 
-__version__ = "1.5.8"
+from .brand import APP_VERSION as __version__          # noqa: F401

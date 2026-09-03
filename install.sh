@@ -260,6 +260,9 @@ say "$(find "$LIB/merlin" -type f | wc -l) files copied"
 [[ -f "$SRC/README.md" ]] && cp "$SRC/README.md" "$LIB/README.md"
 
 cp "$SRC/merlin-run.py" "$LIB/merlin-run.py"
+# version.txt is the only place the version is written, so the installed copy
+# needs it: without it the browser reports 0.0.0
+[[ -f "$SRC/version.txt" ]] && cp "$SRC/version.txt" "$LIB/version.txt"
 
 cat > "$LIB/merlin-browser" <<LAUNCH
 #!/usr/bin/env bash

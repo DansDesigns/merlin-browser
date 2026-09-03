@@ -32,14 +32,22 @@ echo.
 echo   Uninstalling Merlin Browser
 echo.
 
-rem A running Merlin holds its DLLs open, which also blocks the delete.
-tasklist /fi "IMAGENAME eq pythonw.exe" 2>nul | find /i "pythonw.exe" >nul
+rem A running Merlin holds its DLLs open, which blocks the delete. Only
+rem Merlin.exe is considered: an earlier version matched pythonw.exe, which
+rem would have closed any other Python program you had open.
+tasklist /fi "IMAGENAME eq Merlin.exe" 2>nul | find /i "Merlin.exe" >nul
 if not errorlevel 1 (
-  echo   Merlin appears to be running. Close it before continuing.
-  choice /c YN /n /m "   Close it for me? [Y/N] "
+  echo   Merlin is running. It has to close before its files can be removed.
+  choice /c YN /n /m "   Close Merlin now? [Y/N] "
   if not errorlevel 2 (
-    taskkill /f /im pythonw.exe >nul 2>&1
+    taskkill /im Merlin.exe >nul 2>&1
     timeout /t 2 >nul
+    tasklist /fi "IMAGENAME eq Merlin.exe" 2>nul | find /i "Merlin.exe" >nul
+    if not errorlevel 1 (
+      echo   Merlin did not close. Close it yourself and run this again.
+      pause
+      exit /b 1
+    )
   )
 )
 
@@ -47,9 +55,11 @@ del "%STARTMENU%\Merlin Browser.lnk" >nul 2>&1
 del "%STARTMENU%\Merlin Browser (Frameless).lnk" >nul 2>&1
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
  "Remove-Item ([Environment]::GetFolderPath('Desktop')+'\Merlin Browser.lnk') -ErrorAction SilentlyContinue" >nul 2>&1
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
- "$p = Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'; if (Test-Path $p) { $s = New-Object -ComObject WScript.Shell; Get-ChildItem $p -Filter *.lnk ^| ForEach-Object { $l = $s.CreateShortcut($_.FullName); if ($l.TargetPath -like '*Merlin*') { Remove-Item $_.FullName -Force } } }" >nul 2>&1
-echo   Shortcuts removed, including any pinned taskbar entry.
+rem Pinned taskbar entries are deliberately left alone. Matching on a path
+rem fragment risked deleting a pin belonging to another application, and an
+rem uninstaller has no business removing shortcuts it did not create. Unpin
+rem Merlin by hand if you had it pinned.
+echo   Start Menu shortcuts removed.
 
 set "MERLIN_TARGET=%TARGET%"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^

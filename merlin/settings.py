@@ -92,6 +92,10 @@ DEFAULTS = {
     "window_geometry": None,
     "window_maximized": False,
     "dark_ui": True,
+    "theme_mode": "manual",            # manual | auto
+    "theme_light_hour": 7,             # switch to light at this hour
+    "theme_dark_hour": 19,             # and back to dark at this one
+    "show_clock": True,
     "ui_font_pt": 0,                   # 0 = whatever the system provides
     # --- browsing ---
     "home_page": f"{APP_SCHEME}://start",

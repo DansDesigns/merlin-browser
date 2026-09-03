@@ -602,6 +602,17 @@ class RequestInterceptor(QWebEngineUrlRequestInterceptor):
         if not self.settings.shields_enabled_for(fp_host):
             return
 
+        # Never block a top-level document. Blockers exist to stop what a page
+        # pulls in, not to stop you going somewhere.
+        #
+        # This mattered on redirects: firstPartyUrl is still the previous page
+        # while the new one is being fetched, so following a redirect to
+        # another domain looked like a third-party request, and any
+        # $third-party rule that happened to match could take out the whole
+        # page. The site simply failed to load with no explanation.
+        if info.resourceType() == RT.ResourceTypeMainFrame:
+            return
+
         rtype = RESOURCE_TYPE_NAMES.get(info.resourceType(), "other")
         url_str = url.toString()
         host = url.host()

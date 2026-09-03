@@ -92,6 +92,47 @@ def apply_to_window(window, icon_file: str) -> bool:
         return False
 
 
+def process_image() -> str:
+    """The executable that actually hosts this process.
+
+    Not sys.executable. A virtualenv's pythonw.exe on Windows is a redirector
+    that starts the base interpreter as a child process, and the child is what
+    owns the window. sys.executable still reports the venv path, so it says
+    Merlin.exe while the window really belongs to Python's own pythonw.exe,
+    which is where the taskbar takes its fallback icon from.
+    """
+    if os.name != "nt":
+        import sys
+
+        return sys.executable
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        buffer = ctypes.create_unicode_buffer(32768)
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GetModuleFileNameW.argtypes = [wintypes.HMODULE,
+                                                wintypes.LPWSTR, wintypes.DWORD]
+        if kernel32.GetModuleFileNameW(None, buffer, len(buffer)):
+            return buffer.value
+    except Exception:                                    # noqa: BLE001
+        pass
+    import sys
+
+    return sys.executable
+
+
+def is_store_python() -> bool:
+    """Is this process a Microsoft Store build of Python?
+
+    Store applications run with MSIX package identity, and Windows takes a
+    taskbar button's identity and icon from the package manifest rather than
+    from the window. The window icon is then set correctly and ignored, so this
+    is worth naming rather than leaving as a mystery.
+    """
+    return "\\windowsapps\\" in process_image().lower()
+
+
 def describe(icon_file: str) -> str:
     """One line for --icon-check, so a failure can be seen rather than guessed."""
     if not available():

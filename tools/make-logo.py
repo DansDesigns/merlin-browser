@@ -28,6 +28,18 @@ def mirror(path, axis):
     t = QTransform().translate(axis, 0).scale(-1, 1).translate(-axis, 0)
     return t.map(path)
 
+# The artwork was drawn to fit inside a 30-unit-radius disc. With the disc gone
+# it fills the square instead.
+#
+# Measured, not guessed: rendered unscaled the wizard occupies y 3.6..58.3 in
+# 64-unit space, so it is 54.7 tall and its centre is at 30.95, a little above
+# the canvas centre. It is shifted down by that difference first, then scaled
+# about the middle of the canvas, which keeps the top and bottom margins equal.
+# 30/27.35 would touch both edges exactly; the rest is clearance.
+ART_SHIFT_Y = 1.05
+FILL_SCALE = 1.09
+
+
 def render(size, compact=False):
     img = QImage(size, size, QImage.Format.Format_ARGB32)
     img.fill(Qt.GlobalColor.transparent)
@@ -37,18 +49,35 @@ def render(size, compact=False):
     def P(x, y): return QPointF(x*S, y*S)
     def R(x, y, w, h): return QRectF(x*S, y*S, w*S, h*S)
 
-    g = QRadialGradient(QPointF(24*S, 16*S), 48*S)
-    g.setColorAt(0.0, QColor(BG_A)); g.setColorAt(1.0, QColor(BG_B))
-    p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(g))
-    p.drawEllipse(QPointF(32*S, 32*S), 30*S, 30*S)
+    # No background disc and no ring. The wizard is the mark, so it can use
+    # the whole canvas instead of being inset inside a circle.
+    #
+    # Everything below is drawn in the original 64-unit coordinates, which were
+    # laid out to sit inside a 30-unit-radius circle. One transform around the
+    # face's centre scales that artwork up to fill the square.
+    # The default pen is a black hairline. The removed background block used to
+    # clear it, so without this every shape gained a black outline, which at 16
+    # pixels was most of the icon.
+    p.setPen(Qt.PenStyle.NoPen)
 
-    if compact:
-        p.save(); p.translate(32*S, 34*S); p.scale(1.14, 1.14); p.translate(-32*S, -34*S)
+    grow = FILL_SCALE * (1.06 if compact else 1.0)
+    p.save()
+    p.translate(32*S, 32*S)
+    p.scale(grow, grow)
+    p.translate(-32*S, -32*S)
+    p.translate(0, ART_SHIFT_Y*S)
 
-    # ---- face: kept as shadow, so the eyes carry it ----
-    face = QPainterPath()
-    face.addEllipse(R(21.5, 22.0, 21.0, 20.0))
-    p.setBrush(QBrush(QColor(SHADOW))); p.drawPath(face)
+    # ---- face: a shadow for the eyes to sit in ----
+    #
+    # Skipped entirely at 16 and 24 pixels. It used to sit against the
+    # background disc; with the disc gone it had nothing to contrast against
+    # and filled most of a small icon, leaving a black blob with a white chin.
+    # The hat and beard are what carry the shape at that size, and the eyes
+    # read perfectly well against the beard.
+    if not compact:
+        face = QPainterPath()
+        face.addEllipse(R(21.5, 22.0, 21.0, 20.0))
+        p.setBrush(QBrush(QColor(SHADOW))); p.drawPath(face)
 
     # ---- beard: one broad symmetrical mass, pointed at the chin ----
     beard = QPainterPath()
@@ -58,8 +87,15 @@ def render(size, compact=False):
     beard.cubicTo(P(27.8, 58.8), P(30.0, 58.2), P(32.0, 58.0))   # chin, left half
     beard.cubicTo(P(34.0, 58.2), P(36.2, 58.8), P(40.0, 56.4))
     beard.cubicTo(P(45.8, 52.0), P(49.4, 41.0), P(47.0, 30.0))   # right outline
-    beard.cubicTo(P(45.0, 36.0), P(39.0, 42.4), P(32.0, 42.4))   # mouth gap, right
-    beard.cubicTo(P(25.0, 42.4), P(19.0, 36.0), P(17.0, 30.0))   # mouth gap, left
+    if compact:
+        # No mouth gap at 16 and 24 pixels. The gap is thinner than a pixel
+        # there, so all it did was expose the dark face behind and leave the
+        # icon reading as a black blob with a white chin. Solid, the beard is
+        # what you actually recognise at that size.
+        beard.lineTo(P(17.0, 30.0))
+    else:
+        beard.cubicTo(P(45.0, 36.0), P(39.0, 42.4), P(32.0, 42.4))  # mouth gap
+        beard.cubicTo(P(25.0, 42.4), P(19.0, 36.0), P(17.0, 30.0))
     beard.closeSubpath()
     bg = QLinearGradient(P(20, 30), P(40, 58))
     bg.setColorAt(0.0, QColor(BEARD_HI)); bg.setColorAt(1.0, QColor(BEARD_LO))
@@ -155,12 +191,7 @@ def render(size, compact=False):
     star.closeSubpath()
     p.setBrush(QBrush(QColor("#fff3cf"))); p.drawPath(star)
 
-    if compact:
-        p.restore()
-
-    ring_w = 1.4*S if compact else 2.2*S
-    p.setPen(QPen(QColor(RING), ring_w)); p.setBrush(Qt.BrushStyle.NoBrush)
-    p.drawEllipse(QPointF(32*S, 32*S), 30*S - ring_w/2, 30*S - ring_w/2)
+    p.restore()
     p.end()
     return img
 
@@ -232,10 +263,6 @@ def build():
     render(256).save(ICON_DIR + "merlin.png", "PNG")
     for s in (16, 24, 32, 64):
         render(s, compact=s < 32).save(f"/tmp/pv{s}.png", "PNG")
-
-if __name__ == "__main__":
-    build(); print("built")
-
 
 # --------------------------------------------------------------- SVG export
 def path_to_d(path):
@@ -332,7 +359,7 @@ def build_svg():
       <stop offset="0" stop-color="{BEARD_HI}"/><stop offset="1" stop-color="{BEARD_LO}"/>
     </linearGradient>
   </defs>
-  <circle cx="32" cy="32" r="30" fill="url(#sky)"/>
+  <g transform="translate(32 32) scale({FILL_SCALE}) translate(-32 -32) translate(0 {ART_SHIFT_Y})">
   <ellipse cx="32" cy="32" rx="10.5" ry="10" fill="{SHADOW}"/>
   <path d="{path_to_d(beard)}" fill="url(#hair)" fill-rule="nonzero"/>
   <path d="{path_to_d(brows)}" fill="{BEARD_HI}" fill-rule="nonzero"/>
@@ -345,8 +372,18 @@ def build_svg():
   <path d="{path_to_d(cone)}" fill="url(#felt)"/>
   <path d="{path_to_d(band)}" fill="{GOLD}"/>
   <path d="{path_to_d(star)}" fill="#fff3cf"/>
-  <circle cx="32" cy="32" r="28.9" fill="none" stroke="{RING}" stroke-width="2.2"/>
+  </g>
 </svg>
 '''
     open(ICON_DIR + "merlin.svg", "w").write(svg)
     return svg
+
+
+if __name__ == "__main__":
+    # The entry point sits at the bottom so that everything it calls is already
+    # defined. It used to be in the middle of the file, above build_svg, which
+    # meant the SVG was simply never regenerated: merlin.svg had been stale for
+    # a long time and had drifted away from the icons it is supposed to match.
+    build()
+    build_svg()
+    print("built merlin.ico, merlin.png and merlin.svg")

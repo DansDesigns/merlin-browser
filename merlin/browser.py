@@ -35,7 +35,7 @@ from .ui import (
 )
 
 RESIZE_MARGIN = 6
-from .brand import APP_NAME, APP_SCHEME, APP_VERSION, FAMILY_NOTE, START_URLS
+from .brand import APP_NAME, APP_SCHEME, APP_VERSION, START_URLS
 
 
 # --------------------------------------------------------------------- page
@@ -164,9 +164,11 @@ class WebView(QWebEngineView):
         menu.exec(event.globalPos())
 
     def createWindow(self, window_type):  # noqa: N802
+        # focus_url is skipped for these: the page is about to supply an
+        # address, and focusing an empty bar suppressed it
         if window_type == QWebEnginePage.WebWindowType.WebBrowserBackgroundTab:
             return self.window_ref.new_tab(background=True)
-        return self.window_ref.new_tab()
+        return self.window_ref.new_tab(focus_address=False)
 
     def _on_fullscreen(self, request):
         request.accept()
@@ -225,7 +227,14 @@ class BrowserWindow(QMainWindow):
 
         suffix = " (Tor)" if via_tor else (" (Private)" if private else "")
         self.setWindowTitle(f"{APP_NAME} Browser{suffix}")
+        # The window's own icon is what the taskbar uses for a running window,
+        # so it is loaded from the file directly if the application-level one
+        # was never set, rather than depending on start-up order.
         window_icon = self.app.windowIcon()
+        if window_icon.isNull():
+            from .brand import app_icon
+
+            window_icon = app_icon()
         if not window_icon.isNull():
             self.setWindowIcon(window_icon)
         self.setMinimumSize(QSize(420, 320))
@@ -299,6 +308,14 @@ class BrowserWindow(QMainWindow):
         self.btn_bookmarks.setMenu(self.bookmarks_menu)
         self.toolbar.addWidget(self.btn_bookmarks)
 
+        self.btn_history = QToolButton(self)
+        self.btn_history.setToolTip("History (Ctrl+H)")
+        self.btn_history.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.history_menu = QMenu(self)
+        self.history_menu.aboutToShow.connect(self._fill_history_menu)
+        self.btn_history.setMenu(self.history_menu)
+
         self.btn_downloads = QToolButton(self)
         self.btn_downloads.setToolTip("Downloads (Ctrl+J)")
         self.btn_downloads.setPopupMode(
@@ -310,8 +327,9 @@ class BrowserWindow(QMainWindow):
         self.btn_menu.setToolTip("Menu")
         self.btn_menu.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.btn_menu.setMenu(self._main_menu())
-        self.toolbar.addWidget(self.btn_menu)
+        self.toolbar.addWidget(self.btn_history)
         self.toolbar.addWidget(self.btn_downloads)
+        self.toolbar.addWidget(self.btn_menu)
 
         self.window_buttons = WindowButtons(self, self)
         self.window_buttons_action = self.toolbar.addWidget(self.window_buttons)
@@ -322,6 +340,7 @@ class BrowserWindow(QMainWindow):
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self.tabs.tabCloseRequested.connect(self.close_tab)
         self.tabs.newTabRequested.connect(lambda: self.new_tab())
+        self.tabs.tabDetached.connect(self.detach_tab)
         self.tabs.setOrientation(self.settings.get("tab_orientation", "horizontal"))
         self.tabs.set_corner_radius(self.settings.get("page_corner_radius", 10))
         self.tabs.set_palette("dark" if self.settings.get("dark_ui") else "light")
@@ -351,6 +370,18 @@ class BrowserWindow(QMainWindow):
         self.status = self.statusBar()
         self.status_label = QLabel("", self)
         self.status.addWidget(self.status_label, 1)
+
+        # QStatusBar draws a frame around every item it holds, which showed as
+        # a grey divider to the left of the clock in both themes.
+        self.status.setStyleSheet("QStatusBar::item { border: 0px; }")
+        self.clock_label = QLabel("", self)
+        self.status.addPermanentWidget(self.clock_label)
+        self._clock_timer = QTimer(self)
+        self._clock_timer.setInterval(10_000)
+        self._clock_timer.timeout.connect(self._tick)
+        self._clock_timer.start()
+        self._style_clock()
+        self._tick()
         if self.via_tor:
             marker = QLabel("  Tor  ", self)
             marker.setToolTip("Traffic in this window goes through Tor")
@@ -436,8 +467,12 @@ class BrowserWindow(QMainWindow):
         self.act_dark = QAction("Dark mode", self, checkable=True)
         self.act_dark.setChecked(bool(self.settings.get("dark_ui")))
         self.act_dark.setShortcut(QKeySequence("Ctrl+Shift+L"))
-        self.act_dark.triggered.connect(
-            lambda checked: self.settings.set("dark_ui", checked))
+        def dark_toggled(checked):
+            # taking the switch yourself turns off following the clock
+            self.settings.set("theme_mode", "manual")
+            self.settings.set("dark_ui", checked)
+
+        self.act_dark.triggered.connect(dark_toggled)
         menu.addAction(self.act_dark)
         menu.addSeparator()
 
@@ -457,6 +492,7 @@ class BrowserWindow(QMainWindow):
         menu.addSeparator()
         add("Play page with Merlin's player", lambda: self.open_in_player(),
             "Ctrl+Shift+P")
+        add("Import from another browser", self.import_from_browser)
         add("Install this page as an app", self.install_web_app)
         add("Codec report", self.show_codecs)
         add("History", self.show_history, "Ctrl+H")
@@ -566,6 +602,8 @@ class BrowserWindow(QMainWindow):
                 self.tabs.setTabIcon(i, icons.themed_icon(name, dark, 16))
         self.btn_bookmarks.setIcon(icons.themed_icon("bookmarks", dark))
         self.btn_downloads.setIcon(icons.themed_icon("download", dark))
+        self.btn_history.setIcon(icons.themed_icon("history", dark))
+        self._style_clock(dark)
         self.btn_shields.setIcon(icons.themed_icon("shield", dark))
         self._update_bookmark_button()
         for button, name in (
@@ -711,7 +749,7 @@ class BrowserWindow(QMainWindow):
 
     # ------------------------------------------------------------------ tabs
     def new_tab(self, url: str | None = None, background: bool = False,
-                defer: bool = False) -> WebView:
+                defer: bool = False, focus_address: bool = True) -> WebView:
         """Open a tab. With defer, the page is not fetched until it is shown.
 
         Restoring a session used to load every tab at once: twenty tabs meant
@@ -743,7 +781,7 @@ class BrowserWindow(QMainWindow):
             self.tabs.setTabToolTip(index, target)
         else:
             self.load_in(view, target)
-        if not background:
+        if not background and focus_address:
             QTimer.singleShot(0, self.focus_url)
         return view
 
@@ -766,6 +804,15 @@ class BrowserWindow(QMainWindow):
     def reopen_tab(self) -> None:
         if self._closed_tabs:
             self.new_tab(self._closed_tabs.pop())
+
+    def import_from_browser(self) -> None:
+        """Bring bookmarks and history across from another browser."""
+        from .importui import ImportDialog
+
+        dialog = ImportDialog(self.settings, self.history, self.bookmarks, self)
+        dialog.exec()
+        self._fill_bookmarks_menu()
+        self._refresh_completer()
 
     def install_web_app(self) -> None:
         """Turn the current page into a standalone app with its own shortcut."""
@@ -806,6 +853,53 @@ class BrowserWindow(QMainWindow):
             f"{name} was added to your applications.\n\n"
             "It opens in its own window, without browser chrome, and always "
             "loads the live site.")
+
+    def detach_tab(self, index: int) -> None:
+        """Pull a tab out into a window of its own.
+
+        The view itself is not moved between windows: a QWebEngineView carries
+        a page bound to this window's profile and reparenting it across
+        top-level windows is unreliable. The address is opened in the new
+        window and the original tab closes, which is what dragging a tab out
+        looks like from the outside.
+        """
+        if not 0 <= index < self.tabs.count():
+            return
+        if self.tabs.count() <= 1:
+            self.status_label.setText("The only tab cannot be pulled out")
+            return
+        # Building several browser windows without returning to the event loop
+        # crashes the engine, so only one detach is started per turn. A drag
+        # cannot produce two anyway; a repeating event could.
+        if getattr(self, "_detaching", False):
+            return
+        self._detaching = True
+        QTimer.singleShot(0, lambda: setattr(self, "_detaching", False))
+        view = self.tabs.widget(index)
+        url = view.url().toString() if hasattr(view, "url") else ""
+        if not url or url.startswith("about:"):
+            self.status_label.setText("Nothing to open in a new window yet")
+            return
+
+        try:
+            view.stop()
+        except Exception:                                # noqa: BLE001
+            pass
+
+        window = self.new_window(url)
+        if window is None:
+            return
+
+        # Close the old tab on the next turn of the event loop. Destroying a
+        # QWebEngineView in the middle of this call, while it is still loading
+        # and while a second window is being built around the same profile,
+        # crashes the engine; letting the current work finish first does not.
+        def close_later(target=view):
+            position = self.tabs.indexOf(target)
+            if position >= 0 and self.tabs.count() > 1:
+                self.close_tab(position)
+
+        QTimer.singleShot(0, close_later)
 
     def adopt_urls(self, urls: list) -> None:
         """Open URLs handed over by another instance, and come to the front."""
@@ -1017,7 +1111,9 @@ class BrowserWindow(QMainWindow):
                 if index >= 0:
                     self.tabs.setTabIcon(index, QIcon())
         if view is self.current():
-            self._update_url_bar(url)
+            # a real address always wins over an empty, freshly focused bar
+            force = bool(url.toString()) and not self.url_bar.text().strip()
+            self._update_url_bar(url, force=force)
             self._update_shield_badge()
             self._update_bookmark_button()
         if not view.property("merlin_start"):
@@ -1082,6 +1178,9 @@ class BrowserWindow(QMainWindow):
             self.tabs.setOrientation(value)
         elif key == "page_corner_radius":
             self.tabs.set_corner_radius(value)
+        elif key in ("show_clock", "theme_mode", "theme_light_hour",
+                     "theme_dark_hour"):
+            self._tick()
         elif key == "ui_font_pt":
             apply_font(self.app, int(value or 0))
         elif key == "dark_ui":
@@ -1099,8 +1198,16 @@ class BrowserWindow(QMainWindow):
             self._apply_cookie_filter()
 
     # ------------------------------------------------------------- ui state
-    def _update_url_bar(self, url: QUrl) -> None:
-        if self.url_bar.hasFocus():
+    def _update_url_bar(self, url: QUrl, force: bool = False) -> None:
+        """Show a page's address.
+
+        Focus normally suppresses this, so that a page loading in the
+        background cannot overwrite what someone is in the middle of typing.
+        A tab opened from a link is the exception: new_tab focuses the address
+        bar, the link's URL arrives a moment later and was being dropped, so
+        the bar stayed empty until you switched tabs and back.
+        """
+        if self.url_bar.hasFocus() and not force:
             return
         text = url.toString()
         if text in ("about:blank", ""):
@@ -1272,7 +1379,6 @@ class BrowserWindow(QMainWindow):
             f"<p>Qt {QT_VERSION_STR}<br>"
             f"{self.filter_engine.rule_count:,} filter rules<br>"
             f"{self._engine_summary()}</p>"
-            f"<p style='color:#8d8f98'>{FAMILY_NOTE}</p>"
         )
 
     # ----------------------------------------------------------- diagnostics
@@ -1394,12 +1500,12 @@ class BrowserWindow(QMainWindow):
         self.profile.cookieStore().deleteAllCookies()
         self.status_label.setText("Cache and cookies cleared")
 
-    def new_window(self) -> "BrowserWindow":
+    def new_window(self, url: str | None = None) -> "BrowserWindow":
         window = BrowserWindow(
             self.app, self.settings, self.profile, self.filter_engine,
             self.filter_loader, self.interceptor, self.history, self.bookmarks,
         )
-        window.new_tab()
+        window.new_tab(url)
         window.show()
         self.app.setProperty("merlin_windows",
                              (self.app.property("merlin_windows") or []) + [window])
@@ -1465,6 +1571,55 @@ class BrowserWindow(QMainWindow):
         if not ok:
             QMessageBox.warning(self, "Could not open a Tor window", message)
 
+    def _style_clock(self, dark: bool | None = None) -> None:
+        """Clock text follows the theme: white on dark, black on light.
+
+        Called from apply_icons and again once the clock exists, because
+        apply_icons runs while the toolbar is being built, before the status
+        bar and its clock have been created.
+        """
+        clock = getattr(self, "clock_label", None)
+        if clock is None:
+            return
+        if dark is None:
+            dark = bool(self.settings.get("dark_ui"))
+        colour = icons.DARK_FG if dark else icons.LIGHT_FG
+        clock.setStyleSheet(f"color:{colour}; padding-right:8px;"
+                            " background: transparent;")
+
+    def _tick(self) -> None:
+        """Update the clock, and the theme if it follows the time of day."""
+        from datetime import datetime
+
+        now = datetime.now()
+        if self.settings.get("show_clock", True):
+            self.clock_label.setText(now.strftime("%H:%M"))
+            self.clock_label.setToolTip(now.strftime("%A %d %B %Y"))
+            self.clock_label.show()
+        else:
+            self.clock_label.hide()
+
+        if self.settings.get("theme_mode") == "auto":
+            wanted = self.dark_wanted_now(now.hour)
+            if wanted != bool(self.settings.get("dark_ui")):
+                self.settings.set("dark_ui", wanted)
+
+    def dark_wanted_now(self, hour: int) -> bool:
+        """Dark outside the light hours, light between them.
+
+        Written so that a light span crossing midnight still works, which it
+        does if someone sets light at 22 and dark at 6.
+        """
+        light_at = int(self.settings.get("theme_light_hour", 7) or 0)
+        dark_at = int(self.settings.get("theme_dark_hour", 19) or 0)
+        if light_at == dark_at:
+            return True
+        if light_at < dark_at:
+            is_light = light_at <= hour < dark_at
+        else:
+            is_light = hour >= light_at or hour < dark_at
+        return not is_light
+
     def _apply_cookie_filter(self) -> None:
         store = self.profile.cookieStore()
         settings = self.settings
@@ -1515,6 +1670,43 @@ class BrowserWindow(QMainWindow):
         super().closeEvent(event)
 
     # ------------------------------------------------------------ downloads
+    def _fill_history_menu(self) -> None:
+        """Recent pages, newest first.
+
+        Rebuilt on demand rather than kept in step, because history changes on
+        every page load and this is only looked at when opened.
+        """
+        menu = self.history_menu
+        menu.clear()
+        dark = bool(self.settings.get("dark_ui"))
+        # recent() yields (url, title, visited_at) rows, not dictionaries
+        entries = self.history.recent(15)
+        if not entries:
+            empty = menu.addAction("Nothing visited yet")
+            empty.setEnabled(False)
+        for row in entries:
+            url = row[0]
+            title = (row[1] or url or "")[:60]
+            action = menu.addAction(icons.themed_icon("history", dark, 16), title)
+            action.setToolTip(url)
+            action.triggered.connect(
+                lambda _c=False, u=url: self.navigate(u))
+        menu.addSeparator()
+        full = menu.addAction("Show all history")
+        full.triggered.connect(self.show_history)
+        clear = menu.addAction("Clear history...")
+        clear.triggered.connect(self.clear_history_prompt)
+
+    def clear_history_prompt(self) -> None:
+        answer = QMessageBox.question(
+            self, "Clear history",
+            "Remove every page from your browsing history?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer == QMessageBox.StandardButton.Yes:
+            self.history.clear()
+            self.status_label.setText("History cleared")
+
     def _fill_downloads_menu(self) -> None:
         """Rebuild the downloads list.
 

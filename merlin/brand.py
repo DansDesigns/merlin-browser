@@ -5,10 +5,34 @@ APP_NAME = "Merlin"
 APP_TAGLINE = "Merlin Browser"
 APP_SLUG = "merlin"              # config dirs, desktop file, executable name
 APP_SCHEME = "merlin"            # merlin://start
-APP_VERSION = "1.5.8"
+def _read_version() -> str:
+    """The version, read from version.txt.
+
+    One source of truth. It used to be written here as well, so the installer
+    reporting version.txt and the browser reporting this constant disagreed
+    whenever one was updated without the other.
+
+    version.txt is looked for beside the package and one level up, which covers
+    both a source checkout and an install where it sits next to the app.
+    """
+    import os
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    for folder in (here, os.path.dirname(here)):
+        try:
+            with open(os.path.join(folder, "version.txt"), "r",
+                      encoding="utf-8") as handle:
+                first = handle.readline().strip()
+            if first:
+                return first.split()[0]
+        except OSError:
+            continue
+    return "0.0.0"
+
+
+APP_VERSION = _read_version()
 
 # Sibling project, referenced in About only.
-FAMILY_NOTE = "Part of the same aviary as Kestrel."
 
 START_URLS = (
     f"{APP_SCHEME}://start",

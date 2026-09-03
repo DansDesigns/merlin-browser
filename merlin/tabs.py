@@ -20,7 +20,7 @@ from PyQt6.QtCore import (
     QEasingCurve, QPropertyAnimation, QSize, QTimer, Qt, pyqtProperty,
     pyqtSignal,
 )
-from PyQt6.QtCore import QRect, QRectF
+from PyQt6.QtCore import QPoint, QRect, QRectF
 from PyQt6.QtGui import (
     QColor, QCursor, QIcon, QPainter, QPainterPath, QRegion,
 )
@@ -107,13 +107,22 @@ class PlusButton(QToolButton):
 
 
 # ------------------------------------------------------------- horizontal
+# How far a tab has to be dragged clear of its strip before it is pulled out
+# into a window of its own.
+DETACH_DISTANCE = 70
+
+
 class HorizontalTabBar(QTabBar):
-    """Normal tab strip. Empty area drags the window when frameless."""
+    """Normal tab strip. Reorders, detaches, and drags a frameless window."""
+
+    detachRequested = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setExpanding(False)
         self.setMovable(True)
+        self._press_index = None
+        self._press_pos = QPoint()
         self.setTabsClosable(False)          # we supply our own, on the left
         self.setElideMode(Qt.TextElideMode.ElideRight)
         self.setUsesScrollButtons(True)
@@ -121,6 +130,9 @@ class HorizontalTabBar(QTabBar):
         self.frameless = False
 
     def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_index = self.tabAt(event.position().toPoint())
+            self._press_pos = event.position().toPoint()
         if (self.frameless
                 and event.button() == Qt.MouseButton.LeftButton
                 and self.tabAt(event.position().toPoint()) == -1):
@@ -129,6 +141,27 @@ class HorizontalTabBar(QTabBar):
                 handle.startSystemMove()
                 return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """Dragging a tab well clear of the strip pulls it out.
+
+        Qt reorders within the bar on its own; this only handles the case of
+        leaving the bar altogether, which it has no concept of.
+        """
+        if (self._press_index is not None and self._press_index >= 0
+                and event.buttons() & Qt.MouseButton.LeftButton
+                and abs(event.position().toPoint().y()
+                        - self._press_pos.y()) > DETACH_DISTANCE):
+            index = self._press_index
+            self._press_index = None
+            # let Qt finish with this press before the tab disappears
+            QTimer.singleShot(0, lambda i=index: self.detachRequested.emit(i))
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._press_index = None
+        super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         if self.tabAt(event.position().toPoint()) == -1 and self.frameless:
@@ -139,16 +172,19 @@ class HorizontalTabBar(QTabBar):
 
 # --------------------------------------------------------------- vertical
 class VerticalTabRow(QWidget):
-    """One row in the vertical strip: [close] [icon] [title]."""
+    """One row in the vertical strip: [icon] [title] [close]."""
 
     clicked = pyqtSignal(object)
     closeRequested = pyqtSignal(object)
+    dragged = pyqtSignal(object, int)        # row, how many places to move
+    detachRequested = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.palette_name = "dark"
         self._side = "left"
         self._pinned = False
+        self._press = None
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedHeight(ICON_ROW_HEIGHT)
         self.setObjectName("tabRow")
@@ -301,8 +337,27 @@ class VerticalTabRow(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            self._press = event.position().toPoint()
             self.clicked.emit(self)
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._press is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            delta = event.position().toPoint() - self._press
+            if abs(delta.x()) > DETACH_DISTANCE:
+                self._press = None
+                self.detachRequested.emit(self)
+                return
+            if abs(delta.y()) >= self.height():
+                steps = int(delta.y() / self.height())
+                self._press = event.position().toPoint()
+                self.dragged.emit(self, steps)
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._press = None
+        super().mouseReleaseEvent(event)
 
 
 class VerticalTabStrip(QWidget):
@@ -311,6 +366,8 @@ class VerticalTabStrip(QWidget):
     currentRequested = pyqtSignal(int)
     closeRequested = pyqtSignal(int)
     newTabRequested = pyqtSignal()
+    reorderRequested = pyqtSignal(int, int)
+    detachRequested = pyqtSignal(int)
     widthChanged = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -318,6 +375,7 @@ class VerticalTabStrip(QWidget):
         self._expansion = 0.0
         self._side = "left"
         self.palette_name = "dark"
+        self._corner_radius = 10
         self.rows: list[VerticalTabRow] = []
         self.setObjectName("verticalStrip")
         # The application stylesheet gives every QWidget a solid background,
@@ -438,6 +496,7 @@ class VerticalTabStrip(QWidget):
     def resizeEvent(self, event):  # noqa: N802
         super().resizeEvent(event)
         self._align_plus()
+        self.update()
 
     def enterEvent(self, event):
         self._animate_to(1.0)
@@ -493,7 +552,6 @@ class VerticalTabStrip(QWidget):
         The per-row chips are what stop this reading as one flat slab.
         """
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         colours = THEME[self.palette_name]
         painter.fillRect(self.rect(), QColor(colours["panel"]))
         edge = (QRect(self.width() - 1, 0, 1, self.height())
@@ -532,6 +590,8 @@ class VerticalTabStrip(QWidget):
             row.set_expanded(self._expansion > 0.5)
             row.clicked.connect(self._row_clicked)
             row.closeRequested.connect(self._row_closed)
+            row.dragged.connect(self._row_dragged)
+            row.detachRequested.connect(self._row_detach)
             self.rows.append(row)
             self.rows_layout.addWidget(row)
         self.rows_layout.addStretch(1)
@@ -542,6 +602,10 @@ class VerticalTabStrip(QWidget):
             row.set_palette(name)
         self.update()
 
+    def set_corner_radius(self, radius: int) -> None:
+        self._corner_radius = max(0, int(radius))
+        self.update()
+
     def update_selection(self, current: int) -> None:
         for index, row in enumerate(self.rows):
             row.set_palette(self.palette_name)
@@ -550,6 +614,14 @@ class VerticalTabStrip(QWidget):
     def _row_clicked(self, row) -> None:
         if row in self.rows:
             self.currentRequested.emit(self.rows.index(row))
+
+    def _row_dragged(self, row, steps: int) -> None:
+        if row in self.rows:
+            self.reorderRequested.emit(self.rows.index(row), steps)
+
+    def _row_detach(self, row) -> None:
+        if row in self.rows:
+            self.detachRequested.emit(self.rows.index(row))
 
     def _row_closed(self, row) -> None:
         if row in self.rows:
@@ -563,11 +635,14 @@ class TabContainer(QWidget):
     currentChanged = pyqtSignal(int)
     tabCloseRequested = pyqtSignal(int)
     newTabRequested = pyqtSignal()
+    tabsReordered = pyqtSignal()
+    tabDetached = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._tabs: list[dict] = []
         self._orientation = "horizontal"
+        self._moving = False
         self._frameless = False
         self._bar_visible = True
 
@@ -593,6 +668,9 @@ class TabContainer(QWidget):
         self.v_strip.currentRequested.connect(self.setCurrentIndex)
         self.v_strip.closeRequested.connect(self.tabCloseRequested.emit)
         self.v_strip.newTabRequested.connect(self.newTabRequested.emit)
+        self.v_strip.reorderRequested.connect(self._strip_reorder)
+        self.v_strip.detachRequested.connect(self.tabDetached.emit)
+        self.h_bar.detachRequested.connect(self.tabDetached.emit)
         self.v_strip.widthChanged.connect(self._place_strip)
         self.v_strip.hide()
 
@@ -765,11 +843,17 @@ class TabContainer(QWidget):
 
     def showEvent(self, event):  # noqa: N802
         super().showEvent(event)
+        self._place_strip()
         self._round_page()
 
     def _apply_reserved_margin(self) -> None:
-        """Reserve the collapsed column, and keep the page off the right edge."""
-        inset = PAGE_EDGE_INSET if self._corner_radius else 0
+        """Reserve the collapsed column, and keep the page off the right edge.
+
+        The inset is not tied to the corner radius. It was, which meant setting
+        the corners to square also pushed the page's scrollbar hard against the
+        window edge: two unrelated things switched off together.
+        """
+        inset = PAGE_EDGE_INSET
         if self._orientation == "left" and self._bar_visible:
             self.root.setContentsMargins(COLLAPSED_WIDTH, 0, inset, 0)
         elif self._orientation == "right" and self._bar_visible:
@@ -778,7 +862,15 @@ class TabContainer(QWidget):
             self.root.setContentsMargins(0, 0, inset, 0)
 
     def _place_strip(self) -> None:
-        if self._orientation == "horizontal" or not self.v_strip.isVisible():
+        """Position the floating strip.
+
+        This used to give up when the strip was not yet visible, which is
+        exactly the situation during start-up: the orientation is set before
+        the window is shown, so the strip kept its default geometry and its
+        first paint covered the wrong area. Whatever was left in the backing
+        store showed through until a hover forced a repaint.
+        """
+        if self._orientation == "horizontal":
             return
         width = self.v_strip.current_width()
         if self._orientation == "left":
@@ -787,19 +879,27 @@ class TabContainer(QWidget):
             self.v_strip.setGeometry(self.width() - width, 0, width,
                                      self.height())
         self.v_strip.raise_()
+        self.v_strip.update()
+        self._round_page()
 
     def set_corner_radius(self, radius: int) -> None:
         self._corner_radius = max(0, int(radius))
+        self.v_strip.set_corner_radius(self._corner_radius)
         self._apply_reserved_margin()
         self._round_page()
 
     def _round_page(self) -> None:
-        """Clip the page area to rounded corners.
+        """Clip the page to rounded corners, following the strip's edge.
 
         The web view paints into its own surface and ignores a border-radius in
-        a stylesheet, so the corners have to be cut with a mask. The mask is
-        built from a painter path rather than by subtracting squares, which
-        keeps the curve smooth.
+        a stylesheet, so the corners are cut with a mask.
+
+        The mask starts where the strip currently ends, not at the stack's own
+        edge. As the strip widens, the page's rounded corners travel with it,
+        so the curve is always on the page side of the boundary. Rounding the
+        panel's corners instead put the curve on the wrong side of the join.
+        What the mask cuts away shows the container, which is painted the same
+        colour as the panel, so the join stays invisible.
         """
         if self.stack.width() <= 0 or self.stack.height() <= 0:
             return
@@ -807,9 +907,29 @@ class TabContainer(QWidget):
         if radius <= 0:
             self.stack.clearMask()
             return
+
+        rect = QRectF(self.stack.rect())
+        if self._orientation in ("left", "right") and self.v_strip.isVisible():
+            strip = self.v_strip.geometry()
+            origin = self.stack.mapTo(self, self.stack.rect().topLeft()).x()
+            if self._orientation == "left":
+                overlap = (strip.x() + strip.width()) - origin
+                if overlap > 0:
+                    rect.setLeft(rect.left() + overlap)
+            else:
+                overlap = (origin + self.stack.width()) - strip.x()
+                if overlap > 0:
+                    rect.setRight(rect.right() - overlap)
+        if rect.width() <= radius * 2:
+            self.stack.clearMask()
+            return
+
         path = QPainterPath()
-        path.addRoundedRect(QRectF(self.stack.rect()), radius, radius)
-        self.stack.setMask(QRegion(path.toFillPolygon().toPolygon()))
+        path.addRoundedRect(rect, radius, radius)
+        region = QRegion(path.toFillPolygon().toPolygon())
+        # anything the strip covers is masked out, and the container behind is
+        # the same colour, so nothing shows through
+        self.stack.setMask(region)
 
     def resizeEvent(self, event):  # noqa: N802
         super().resizeEvent(event)
@@ -853,6 +973,44 @@ class TabContainer(QWidget):
             if row.rect().contains(row.mapFromGlobal(global_pos)):
                 return index
         return -1
+
+    def _strip_reorder(self, index: int, steps: int) -> None:
+        self.move_tab(index, index + steps)
+
+    def _on_tab_moved(self, frm: int, to: int) -> None:
+        """Keep our own list in step when the tab bar reorders itself."""
+        if not (0 <= frm < len(self._tabs) and 0 <= to < len(self._tabs)):
+            return
+        if self._moving:
+            return
+        self._moving = True
+        try:
+            tab = self._tabs.pop(frm)
+            self._tabs.insert(to, tab)
+            widget = tab["widget"]
+            self.stack.removeWidget(widget)
+            self.stack.insertWidget(to, widget)
+            self.tabsReordered.emit()
+        finally:
+            self._moving = False
+
+    def move_tab(self, frm: int, to: int) -> None:
+        """Reorder from the vertical strip, which has no bar to do it for us."""
+        if frm == to or not (0 <= frm < len(self._tabs)):
+            return
+        to = max(0, min(to, len(self._tabs) - 1))
+        current = self.currentWidget()
+        tab = self._tabs.pop(frm)
+        self._tabs.insert(to, tab)
+        widget = tab["widget"]
+        self.stack.removeWidget(widget)
+        self.stack.insertWidget(to, widget)
+        self._rebuild_views()
+        if current is not None:
+            index = self.indexOf(current)
+            if index >= 0:
+                self.setCurrentIndex(index)
+        self.tabsReordered.emit()
 
     # ------------------------------------------------------------- pinning
     def is_pinned(self, index: int) -> bool:

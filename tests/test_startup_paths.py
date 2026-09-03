@@ -197,6 +197,49 @@ for name in ("install.bat", "uninstall.bat"):
     issues = batch_quoting_problems(text)
     check(f"{name} has no cmd quoting hazards", not issues, str(issues))
 
+# Nothing shipped may delete, rewrite or restart anything it does not own. An
+# installer that stamped its identity onto every pinned shortcut merged other
+# applications into Merlin and replaced their icons.
+for name in ("install.bat", "uninstall.bat"):
+    text = open(os.path.join(root, name), encoding="utf-8").read()
+    commands = "\n".join(l for l in text.splitlines()
+                         if not l.strip().lower().startswith("rem"))
+
+    # reading the pinned folder is fine; writing to a shortcut that is not
+    # ours is not, so any write must be guarded by both of these conditions
+    if "User Pinned" in commands:
+        # the only write is clearing our own id, and only from shortcuts that
+        # actually carry it
+        check(f"{name} only touches shortcuts carrying Merlin's own id",
+              "$current -eq $id" in commands)
+        check(f"{name} never sets an application id on a shortcut",
+              "v.vt = 31" not in commands and "Tag]::Apply" not in commands)
+        # writing an id to our own named shortcuts is fine; writing to one
+        # that came out of a listing is what damaged other applications
+        writes = [l for l in commands.splitlines()
+                  if "Tag]::Apply" in l or "Stamp]::Apply" in l]
+        check(f"{name} never tags an enumerated shortcut",
+              not any("Get-ChildItem" in l or "$_." in l for l in writes),
+              str(writes)[:90])
+        check(f"{name} tags only shortcuts it names itself",
+              all("Merlin Browser" in l or "$own" in l or "$lnk" in l
+                  for l in writes) if writes else True)
+    # deleting a shortcut we created by name is fine; deleting one that came
+    # out of a directory listing means deleting somebody else's
+    enumerated = _re.findall(r'Remove-Item\s+(\$_[^\s;)]*)', commands)
+    piped = [l for l in commands.splitlines()
+             if "Remove-Item" in l and "Get-ChildItem" in l]
+    check(f"{name} never deletes an enumerated shortcut",
+          not enumerated and not piped, str(enumerated or piped)[:80])
+
+    # process control: only Merlin's own process, and never the shell
+    kills = _re.findall(r'taskkill[^\n]*?/im\s+(\S+)', commands)
+    check(f"{name} only ever closes Merlin.exe",
+          all(k.lower().startswith("merlin") for k in kills), str(kills))
+    check(f"{name} never starts or stops Explorer",
+          "start explorer" not in commands.lower()
+          and not _re.search(r'taskkill[^\n]*explorer', commands, _re.I))
+
 # --- installer variables must be set before they are used -------------------
 
 def first_use_before_set(text, names, set_pattern, use_pattern):

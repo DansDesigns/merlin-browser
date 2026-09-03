@@ -60,29 +60,53 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 APP_ID = "DansDesigns.Merlin.Browser"
 
 
-def set_windows_app_id() -> None:
-    """Claim the taskbar identity the installer stamped on the shortcuts.
+def shortcut_carries_app_id() -> bool:
+    """Did the installer manage to tag a shortcut with our App User Model ID?
 
-    An explicit Application User Model ID makes Windows resolve a taskbar
-    button's icon by looking for a Start Menu shortcut carrying the same ID,
-    and nothing available to the installer can write that ID onto a .lnk. The
-    lookup fails and Windows falls back to the icon of the executable owning
-    the window.
+    Only worth claiming an ID if something answers to it. With an ID and no
+    matching shortcut, Windows stops using the window's own icon and falls back
+    to the icon of the running executable, which for a Python program is
+    Python's. Claiming an identity nothing answers to is worse than claiming
+    none.
 
-    That fallback is now harmless-to-helpful, because the installer gives
-    Merlin its own Merlin.exe rather than running under pythonw.exe, so the
-    process already has an identity of its own to group and pin by. Setting an
-    ID on top of that only reintroduces the failed lookup.
-
-    Set MERLIN_APP_ID=1 if you want an explicit one anyway.
+    The installer writes this marker only after the tagging succeeds, so the
+    answer costs one file check rather than launching PowerShell on every
+    start-up.
     """
-    if os.name != "nt" or os.environ.get("MERLIN_APP_ID") == "0":
+    if os.name != "nt":
+        return False
+    marker = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "appid.txt")
+    try:
+        with open(marker, "r", encoding="utf-8") as handle:
+            return handle.read().strip() == APP_ID
+    except OSError:
+        return False
+
+
+def set_windows_app_id() -> None:
+    """Claim a taskbar identity only when a shortcut backs it up.
+
+    MERLIN_APP_ID=1 forces it on, MERLIN_APP_ID=0 forces it off.
+    """
+    if os.name != "nt":
+        return
+    # Off. Not "off by default", off.
+    #
+    # Windows matches an App ID against the shortcut a window was launched
+    # from. Tagging the Start Menu entries is not enough: pinning copies the
+    # shortcut into its own folder, and that copy is untagged. Merlin will not
+    # write to shortcuts it did not create, so a pinned launch can never match.
+    #
+    # An ID that does not resolve to a shortcut is worse than none: Windows
+    # abandons the window's own icon and falls back to the icon of the running
+    # executable, which for a Python program is Python's. Nothing tags a
+    # shortcut any more, so nothing should claim an ID either.
+    if os.environ.get("MERLIN_APP_ID") != "1":
         return
     try:
         import ctypes
         from ctypes import wintypes
-
-        from .brand import APP_NAME, APP_VERSION
 
         # Must match the id the installer stamps onto the shortcuts, or
         # Windows has nothing to tie the running window to. No version in it:
@@ -112,8 +136,15 @@ def run_icon_check() -> int:
     print("=" * 52)
     print("Icon file      :", path or "NOT FOUND next to the package")
     print("Platform       :", sys.platform, f"({os.name})")
-    print("Running as     :", os.path.basename(sys.executable))
-    print("Interpreter    :", sys.executable)
+    from .winicon import process_image
+
+    image = process_image()
+    print("Process image  :", image)
+    print("Running as     :", os.path.basename(image))
+    print("sys.executable :", sys.executable)
+    if os.path.basename(image).lower() != os.path.basename(sys.executable).lower():
+        print("                 the venv launcher started a child process; the"
+              " window belongs to the image above")
 
     if path:
         import struct
@@ -152,24 +183,49 @@ def run_icon_check() -> int:
                     expected = len(build_group(parse_ico(fh.read())))
             except Exception:                            # noqa: BLE001
                 expected = 0
-        embedded = group_size_in_exe(sys.executable)
+        embedded = group_size_in_exe(image)
         if embedded and embedded == expected:
             verdict = "matches merlin.ico"
         elif embedded:
             verdict = f"present but {embedded} bytes, expected {expected}"
         else:
-            verdict = "NOT PRESENT: this executable still has its original icon"
+            verdict = ("not embedded here, which is expected when the window "
+                       "is hosted by the interpreter rather than Merlin.exe")
         print("Icon in the exe:", verdict)
-        print("App ID         :", "not set (MERLIN_APP_ID=0)"
-              if os.environ.get("MERLIN_APP_ID") == "0" else APP_ID)
+        claimed = os.environ.get("MERLIN_APP_ID") == "1"
+        print("App ID         :", APP_ID if claimed else
+              "not claimed, so the taskbar uses the window icon")
+        print("Shortcut tagged:",
+              "yes -- this overrides the window icon, reinstall to clear it"
+              if shortcut_carries_app_id() else "no (correct)")
+        from PyQt6.QtGui import QIcon as _QIcon
+
         probe = QWidget()
         probe.setWindowTitle("Merlin icon check")
         probe.resize(200, 100)
+        icon = _QIcon(path) if path else _QIcon()
+        probe.setWindowIcon(icon)
         probe.show()
         app.processEvents()
+        print("Qt window icon :",
+              "set, sizes " + str([s.width() for s in icon.availableSizes()])
+              if not icon.isNull() else "EMPTY, Qt could not load the file")
         ok = winicon.apply_to_window(probe, path)
         print("WM_SETICON     :", "accepted" if ok else "FAILED")
         print("LoadImageW     :", winicon.describe(path))
+        print()
+        if winicon.is_store_python():
+            print("VERDICT: this is the Microsoft Store build of Python.")
+            print("  Store apps get their taskbar identity and icon from the")
+            print("  package manifest, so the window icon above is set")
+            print("  correctly and then ignored. Windows shows the Python")
+            print("  package's icon because it considers that package to be")
+            print("  the application. No change inside Merlin can override it.")
+            print("  Install a normal Python and reinstall:")
+            print("      winget install Python.Python.3.13")
+        else:
+            print("The taskbar icon for a running window comes from the two")
+            print("lines above. The exe line only matters if both of them fail.")
         probe.close()
     else:
         print("Note           :", winicon.describe(path))

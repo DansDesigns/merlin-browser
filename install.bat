@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions EnableDelayedExpansion
 rem ===========================================================================
 rem  Merlin Browser - Windows installer
 rem
@@ -14,6 +14,7 @@ rem ===========================================================================
 
 title Merlin Browser installer
 set "TOTAL_STEPS=7"
+set "BUILT_EXE=0"
 set "CUR_STEP=0"
 set "CUR_LABEL=Starting"
 
@@ -104,7 +105,55 @@ if not defined PY (
   exit /b 1
 )
 
+rem ---------------------------------------------------- Store Python check
+rem A Microsoft Store interpreter runs with MSIX package identity, and Windows
+rem takes a taskbar button's identity and icon from the package manifest rather
+rem than from the window. Merlin can set its window icon perfectly and the
+rem taskbar will still show Python's, because as far as Windows is concerned
+rem the package is the application. Nothing in the browser can override that,
+rem so a normal interpreter is used instead where one exists.
+set "PYBASE="
+for /f "usebackq delims=" %%b in (`%PY% -c "import sys;print(sys.base_prefix)" 2^>nul`) do set "PYBASE=%%b"
+echo %PYBASE% | findstr /i "WindowsApps" >nul
+if not errorlevel 1 (
+  echo.
+  echo   The Python found is the Microsoft Store build:
+  echo       %PYBASE%
+  echo   Windows gives Store apps their icon from the package, so Merlin would
+  echo   always show Python's icon in the taskbar. Looking for another Python.
+  set "ALTPY="
+  for /d %%d in ("%LOCALAPPDATA%\Programs\Python\Python3*") do (
+    if exist "%%d\python.exe" set "ALTPY=%%d\python.exe"
+  )
+  for /d %%d in ("%ProgramFiles%\Python3*") do (
+    if exist "%%d\python.exe" set "ALTPY=%%d\python.exe"
+  )
+  if defined ALTPY (
+    echo   Using !ALTPY! instead.
+    set "PY=!ALTPY!"
+  ) else (
+    echo.
+    echo   No other Python is installed. Merlin will work, but its taskbar icon
+    echo   will be Python's and cannot be changed from inside the browser.
+    echo.
+    echo   To fix it, install a normal Python and run this installer again:
+    echo       winget install Python.Python.3.13
+    echo   or download it from https://www.python.org/downloads/
+    echo.
+    choice /c YN /n /m "   Carry on with the Store Python anyway? [Y/N] "
+    if errorlevel 2 (
+      echo   Stopped. Nothing was installed.
+      pause
+      exit /b 1
+    )
+  )
+)
+
+rem The version is read here, after any substitution above, so the reported
+rem version is the interpreter actually being used rather than the one first
+rem found.
 for /f "tokens=2" %%v in ('%PY% -V 2^>^&1') do set "PYVER=%%v"
+
 %PY% -c "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)" 2>nul
 if errorlevel 1 (
   echo  [X] Python 3.9 or newer is required. Found %PYVER%.
@@ -190,6 +239,9 @@ if errorlevel 1 (
   exit /b 1
 )
 copy /y "%SRC%\merlin-run.py" "%APPDIR%\merlin-run.py" >nul
+rem version.txt is the only place the version is written, so the installed
+rem copy needs it: without it the browser reports 0.0.0
+if exist "%SRC%\version.txt" copy /y "%SRC%\version.txt" "%APPDIR%\version.txt" >nul
 if errorlevel 1 (
   call :endui
   echo  [X] merlin-run.py is missing from the download.
@@ -197,7 +249,15 @@ if errorlevel 1 (
   exit /b 1
 )
 rem the shortcut needs an .ico on disk; the app finds its own inside the package
-if exist "%APPDIR%\merlin\merlin.ico" copy /y "%APPDIR%\merlin\merlin.ico" "%TARGET%\merlin.ico" >nul
+if exist "%APPDIR%\merlin\merlin.ico" (
+  copy /y "%APPDIR%\merlin\merlin.ico" "%TARGET%\merlin.ico" >nul
+)
+if exist "%TARGET%\merlin.ico" (
+  echo        Icon file in place: %TARGET%\merlin.ico
+) else (
+  echo        [!] merlin.ico is missing from the package. Shortcuts will fall
+  echo            back to a generic icon.
+)
 if exist "%SRC%\README.md"     copy /y "%SRC%\README.md"     "%TARGET%\README.md"     >nul
 if exist "%SRC%\uninstall.bat" copy /y "%SRC%\uninstall.bat" "%TARGET%\uninstall.bat" >nul
 
@@ -212,54 +272,94 @@ rem exists at this point.
 set "MERLINEXE=%VENV%\Scripts\Merlin.exe"
 set "MERLINCON=%VENV%\Scripts\Merlin-console.exe"
 echo.
-echo        Creating Merlin.exe
-copy /y "%VPYW%" "%MERLINEXE%" >nul 2>&1
-copy /y "%VPY%"  "%MERLINCON%" >nul 2>&1
-if not exist "%MERLINEXE%" (
-  echo.
-  echo  [!] Merlin.exe could not be created. Windows will show the Python icon
-  echo      because the browser will be running as pythonw.exe. This is almost
-  echo      always antivirus blocking the copy of an executable.
-  echo      Allow %VENV%\Scripts and run this installer again.
-  echo.
-  set "MERLINEXE=%VPYW%"
-  set "MERLINCON=%VPY%"
-) else (
-  echo        Created %MERLINEXE%
-  rem Nothing has run Merlin.exe yet, so it cannot be locked: write the icon in
-  rem now, before the verification step below executes it for the first time.
-  echo        Writing the Merlin icon into it
-  "%VPY%" "%RUNPY%" --embed-icon "%MERLINEXE%"
-  if errorlevel 1 (
-    echo.
-    echo  [!] The icon could not be written into Merlin.exe. The taskbar will
-    echo      fall back to the interpreter's icon. Settings, Advanced shows the
-    echo      current state.
-    echo.
-  )
-)
+rem ------------------------------------------------- a real Merlin.exe
+rem Built with PyInstaller, which is what every other Python application on
+rem Windows does. The point is that the process owning the window is Merlin's
+rem own executable with the icon in its resources; a script run through an
+rem interpreter can never be, because the window belongs to the interpreter.
+rem
+rem The virtualenv stays as the fallback: if the build does not produce a
+rem working executable, the launcher is used and the browser still runs.
+set "MERLINEXE=%VENV%\Scripts\pythonw.exe"
+set "MERLINCON=%VENV%\Scripts\python.exe"
+set "BUILT_EXE=0"
+set "BUILDDIR=%TEMP%\merlin-build"
+
+echo.
+echo        Building Merlin.exe. This is the slow part, two to four minutes.
+echo        $ "%VPY%" -m pip install pyinstaller
+"%VPY%" -m pip install --disable-pip-version-check pyinstaller
+if errorlevel 1 goto :buildfailed
+
+if exist "%TARGET%\bin" rmdir /s /q "%TARGET%\bin"
+echo.
+echo        $ pyinstaller --windowed --icon merlin.ico merlin-run.py
+"%VPY%" -m PyInstaller --noconfirm --onedir --windowed --name Merlin ^
+  --icon "%APPDIR%\merlin\merlin.ico" ^
+  --paths "%APPDIR%" ^
+  --add-data "%APPDIR%\merlin\merlin.ico;merlin" ^
+  --add-data "%APPDIR%\merlin\merlin.png;merlin" ^
+  --add-data "%APPDIR%\merlin\merlin.svg;merlin" ^
+  --add-data "%APPDIR%\version.txt;." ^
+  --distpath "%TARGET%\bin" --workpath "%BUILDDIR%" --specpath "%BUILDDIR%" ^
+  "%APPDIR%\merlin-run.py"
+if errorlevel 1 goto :buildfailed
+if not exist "%TARGET%\bin\Merlin\Merlin.exe" goto :buildfailed
+
+echo.
+echo        Checking the built executable starts...
+"%TARGET%\bin\Merlin\Merlin.exe" --version
+if errorlevel 1 goto :buildfailed
+
+set "MERLINEXE=%TARGET%\bin\Merlin\Merlin.exe"
+set "MERLINCON=%TARGET%\bin\Merlin\Merlin.exe"
+set "BUILT_EXE=1"
+echo        Built %MERLINEXE%
+echo        The window now belongs to Merlin.exe, so the taskbar uses its icon.
+goto :buildclean
+
+:buildfailed
+echo.
+echo  [!] The executable could not be built. Merlin will still run, started
+echo      through the virtualenv, but its taskbar icon will be Python's
+echo      because the window belongs to the interpreter.
+echo.
+
+:buildclean
+rem Remove the build workspace and PyInstaller itself. Neither is needed once
+rem the executable exists, and together they are a few hundred megabytes.
+echo        Cleaning up the build files...
+if exist "%BUILDDIR%" rmdir /s /q "%BUILDDIR%"
+"%VPY%" -m pip uninstall -y pyinstaller pyinstaller-hooks-contrib altgraph >nul 2>&1
+for /d %%d in ("%VENV%\Lib\site-packages\__pycache__") do rmdir /s /q "%%d" 2>nul
+echo        Done.
 call :bar
 
 
+rem A built executable carries the script inside it and must not be handed a
+rem path; the virtualenv launcher must. One variable covers both.
+set "RUNARG="%RUNPY%""
+if "%BUILT_EXE%"=="1" set "RUNARG="
+
 > "%TARGET%\merlin-browser.cmd" (
   echo @echo off
-  echo start "" "%MERLINEXE%" "%RUNPY%" %%*
+  echo start "" "%MERLINEXE%" %RUNARG% %%*
 )
 > "%TARGET%\merlin-frameless.cmd" (
   echo @echo off
-  echo start "" "%MERLINEXE%" "%RUNPY%" --no-decorations %%*
+  echo start "" "%MERLINEXE%" %RUNARG% --no-decorations %%*
 )
 > "%TARGET%\merlin-debug.cmd" (
   echo @echo off
   echo echo Starting Merlin with a console attached. Any error appears below.
   echo echo.
-  echo "%MERLINCON%" "%RUNPY%" %%*
+  echo "%MERLINCON%" %RUNARG% %%*
   echo echo.
   echo pause
 )
 > "%TARGET%\merlin-console.cmd" (
   echo @echo off
-  echo "%MERLINCON%" "%RUNPY%" %%*
+  echo "%MERLINCON%" %RUNARG% %%*
   echo echo.
   echo pause
 )
@@ -269,8 +369,8 @@ rem prove it actually starts before promising the user a Start Menu entry
 
 echo.
 echo        Verifying that Merlin starts
-echo        $ "%MERLINCON%" "%RUNPY%" --version
-"%MERLINCON%" "%RUNPY%" --version
+echo        $ "%MERLINCON%" %RUNARG% --version
+"%MERLINCON%" %RUNARG% --version
 if errorlevel 1 (
   echo.
   call :endui
@@ -286,7 +386,10 @@ for /f "tokens=*" %%v in ('""%VPY%" "%RUNPY%" --version"') do echo        %%v st
 rem ------------------------------------------------------------ 4. shortcuts
 call :step 5 "Creating shortcuts"
 set "ICO=%TARGET%\merlin.ico"
-if not exist "%ICO%" set "ICO=%SystemRoot%\System32\shell32.dll,14"
+if not exist "%ICO%" (
+  echo        [!] No merlin.ico, so shortcuts get a generic icon.
+  set "ICO=%SystemRoot%\System32\shell32.dll,14"
+)
 
 choice /c YN /n /m "        Add a desktop shortcut as well? [Y/N] "
 if errorlevel 2 (set "MERLIN_DESKTOP=0") else (set "MERLIN_DESKTOP=1")
@@ -306,6 +409,8 @@ set "PS1=%TEMP%\merlin-shortcuts.ps1"
 >>"%PS1%" echo $exe   = "%MERLINEXE%"
 >>"%PS1%" echo $runpy = "%RUNPY%"
 >>"%PS1%" echo $q     = [char]34
+>>"%PS1%" echo # a built executable carries the script inside it
+>>"%PS1%" echo $args1 = if ($env:MERLIN_BUILT -eq '1') { '' } else { $q + $runpy + $q }
 >>"%PS1%" echo function New-MerlinShortcut($path, $arguments, $description) {
 >>"%PS1%" echo     $link = $shell.CreateShortcut($path)
 >>"%PS1%" echo     $link.TargetPath       = $exe
@@ -321,31 +426,13 @@ set "PS1=%TEMP%\merlin-shortcuts.ps1"
 >>"%PS1%" echo     Write-Output ("            runs " + $back.TargetPath + " " + $back.Arguments)
 >>"%PS1%" echo     Write-Output ("            icon " + $back.IconLocation)
 >>"%PS1%" echo }
->>"%PS1%" echo New-MerlinShortcut ($menu + '\Merlin Browser.lnk') ($q + $runpy + $q) 'Merlin Browser'
->>"%PS1%" echo New-MerlinShortcut ($menu + '\Merlin Browser (Frameless).lnk') ($q + $runpy + $q + ' --no-decorations') 'Merlin with the title bar hidden'
+>>"%PS1%" echo New-MerlinShortcut ($menu + '\Merlin Browser.lnk') $args1 'Merlin Browser'
+>>"%PS1%" echo New-MerlinShortcut ($menu + '\Merlin Browser (Frameless).lnk') ($args1 + ' --no-decorations') 'Merlin with the title bar hidden'
 >>"%PS1%" echo if ($env:MERLIN_DESKTOP -eq '1') {
->>"%PS1%" echo     New-MerlinShortcut ([Environment]::GetFolderPath('Desktop') + '\Merlin Browser.lnk') ($q + $runpy + $q) 'Merlin Browser'
+>>"%PS1%" echo     New-MerlinShortcut ([Environment]::GetFolderPath('Desktop') + '\Merlin Browser.lnk') $args1 'Merlin Browser'
 >>"%PS1%" echo }
 
-rem Refresh any existing pinned taskbar entry as well. Pinning copies the
-rem shortcut into User Pinned\TaskBar, which the installer has never touched,
-rem so a pin made against an older build kept pointing at the old target and
-rem showing the old icon however many times Merlin was reinstalled.
->>"%PS1%" echo $pinned = Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'
->>"%PS1%" echo if (Test-Path $pinned) {
->>"%PS1%" echo     Get-ChildItem -Path $pinned -Filter *.lnk ^| ForEach-Object {
->>"%PS1%" echo         $existing = $shell.CreateShortcut($_.FullName)
->>"%PS1%" echo         if ($existing.TargetPath -like '*Merlin*' -or $existing.Arguments -like '*merlin-run.py*') {
->>"%PS1%" echo             $existing.TargetPath   = $exe
->>"%PS1%" echo             $existing.Arguments    = $q + $runpy + $q
->>"%PS1%" echo             $existing.WorkingDirectory = $work
->>"%PS1%" echo             $existing.IconLocation = $ico
->>"%PS1%" echo             $existing.Save()
->>"%PS1%" echo             Write-Output ("        refreshed pinned entry " + $_.Name)
->>"%PS1%" echo         }
->>"%PS1%" echo     }
->>"%PS1%" echo }
-
+set "MERLIN_BUILT=%BUILT_EXE%"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%"
 if errorlevel 1 (
   echo.
@@ -359,80 +446,133 @@ call :bar
 )
 del "%PS1%" >nul 2>&1
 
-rem Stamp the App User Model ID onto each shortcut. Windows ties a running
-rem window to a shortcut carrying the same ID, and then uses that shortcut's
-rem icon for the taskbar button. WScript.Shell cannot write this property, so
-rem it needs the shell property store. Entirely best effort: the shortcuts
-rem already work without it and nothing here can undo them.
-set "PS2=%TEMP%\merlin-appid.ps1"
-> "%PS2%" echo $ErrorActionPreference = 'SilentlyContinue'
->>"%PS2%" echo $code = @'
->>"%PS2%" echo using System;
->>"%PS2%" echo using System.Runtime.InteropServices;
->>"%PS2%" echo namespace MerlinShell {
->>"%PS2%" echo   [ComImport, Guid("00021401-0000-0000-C000-000000000046")]
->>"%PS2%" echo   public class ShellLink { }
->>"%PS2%" echo   [ComImport, Guid("0000010b-0000-0000-C000-000000000046"),
->>"%PS2%" echo    InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
->>"%PS2%" echo   public interface IPersistFile {
->>"%PS2%" echo     void GetClassID(out Guid id);
->>"%PS2%" echo     [PreserveSig] int IsDirty();
->>"%PS2%" echo     void Load([MarshalAs(UnmanagedType.LPWStr)] string f, uint m);
->>"%PS2%" echo     void Save([MarshalAs(UnmanagedType.LPWStr)] string f, [MarshalAs(UnmanagedType.Bool)] bool r);
->>"%PS2%" echo     void SaveCompleted([MarshalAs(UnmanagedType.LPWStr)] string f);
->>"%PS2%" echo     void GetCurFile([MarshalAs(UnmanagedType.LPWStr)] out string f);
->>"%PS2%" echo   }
->>"%PS2%" echo   [StructLayout(LayoutKind.Sequential, Pack = 4)]
->>"%PS2%" echo   public struct PropertyKey { public Guid fmtid; public uint pid; }
->>"%PS2%" echo   [StructLayout(LayoutKind.Explicit)]
->>"%PS2%" echo   public struct PropVariant {
->>"%PS2%" echo     [FieldOffset(0)] public ushort vt;
->>"%PS2%" echo     [FieldOffset(8)] public IntPtr p;
->>"%PS2%" echo   }
->>"%PS2%" echo   [ComImport, Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99"),
->>"%PS2%" echo    InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
->>"%PS2%" echo   public interface IPropertyStore {
->>"%PS2%" echo     void GetCount(out uint c);
->>"%PS2%" echo     void GetAt(uint i, out PropertyKey k);
->>"%PS2%" echo     void GetValue(ref PropertyKey k, out PropVariant v);
->>"%PS2%" echo     void SetValue(ref PropertyKey k, ref PropVariant v);
->>"%PS2%" echo     void Commit();
->>"%PS2%" echo   }
->>"%PS2%" echo   public static class Stamp {
->>"%PS2%" echo     public static void Apply(string lnk, string appId) {
->>"%PS2%" echo       var link = new ShellLink();
->>"%PS2%" echo       ((IPersistFile)link).Load(lnk, 2);
->>"%PS2%" echo       var store = (IPropertyStore)link;
->>"%PS2%" echo       var key = new PropertyKey();
->>"%PS2%" echo       key.fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");
->>"%PS2%" echo       key.pid = 5;
->>"%PS2%" echo       var val = new PropVariant();
->>"%PS2%" echo       val.vt = 31;
->>"%PS2%" echo       val.p = Marshal.StringToCoTaskMemUni(appId);
->>"%PS2%" echo       store.SetValue(ref key, ref val);
->>"%PS2%" echo       store.Commit();
->>"%PS2%" echo       ((IPersistFile)link).Save(lnk, true);
->>"%PS2%" echo       Marshal.FreeCoTaskMem(val.p);
->>"%PS2%" echo     }
->>"%PS2%" echo   }
->>"%PS2%" echo }
->>"%PS2%" echo '@
->>"%PS2%" echo Add-Type -TypeDefinition $code ^| Out-Null
->>"%PS2%" echo $id = 'DansDesigns.Merlin.Browser'
->>"%PS2%" echo $targets = @()
->>"%PS2%" echo $targets += (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Merlin Browser.lnk')
->>"%PS2%" echo $targets += (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Merlin Browser (Frameless).lnk')
->>"%PS2%" echo $pinned = Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'
->>"%PS2%" echo if (Test-Path $pinned) { $targets += (Get-ChildItem $pinned -Filter *.lnk ^| ForEach-Object { $_.FullName }) }
->>"%PS2%" echo foreach ($t in $targets) {
->>"%PS2%" echo   if (Test-Path $t) {
->>"%PS2%" echo     try { [MerlinShell.Stamp]::Apply($t, $id); Write-Output ("        tagged " + [IO.Path]::GetFileName($t)) } catch { }
->>"%PS2%" echo   }
->>"%PS2%" echo }
+rem No App User Model ID is written to any shortcut, and no shortcut outside
+rem Merlin's own is touched. A previous version stamped Merlin's ID onto every
+rem .lnk in the pinned taskbar folder, which made Windows treat other pinned
+rem applications as Merlin and replace their icons. Run repair-taskbar.bat to
+rem undo that if it happened.
 
-echo        Tagging shortcuts so Windows links them to the running window
-powershell -NoProfile -ExecutionPolicy Bypass -File "%PS2%" 2>nul
-del "%PS2%" >nul 2>&1
+rem No shortcut is tagged with an App User Model ID, and Merlin claims none.
+rem
+rem Tagging looked like the way to give the taskbar the right icon. It is the
+rem opposite: Windows passes a shortcut's ID to the process it launches, then
+rem resolves the icon by looking for a shortcut declaring that ID, and when
+rem that lookup does not resolve it falls back to the process image's icon,
+rem which for a Python program is Python's. Untagged, the window's own icon is
+rem used, which Merlin sets on every window.
+
+rem ------------------------------------------- undo earlier taskbar damage
+rem Versions 1.5.8 and 1.5.9 wrote Merlin's application id onto every shortcut
+rem in the pinned taskbar folder, not only Merlin's own. Windows then treated
+rem those programs as Merlin: pins merged together and took Merlin's icon.
+rem
+rem This puts it right. Each shortcut is read, and where the id is Merlin's but
+rem the shortcut does not point at Merlin.exe, that one property is cleared.
+rem Shortcuts without Merlin's id are never opened for writing, nothing is
+rem deleted, no shortcut is created outside Merlin's own, and Explorer is not
+rem touched. If nothing was ever damaged this reports that and changes nothing.
+echo.
+echo        Clearing Merlin's application id from every shortcut carrying it
+set "MERLIN_ID=DansDesigns.Merlin.Browser"
+set "MERLIN_EXE=%MERLINEXE%"
+set "PSFIX=%TEMP%\merlin-taskbar-check.ps1"
+> "%PSFIX%" echo $ErrorActionPreference = 'SilentlyContinue'
+>>"%PSFIX%" echo $code = @'
+>>"%PSFIX%" echo using System;
+>>"%PSFIX%" echo using System.Runtime.InteropServices;
+>>"%PSFIX%" echo namespace MerlinRepair {
+>>"%PSFIX%" echo   [ComImport, Guid("00021401-0000-0000-C000-000000000046")]
+>>"%PSFIX%" echo   public class ShellLink { }
+>>"%PSFIX%" echo   [ComImport, Guid("0000010b-0000-0000-C000-000000000046"),
+>>"%PSFIX%" echo    InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+>>"%PSFIX%" echo   public interface IPersistFile {
+>>"%PSFIX%" echo     void GetClassID(out Guid id);
+>>"%PSFIX%" echo     [PreserveSig] int IsDirty();
+>>"%PSFIX%" echo     void Load([MarshalAs(UnmanagedType.LPWStr)] string f, uint m);
+>>"%PSFIX%" echo     void Save([MarshalAs(UnmanagedType.LPWStr)] string f, [MarshalAs(UnmanagedType.Bool)] bool r);
+>>"%PSFIX%" echo     void SaveCompleted([MarshalAs(UnmanagedType.LPWStr)] string f);
+>>"%PSFIX%" echo     void GetCurFile([MarshalAs(UnmanagedType.LPWStr)] out string f);
+>>"%PSFIX%" echo   }
+>>"%PSFIX%" echo   [StructLayout(LayoutKind.Sequential, Pack = 4)]
+>>"%PSFIX%" echo   public struct PropertyKey { public Guid fmtid; public uint pid; }
+>>"%PSFIX%" echo   [StructLayout(LayoutKind.Explicit)]
+>>"%PSFIX%" echo   public struct PropVariant {
+>>"%PSFIX%" echo     [FieldOffset(0)] public ushort vt;
+>>"%PSFIX%" echo     [FieldOffset(8)] public IntPtr p;
+>>"%PSFIX%" echo   }
+>>"%PSFIX%" echo   [ComImport, Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99"),
+>>"%PSFIX%" echo    InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+>>"%PSFIX%" echo   public interface IPropertyStore {
+>>"%PSFIX%" echo     void GetCount(out uint c);
+>>"%PSFIX%" echo     void GetAt(uint i, out PropertyKey k);
+>>"%PSFIX%" echo     void GetValue(ref PropertyKey k, out PropVariant v);
+>>"%PSFIX%" echo     void SetValue(ref PropertyKey k, ref PropVariant v);
+>>"%PSFIX%" echo     void Commit();
+>>"%PSFIX%" echo   }
+>>"%PSFIX%" echo   public static class Fix {
+>>"%PSFIX%" echo     static PropertyKey Key() {
+>>"%PSFIX%" echo       var k = new PropertyKey();
+>>"%PSFIX%" echo       k.fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");
+>>"%PSFIX%" echo       k.pid = 5;
+>>"%PSFIX%" echo       return k;
+>>"%PSFIX%" echo     }
+>>"%PSFIX%" echo     public static string Read(string lnk) {
+>>"%PSFIX%" echo       var link = new ShellLink();
+>>"%PSFIX%" echo       ((IPersistFile)link).Load(lnk, 0);
+>>"%PSFIX%" echo       var key = Key();
+>>"%PSFIX%" echo       PropVariant v;
+>>"%PSFIX%" echo       ((IPropertyStore)link).GetValue(ref key, out v);
+>>"%PSFIX%" echo       if (v.vt == 31 ^&^& v.p != IntPtr.Zero) { return Marshal.PtrToStringUni(v.p); }
+>>"%PSFIX%" echo       return null;
+>>"%PSFIX%" echo     }
+>>"%PSFIX%" echo     public static void Clear(string lnk) {
+>>"%PSFIX%" echo       var link = new ShellLink();
+>>"%PSFIX%" echo       ((IPersistFile)link).Load(lnk, 2);
+>>"%PSFIX%" echo       var store = (IPropertyStore)link;
+>>"%PSFIX%" echo       var key = Key();
+>>"%PSFIX%" echo       var empty = new PropVariant();
+>>"%PSFIX%" echo       empty.vt = 0;
+>>"%PSFIX%" echo       empty.p = IntPtr.Zero;
+>>"%PSFIX%" echo       store.SetValue(ref key, ref empty);
+>>"%PSFIX%" echo       store.Commit();
+>>"%PSFIX%" echo       ((IPersistFile)link).Save(lnk, true);
+>>"%PSFIX%" echo     }
+>>"%PSFIX%" echo   }
+>>"%PSFIX%" echo }
+>>"%PSFIX%" echo '@
+>>"%PSFIX%" echo Add-Type -TypeDefinition $code ^| Out-Null
+>>"%PSFIX%" echo $id = $env:MERLIN_ID
+>>"%PSFIX%" echo $mine = $env:MERLIN_EXE
+>>"%PSFIX%" echo $shell = New-Object -ComObject WScript.Shell
+>>"%PSFIX%" echo $folders = @(
+>>"%PSFIX%" echo   (Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'),
+>>"%PSFIX%" echo   (Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\StartMenu'),
+>>"%PSFIX%" echo   (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs')
+>>"%PSFIX%" echo )
+>>"%PSFIX%" echo $fixed = 0
+>>"%PSFIX%" echo foreach ($folder in $folders) {
+>>"%PSFIX%" echo   if (-not (Test-Path $folder)) { continue }
+>>"%PSFIX%" echo   Get-ChildItem $folder -Filter *.lnk -Recurse ^| ForEach-Object {
+>>"%PSFIX%" echo     $path = $_.FullName
+>>"%PSFIX%" echo     $current = $null
+>>"%PSFIX%" echo     try { $current = [MerlinRepair.Fix]::Read($path) } catch { }
+>>"%PSFIX%" echo     if ($current -eq $id) {
+>>"%PSFIX%" echo       if ($true) {
+>>"%PSFIX%" echo         try {
+>>"%PSFIX%" echo           [MerlinRepair.Fix]::Clear($path)
+>>"%PSFIX%" echo           Write-Output ("   cleared: " + $_.Name + "  ->  " + $target)
+>>"%PSFIX%" echo           $fixed = $fixed + 1
+>>"%PSFIX%" echo         } catch { Write-Output ("   could not change: " + $_.Name) }
+>>"%PSFIX%" echo       }
+>>"%PSFIX%" echo     }
+>>"%PSFIX%" echo   }
+>>"%PSFIX%" echo }
+>>"%PSFIX%" echo if ($fixed -eq 0) { Write-Output '   Nothing needed changing.' }
+
+
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PSFIX%"
+del "%PSFIX%" >nul 2>&1
+call :bar
 
 rem ------------------------------------------------------- icon cache
 rem Ask the shell to rebuild its icon cache. This is a request to Explorer, it
@@ -474,8 +614,8 @@ echo.
 echo            winget install mpv.net
 echo            winget install VideoLAN.VLC
 echo.
-echo        Merlin runs either as a separate process, so neither one puts
-echo        any Rust inside the browser.
+echo        Either runs as a separate process, so a codec crash takes the
+echo        player down rather than the browser.
 echo.
 goto :playerdone
 
@@ -500,13 +640,20 @@ echo    the executable, and only re-pinning clears that one.
 echo    Icon diagnostics       merlin-console --icon-check
 echo    Uninstall        "%TARGET%\uninstall.bat"
 echo.
+echo   -----------------------------------------------------------
+rem Print the whole report. Filtering it to four lines hid the very fields
+rem that were added to diagnose this, so the same wrong conclusion was drawn
+rem twice from a censored summary.
+"%MERLINCON%" %RUNARG% --icon-check
+echo   -----------------------------------------------------------
+echo.
 echo    Python packages are confined to %VENV%
 echo    Your system Python was not modified.
 echo.
 
 choice /c YN /n /m "  Start Merlin now? [Y/N] "
 if errorlevel 2 goto :finish
-start "" "%MERLINEXE%" "%RUNPY%"
+start "" "%MERLINEXE%" %RUNARG%
 :finish
 
 call :endui
@@ -552,8 +699,16 @@ rem --------------------------------------------------------------------------
 rem  :endui   release the scroll region and clear the pinned line
 rem --------------------------------------------------------------------------
 :endui
+rem Clear the reserved line, release the scrolling region, then leave the
+rem cursor at the bottom. Restoring the saved cursor position instead put it
+rem back wherever the bar was last drawn from, so "Press any key to continue"
+rem and the closing summary printed over text that was already on screen.
 if "%VT_OK%"=="1" (
-  <nul set /p "=%ESC%7%ESC%[%ROWS%;1H%ESC%[2K%ESC%8%ESC%[r"
+  <nul set /p "=%ESC%[%ROWS%;1H%ESC%[2K"
+  <nul set /p "=%ESC%[r"
+  <nul set /p "=%ESC%[%ROWS%;1H"
+  echo(
 )
+set "VT_OK=0"
 title Merlin Browser installer
 goto :eof

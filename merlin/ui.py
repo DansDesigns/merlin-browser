@@ -9,7 +9,8 @@ from PyQt6.QtGui import QColor, QFont, QIcon
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QPlainTextEdit, QPushButton, QSizePolicy, QSlider, QTabWidget, QToolButton,
+    QPlainTextEdit, QPushButton, QSizePolicy, QSlider, QSpinBox, QTabWidget,
+    QToolButton,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -142,9 +143,21 @@ START_BACKGROUNDS = {
 }
 
 
+RANDOM_BACKGROUND = "random"
+
+
 def background_css(setting: str) -> tuple[str, bool]:
-    """Return (css background value, is_light)."""
+    """Return (css background value, is_light).
+
+    "random" picks a different built-in each time a new tab page is drawn, so
+    the choice is made here rather than stored: the setting stays "random" and
+    every new tab gets its own.
+    """
     setting = setting or "midnight"
+    if setting == RANDOM_BACKGROUND:
+        import random
+
+        setting = random.choice([k for k in START_BACKGROUNDS])
     if setting.startswith("image:"):
         path = setting[6:]
         data = image_data_uri(path)
@@ -549,6 +562,45 @@ class SettingsDialog(QDialog):
         size_row.addWidget(self.font_box, 1)
         layout.addLayout(size_row)
 
+        theme_row = QHBoxLayout()
+        theme_row.addWidget(QLabel("Theme", page))
+        self.theme_box = QComboBox(page)
+        self._theme_modes = [("manual", "Chosen by hand"),
+                             ("auto", "Follow the time of day")]
+        for _key, label in self._theme_modes:
+            self.theme_box.addItem(label)
+        current_mode = self.settings.get("theme_mode", "manual")
+        for i, (key, _l) in enumerate(self._theme_modes):
+            if key == current_mode:
+                self.theme_box.setCurrentIndex(i)
+        self.theme_box.currentIndexChanged.connect(
+            lambda i: self.settings.set("theme_mode", self._theme_modes[i][0]))
+        theme_row.addWidget(self.theme_box, 1)
+        layout.addLayout(theme_row)
+
+        hours_row = QHBoxLayout()
+        hours_row.addWidget(QLabel("Light from", page))
+        self.light_hour = QSpinBox(page)
+        self.light_hour.setRange(0, 23)
+        self.light_hour.setSuffix(":00")
+        self.light_hour.setValue(int(self.settings.get("theme_light_hour", 7) or 0))
+        self.light_hour.valueChanged.connect(
+            lambda v: self.settings.set("theme_light_hour", v))
+        hours_row.addWidget(self.light_hour)
+        hours_row.addWidget(QLabel("dark from", page))
+        self.dark_hour = QSpinBox(page)
+        self.dark_hour.setRange(0, 23)
+        self.dark_hour.setSuffix(":00")
+        self.dark_hour.setValue(int(self.settings.get("theme_dark_hour", 19) or 0))
+        self.dark_hour.valueChanged.connect(
+            lambda v: self.settings.set("theme_dark_hour", v))
+        hours_row.addWidget(self.dark_hour)
+        hours_row.addStretch(1)
+        layout.addLayout(hours_row)
+
+        layout.addWidget(self._check("Show a clock in the status bar",
+                                     "show_clock"))
+
         corner_row = QHBoxLayout()
         corner_row.addWidget(QLabel("Page corner rounding", page))
         self.corner_slider = QSlider(Qt.Orientation.Horizontal, page)
@@ -574,9 +626,11 @@ class SettingsDialog(QDialog):
         bg_row = QHBoxLayout()
         bg_row.addWidget(QLabel("New tab background", page))
         self.bg_box = QComboBox(page)
-        self._bg_keys = list(START_BACKGROUNDS)
+        self._bg_keys = list(START_BACKGROUNDS) + [RANDOM_BACKGROUND]
         for key in self._bg_keys:
-            self.bg_box.addItem(START_BACKGROUNDS[key][0])
+            label = ("Random, a different one each new tab"
+                     if key == RANDOM_BACKGROUND else START_BACKGROUNDS[key][0])
+            self.bg_box.addItem(label)
         self.bg_box.addItem("Custom image...")
         current_bg = self.settings.get("start_background", "midnight")
         if current_bg.startswith("image:"):
@@ -1098,10 +1152,11 @@ class SettingsDialog(QDialog):
         import sys as _sys
 
         from .brand import APP_VERSION, icon_path
+        from .winicon import process_image as privacy_image
 
         lines = [f"Version: {APP_VERSION}",
                  f"Package: {os.path.dirname(os.path.abspath(cfg.__file__))}",
-                 f"Running as: {os.path.basename(_sys.executable)}"]
+                 f"Running as: {os.path.basename(privacy_image())}"]
         if os.name == "nt":
             from .winexe import build_group, group_size_in_exe, parse_ico
 
@@ -1113,10 +1168,24 @@ class SettingsDialog(QDialog):
                         expected = len(build_group(parse_ico(fh.read())))
                 except Exception:                        # noqa: BLE001
                     expected = 0
-            embedded = group_size_in_exe(_sys.executable)
-            if not os.path.basename(_sys.executable).lower().startswith("merlin"):
-                lines.append("Taskbar icon: running under the interpreter, not "
-                             "Merlin.exe, so Windows uses Python's icon")
+            from .winicon import is_store_python
+
+            image = privacy_image()
+            if is_store_python():
+                lines.append(
+                    "Taskbar icon: this is the Microsoft Store build of "
+                    "Python. Windows takes a Store app's taskbar icon from its "
+                    "package, so Merlin's window icon is set and then ignored. "
+                    "Install Python from python.org and reinstall Merlin to "
+                    "fix it.")
+                embedded = expected = 0
+            embedded = group_size_in_exe(image)
+            if not os.path.basename(image).lower().startswith("merlin"):
+                lines.append(
+                    "Taskbar icon: the window is hosted by "
+                    f"{os.path.basename(image)}, not Merlin.exe, so the "
+                    "taskbar falls back to that program's icon. The shortcut "
+                    "tag is what makes Windows use Merlin's instead.")
             elif embedded and embedded == expected:
                 lines.append("Taskbar icon: embedded in Merlin.exe correctly")
             elif embedded:
