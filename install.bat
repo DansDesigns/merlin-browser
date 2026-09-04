@@ -272,7 +272,6 @@ if errorlevel 1 (
   exit /b 1
 )
 copy /y "%SRC%\merlin-run.py" "%APPDIR%\merlin-run.py" >nul
-copy /y "%SRC%\merlin-boot.py" "%APPDIR%\merlin-boot.py" >nul
 rem version.txt is the only place the version is written, so the installed
 rem copy needs it: without it the browser reports 0.0.0
 if exist "%SRC%\version.txt" copy /y "%SRC%\version.txt" "%APPDIR%\version.txt" >nul
@@ -329,22 +328,24 @@ if errorlevel 1 goto :buildfailed
 if exist "%TARGET%\bin" rmdir /s /q "%TARGET%\bin"
 echo.
 echo        $ pyinstaller --windowed --icon merlin.ico merlin-run.py
-rem The merlin package is deliberately NOT bundled. The executable carries the
-rem interpreter, Qt and the web engine, which change only when a dependency
-rem does; the application itself is read from %APPDIR% at run time. An update
-rem is then a matter of replacing .py files, with no rebuild and no need for
-rem anyone to run this script again.
+rem Built from merlin-run.py with the package included. That script imports
+rem PyQt6 for real, so PyInstaller collects Qt and the web engine properly and
+rem the result is an application that owns its window, which is the only thing
+rem that gives it its own taskbar icon.
+rem
+rem Excluding the package to make updates easier was tried and broke exactly
+rem that: the build stopped producing a working executable and the installer
+rem fell back to the interpreter. Updates are handled instead by merlin-run.py,
+rem which prefers a copy of the package found on disk, so nothing here has to
+rem change for an update to take effect.
 "%VPY%" -m PyInstaller --noconfirm --onedir --windowed --name Merlin ^
   --icon "%APPDIR%\merlin\merlin.ico" ^
-  --exclude-module merlin ^
-  --hidden-import PyQt6.QtWebEngineWidgets ^
-  --hidden-import PyQt6.QtWebEngineCore ^
-  --hidden-import PyQt6.QtMultimedia ^
+  --paths "%APPDIR%" ^
+  --add-data "%APPDIR%\merlin\merlin.ico;merlin" ^
+  --add-data "%APPDIR%\merlin\merlin.png;merlin" ^
+  --add-data "%APPDIR%\merlin\merlin.svg;merlin" ^
   --distpath "%TARGET%\bin" --workpath "%BUILDDIR%" --specpath "%BUILDDIR%" ^
-  "%APPDIR%\merlin-boot.py"
-if exist "%TARGET%\bin\merlin-boot" (
-  if not exist "%TARGET%\bin\Merlin" ren "%TARGET%\bin\merlin-boot" "Merlin"
-)
+  "%APPDIR%\merlin-run.py"
 if errorlevel 1 goto :buildfailed
 if not exist "%TARGET%\bin\Merlin\Merlin.exe" goto :buildfailed
 

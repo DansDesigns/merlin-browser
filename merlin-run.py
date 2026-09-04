@@ -74,7 +74,77 @@ def report(message: str) -> None:
             pass
 
 
+
+# ---------------------------------------------------------------- updating
+# Merlin.exe is built with the merlin package inside it. That is what makes it
+# a real application which owns its window, and therefore shows its own icon.
+#
+# It would normally also mean an update needs a rebuild. It does not: this
+# prefers a copy of the package found on disk beside the executable, so an
+# update replaces .py files there and takes effect next start. If they are
+# missing or broken the bundled copy is used, so an interrupted update cannot
+# stop Merlin starting.
+def _app_dir_on_disk() -> str:
+    if not getattr(sys, "frozen", False):
+        return ""
+    here = os.path.dirname(os.path.abspath(sys.executable))
+    places = []
+    override = os.environ.get("MERLIN_APP_DIR", "").strip()
+    if override:
+        places.append(override)
+    try:
+        with open(os.path.join(here, "app-path.txt"), encoding="utf-8") as handle:
+            written = handle.readline().strip()
+        if written:
+            places.append(written)
+    except OSError:
+        pass
+    places.append(os.path.abspath(os.path.join(here, "..", "..", "app")))
+    for place in places:
+        if place and os.path.isfile(os.path.join(place, "merlin", "app.py")):
+            return place
+    return ""
+
+
+class _DiskFirst:
+    """Load the merlin package from disk instead of from the bundle.
+
+    Sits at the front of sys.meta_path, ahead of PyInstaller's own importer,
+    which would otherwise always win.
+    """
+
+    def __init__(self, root: str):
+        self.root = root
+
+    def find_spec(self, name, path=None, target=None):
+        import importlib.util
+
+        if name != "merlin" and not name.startswith("merlin."):
+            return None
+        base = os.path.join(self.root, *name.split("."))
+        init = os.path.join(base, "__init__.py")
+        if os.path.isfile(init):
+            return importlib.util.spec_from_file_location(
+                name, init, submodule_search_locations=[base])
+        single = base + ".py"
+        if os.path.isfile(single):
+            return importlib.util.spec_from_file_location(name, single)
+        return None
+
+
+def prefer_disk_copy() -> str:
+    root = _app_dir_on_disk()
+    if not root:
+        return ""
+    try:
+        sys.meta_path.insert(0, _DiskFirst(root))
+    except Exception:          # noqa: BLE001
+        return ""
+    return root
+
+
 def main() -> int:
+    prefer_disk_copy()
     try:
         from merlin.app import main as run
     except Exception:          # noqa: BLE001

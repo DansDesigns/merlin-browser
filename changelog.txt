@@ -6,6 +6,14 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  Fixed: the taskbar icon on Windows, again. Merlin.exe is built from
+  merlin-run.py with the package inside it, which is the arrangement that
+  produces a working executable. Excluding the package to make updates simpler
+  broke the build, so the installer fell back to the interpreter and the icon
+  reverted to Python's.
+  Updates still need no rebuild: merlin-run.py prefers a copy of the package
+  found on disk beside the executable, and falls back to the bundled one if it
+  is missing, so an interrupted update cannot stop Merlin starting.
   Fixed: a second, transparent window appeared alongside Merlin. The corner
   overlay had been made an ordinary top level window, which the window manager
   lists and gives a taskbar button. It is a tool window again, owned by the
