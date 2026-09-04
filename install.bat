@@ -14,6 +14,14 @@ rem ===========================================================================
 
 title Merlin Browser installer
 set "TOTAL_STEPS=7"
+
+rem Unattended mode, used by the graphical installer so that it drives this
+rem script rather than reimplementing it. Every prompt takes its answer from
+rem an environment variable instead.
+set "SILENT=0"
+if /i "%~1"=="--yes" set "SILENT=1"
+if /i "%~1"=="-y" set "SILENT=1"
+if "%MERLIN_SILENT%"=="1" set "SILENT=1"
 set "BUILT_EXE=0"
 set "CUR_STEP=0"
 set "CUR_LABEL=Starting"
@@ -140,8 +148,11 @@ if not errorlevel 1 (
     echo       winget install Python.Python.3.13
     echo   or download it from https://www.python.org/downloads/
     echo.
-    choice /c YN /n /m "   Carry on with the Store Python anyway? [Y/N] "
-    if errorlevel 2 (
+    if "%SILENT%"=="1" (set "STOREANSWER=1") else (
+      choice /c YN /n /m "   Carry on with the Store Python anyway? [Y/N] "
+      if errorlevel 2 (set "STOREANSWER=2") else (set "STOREANSWER=1")
+    )
+    if "!STOREANSWER!"=="2" (
       echo   Stopped. Nothing was installed.
       pause
       exit /b 1
@@ -391,8 +402,13 @@ if not exist "%ICO%" (
   set "ICO=%SystemRoot%\System32\shell32.dll,14"
 )
 
-choice /c YN /n /m "        Add a desktop shortcut as well? [Y/N] "
-if errorlevel 2 (set "MERLIN_DESKTOP=0") else (set "MERLIN_DESKTOP=1")
+if "%SILENT%"=="1" (
+  rem the front end has already asked; default to no shortcut if unset
+  if not defined MERLIN_DESKTOP set "MERLIN_DESKTOP=0"
+) else (
+  choice /c YN /n /m "        Add a desktop shortcut as well? [Y/N] "
+  if errorlevel 2 (set "MERLIN_DESKTOP=0") else (set "MERLIN_DESKTOP=1")
+)
 
 rem Shortcuts point at Merlin.exe directly, with the script as a quoted
 rem argument. A shortcut aimed at a .cmd cannot be pinned usefully: Windows
@@ -651,6 +667,7 @@ echo    Python packages are confined to %VENV%
 echo    Your system Python was not modified.
 echo.
 
+if "%SILENT%"=="1" goto :finish
 choice /c YN /n /m "  Start Merlin now? [Y/N] "
 if errorlevel 2 goto :finish
 start "" "%MERLINEXE%" %RUNARG%
@@ -659,8 +676,10 @@ start "" "%MERLINEXE%" %RUNARG%
 call :endui
 echo.
 echo  Done.
+if "%SILENT%"=="1" goto :quiet_end
 echo.
 pause
+:quiet_end
 endlocal
 exit /b 0
 

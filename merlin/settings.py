@@ -81,7 +81,8 @@ DEFAULTS = {
     "show_window_buttons_when_frameless": True,
     "remember_window_geometry": True,
     "tab_orientation": "horizontal",   # horizontal | left | right
-    "page_corner_radius": 10,          # 0 turns the rounded page corners off
+    "page_corner_radius": 10,
+    "smooth_corners": True,            # antialiased corners via an overlay          # 0 turns the rounded page corners off
     "start_background": "midnight",    # see ui.START_BACKGROUNDS, or image:<path>
     "start_tiles": [
         {"title": "Wikipedia", "url": "https://wikipedia.org"},
@@ -103,6 +104,7 @@ DEFAULTS = {
     "search_engine": "DuckDuckGo",
     "custom_search_url": "",           # must contain {} where the query goes
     "search_keywords_enabled": True,
+    "speech_model_path": "",           # a Vosk model folder of your own
     "restore_session": True,
     "single_instance": True,           # links reuse the window already open
     "last_session": [],

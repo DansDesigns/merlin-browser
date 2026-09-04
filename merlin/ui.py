@@ -204,12 +204,21 @@ body.light .stat { color: #5c5f68; }
 body.light h1 { text-shadow: none; }
 h1 { font-size: 40px; margin: 0; letter-spacing: -1px; font-weight: 650; }
 h1 span { color: #6f8ff0; }
-form { display: flex; width: min(620px, 86vw); }
+form { display: flex; width: min(620px, 86vw); position: relative; }
 input {
-  flex: 1; padding: 14px 18px; font-size: 16px; border-radius: 26px;
+  flex: 1; padding: 14px 52px 14px 18px; font-size: 16px; border-radius: 26px;
   border: 1px solid #33363f; background: #22242b; color: #f2f2f5; outline: none;
 }
 input:focus { border-color: #6f8ff0; }
+a.mic {
+  position: absolute; right: 9px; top: 50%; transform: translateY(-50%);
+  display: flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; border-radius: 50%; color: #9a9ba1;
+  text-decoration: none;
+}
+a.mic:hover { color: #ffffff; background: rgba(255, 255, 255, 0.10); }
+body.light a.mic { color: #4a4d55; }
+body.light a.mic:hover { color: #14161a; background: rgba(0, 0, 0, 0.07); }
 .links { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center;
          width: min(680px, 90vw); }
 a.tile {
@@ -219,7 +228,8 @@ a.tile {
 a.tile:hover { background: #2c2f38; color: #fff; }
 a.tile.add { font-size: 18px; line-height: 1; padding: 8px 18px; color: #8d8f98; }
 a.tile.add:hover { color: #fff; border-color: #6f8ff0; }
-body.light a.tile.add { color: #6b6e78; }
+body.light a.tile.add { color: #2f333c; }
+body.light a.tile.add:hover { color: #14161a; }
 .stat { color: #8d8f98; font-size: 13px; }
 """
 
@@ -259,6 +269,16 @@ def start_page_html(settings: cfg.Settings, blocked_total: int = 0,
 <h1>Merlin<span>.</span></h1>
 <form method="get" action="{html.escape(action, quote=True)}">
   <input name="{param}" autofocus placeholder="Search..." autocomplete="off">
+  <a class="mic" href="{APP_SCHEME}://listen" title="Search by voice">
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+      <path d="M12 3.4a2.8 2.8 0 0 1 2.8 2.8v5a2.8 2.8 0 0 1-5.6 0v-5A2.8 2.8 0 0 1 12 3.4z"
+            fill="currentColor"/>
+      <path d="M6.2 11.2a5.8 5.8 0 0 0 11.6 0" fill="none" stroke="currentColor"
+            stroke-width="1.8" stroke-linecap="round"/>
+      <path d="M12 17.1v3.4" fill="none" stroke="currentColor"
+            stroke-width="1.8" stroke-linecap="round"/>
+    </svg>
+  </a>
 </form>
 <div class="links">{''.join(tiles)}</div>
 <div class="stat">{blocked_total} requests blocked this session</div>
@@ -381,6 +401,7 @@ class SettingsDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addWidget(tabs)
+        self._fit_to_tabs(tabs)
         layout.addWidget(buttons)
 
     # ------------------------------------------------------------ helpers
@@ -418,6 +439,20 @@ class SettingsDialog(QDialog):
         form.addRow(self._check("Remember window size and position",
                                 "remember_window_geometry"))
         return page
+
+    def _fit_to_tabs(self, tabs) -> None:
+        """Widen the dialog until the whole tab strip fits.
+
+        Otherwise the strip collapses behind little scroll arrows and half the
+        sections are hidden behind them.
+        """
+        bar = tabs.tabBar()
+        bar.setUsesScrollButtons(False)
+        needed = bar.sizeHint().width()
+        margins = self.layout().contentsMargins()
+        frame = margins.left() + margins.right() + 24
+        self.setMinimumWidth(max(self.minimumWidth(), needed + frame))
+        self.resize(max(self.width(), needed + frame), self.height())
 
     # -------------------------------------------------------------- search
     def _search_tab(self) -> QWidget:
@@ -466,6 +501,38 @@ class SettingsDialog(QDialog):
         self.search_preview.setStyleSheet("color:#9a9ba1; font-size:12px;")
         layout.addWidget(self.search_preview)
         self._update_search_preview()
+
+        speech_row = QHBoxLayout()
+        speech_row.addWidget(QLabel("Speech model", page))
+        self.speech_path = QLineEdit(self.settings.get("speech_model_path"), page)
+        self.speech_path.setPlaceholderText(
+            "left empty, Merlin downloads a small English model on first use")
+        self.speech_path.editingFinished.connect(
+            lambda: self.settings.set("speech_model_path",
+                                      self.speech_path.text().strip()))
+        speech_row.addWidget(self.speech_path, 1)
+        browse = QPushButton("Choose...", page)
+
+        def pick_model():
+            from PyQt6.QtWidgets import QFileDialog
+
+            folder = QFileDialog.getExistingDirectory(
+                self, "Choose a Vosk model folder")
+            if folder:
+                self.speech_path.setText(folder)
+                self.settings.set("speech_model_path", folder)
+
+        browse.clicked.connect(pick_model)
+        speech_row.addWidget(browse)
+        layout.addLayout(speech_row)
+
+        speech_note = QLabel(
+            "The microphone button on the new tab page transcribes on this "
+            "machine with Vosk. Audio is never sent anywhere. The library and "
+            "a 40 MB model are fetched on first use, after asking.", page)
+        speech_note.setWordWrap(True)
+        speech_note.setStyleSheet("color:#9a9ba1; font-size:12px;")
+        layout.addWidget(speech_note)
 
         layout.addWidget(self._check(
             "Enable keyword prefixes", "search_keywords_enabled",
@@ -622,6 +689,11 @@ class SettingsDialog(QDialog):
         corner_row.addWidget(self.corner_slider, 1)
         corner_row.addWidget(self.corner_value)
         layout.addLayout(corner_row)
+
+        layout.addWidget(self._check(
+            "Smooth the page corners", "smooth_corners",
+            "Covers the corners with an antialiased overlay instead of cutting "
+            "them with a mask, which cannot be antialiased and looks stepped."))
 
         bg_row = QHBoxLayout()
         bg_row.addWidget(QLabel("New tab background", page))
@@ -1016,9 +1088,10 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.update_notes)
 
         row = QHBoxLayout()
-        check_button = QPushButton("Check now", page)
-        check_button.clicked.connect(self._check_updates)
-        row.addWidget(check_button)
+        self._pending_version = ""
+        self.check_button = QPushButton("Check now", page)
+        self.check_button.clicked.connect(self._check_updates)
+        row.addWidget(self.check_button)
 
         open_button = QPushButton("Open releases page", page)
         open_button.clicked.connect(self.window_ref.open_releases)
@@ -1049,6 +1122,7 @@ class SettingsDialog(QDialog):
         updater = self.window_ref.updater
         updater.status.connect(self._show_update_status)
         updater.available.connect(self._show_update_notes)
+        updater.installed.connect(self._update_finished)
         if updater.latest:
             self.update_status.setText(
                 f"Latest seen: {updater.latest}")
@@ -1076,10 +1150,34 @@ class SettingsDialog(QDialog):
     def _show_update_status(self, text: str) -> None:
         self.update_status.setText(text)
 
-    def _show_update_notes(self, _version: str, notes: str) -> None:
+    def _show_update_notes(self, version: str, notes: str) -> None:
         self.update_notes.setPlainText(notes)
+        # a newer version exists, so the button becomes the way to get it
+        self.check_button.setText(f"Download and install {version}")
+        self.check_button.setToolTip(
+            "Replaces the application files in place. Your settings, "
+            "bookmarks, history and the virtualenv are left alone.")
+        self._pending_version = version
+
+    def _update_finished(self, ok: bool, message: str) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+
+        self.update_status.setText(message)
+        self.check_button.setEnabled(True)
+        if ok:
+            self.check_button.setText("Check now")
+            self._pending_version = ""
+            QMessageBox.information(self, "Update installed", message)
+        else:
+            QMessageBox.warning(self, "Update not installed", message)
 
     def _check_updates(self) -> None:
+        """Check, or install if a check has already found something."""
+        if getattr(self, "_pending_version", ""):
+            self.check_button.setEnabled(False)
+            self.update_status.setText("Downloading...")
+            self.window_ref.updater.install_latest()
+            return
         self.update_notes.clear()
         self.window_ref.updater.check()
 

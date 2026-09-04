@@ -26,12 +26,14 @@ from PyQt6.QtCore import QEvent, QObject, Qt, QTimer
 # Trackpads report pixel deltas; mice report angle deltas in eighths of a degree.
 # The thresholds are deliberately long: a short flick should not take you back a
 # page, and the arrow is there to show how much further you have to go.
-PIXEL_THRESHOLD = 260       # accumulated px before a swipe registers
-ANGLE_THRESHOLD = 620       # accumulated 1/8-degree units for wheel devices
-TOUCH_THRESHOLD = 190       # px of travel for a two-finger touchscreen swipe
-MIN_DURATION = 0.16         # a swipe faster than this is a flick, not a gesture
+PIXEL_THRESHOLD = 380       # accumulated px before a swipe registers
+ANGLE_THRESHOLD = 900       # accumulated 1/8-degree units for wheel devices
+TOUCH_THRESHOLD = 260       # px of travel for a two-finger touchscreen swipe
+MIN_DURATION = 0.28         # a swipe faster than this is a flick, not a gesture
 IDLE_TIMEOUT = 1000         # ms of no movement before the arrow fades away
-DOMINANCE = 1.6             # horizontal must beat vertical by this factor
+DOMINANCE = 2.6             # horizontal must beat vertical by this factor
+VERTICAL_CANCEL = 55        # px of vertical travel and the swipe is abandoned
+SHOW_FROM = 0.22            # how far in before the arrow appears at all
 COOLDOWN = 0.6              # seconds between navigations
 
 
@@ -145,6 +147,9 @@ class SwipeNavigator(QObject):
         self._last_fire = now
         self._end_gesture(True)
         self._reset()
+        indicator = self._indicator(self._window_for(obj))
+        if indicator is not None:
+            indicator.reset()
         return True
 
     def _reset(self) -> None:
@@ -189,6 +194,14 @@ class SwipeNavigator(QObject):
             horizontal, vertical, threshold = (
                 self._angle_x, self._angle_y, ANGLE_THRESHOLD)
 
+        # Scrolling a page produces plenty of incidental sideways movement, so
+        # a swipe has to clearly beat the vertical component AND stay within a
+        # small vertical budget. Exceeding that budget abandons the gesture
+        # outright rather than leaving a half-filled arrow on screen.
+        if abs(vertical) > VERTICAL_CANCEL:
+            self._end_gesture(False)
+            self._reset()
+            return False
         if abs(horizontal) < abs(vertical) * DOMINANCE:
             if phase == Qt.ScrollPhase.ScrollEnd:
                 self._end_gesture(False)
@@ -202,7 +215,7 @@ class SwipeNavigator(QObject):
             forward = not forward
 
         progress = min(1.0, abs(horizontal) / float(threshold))
-        if progress > 0.06:
+        if progress >= SHOW_FROM:
             self._update_progress(obj, forward, progress)
 
         elapsed = time.monotonic() - self._gesture_started
@@ -248,8 +261,13 @@ class SwipeNavigator(QObject):
         if self.settings.get("invert_swipe", False):
             forward = not forward
 
+        if abs(dy) > VERTICAL_CANCEL:
+            self._end_gesture(False)
+            self._reset()
+            return False
+
         progress = min(1.0, abs(dx) / float(TOUCH_THRESHOLD))
-        if progress > 0.06:
+        if progress >= SHOW_FROM:
             self._update_progress(obj, forward, progress)
         if progress < 1.0 or (time.monotonic() - self._gesture_started) < MIN_DURATION:
             return False

@@ -94,9 +94,17 @@ class SwipeIndicator(QWidget):
         self._fade.setDuration(240 if triggered else 150)
         self._fade.start()
 
+    def reset(self) -> None:
+        """Empty the arrow immediately, leaving nothing for the next gesture."""
+        self._fade.stop()
+        self._fading = False
+        self.set_progress(0.0)
+        self.hide()
+
     def _after_fade(self) -> None:
         if self._fading:
             self._fading = False
+            self._progress = 0.0
             self.hide()
 
     # -------------------------------------------------------------- paint

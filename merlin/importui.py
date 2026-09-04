@@ -58,7 +58,8 @@ class ImportDialog(QDialog):
             "logins.<br><br>"
             "Export them from the other browser instead, from its own password "
             "settings where it can ask you to confirm, then import that file "
-            "here. Delete it afterwards: it is plain text.", self)
+            "here. Delete it afterwards: it is plain text.\n\n"
+            + __import__("merlin.passwords", fromlist=["x"]).backend_note(), self)
         note.setWordWrap(True)
         note.setStyleSheet("color:#9a9ba1; font-size:12px;")
         layout.addWidget(note)
@@ -126,10 +127,21 @@ class ImportDialog(QDialog):
         if problem:
             QMessageBox.warning(self, "Could not import", problem)
             return
+
+        from . import passwords
+
+        if not passwords.backend():
+            QMessageBox.warning(self, "Cannot save logins",
+                                passwords.backend_note())
+            return
+        added, trouble = passwords.add_many(entries)
+        if trouble:
+            QMessageBox.warning(self, "Could not save", trouble)
+            return
         QMessageBox.information(
-            self, "Passwords read",
-            f"{len(entries)} logins were read from that file.\n\n"
-            "Merlin has no password store of its own yet, so nothing has been "
-            "saved. This confirms the export is readable and in the right "
-            "shape; filling forms from it is not built yet.\n\n"
-            "Delete that CSV now. It holds your passwords in plain text.")
+            self, "Logins imported",
+            f"{len(entries)} read, {added} new ones saved.\n\n"
+            + passwords.backend_note()
+            + "\n\nDelete that CSV now: it holds your passwords in plain "
+              "text. Use the key button in the toolbar, or the page's "
+              "right-click menu, to fill a saved login.")

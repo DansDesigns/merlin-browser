@@ -6,7 +6,7 @@ import os
 import time
 
 from PyQt6.QtCore import (
-    QSize, QStandardPaths, QStringListModel, Qt, QTimer, QUrl,
+    QEvent, QSize, QStandardPaths, QStringListModel, Qt, QTimer, QUrl,
 )
 from PyQt6.QtGui import QAction, QCursor, QDesktopServices, QIcon, QKeySequence, QShortcut
 from PyQt6.QtWebEngineCore import (
@@ -54,6 +54,9 @@ class WebPage(QWebEnginePage):
     def acceptNavigationRequest(self, url: QUrl, nav_type, is_main_frame):  # noqa: N802
         if url.scheme() == APP_SCHEME and url.host() == "addtile":
             QTimer.singleShot(0, self.window_ref.add_start_tile)
+            return False
+        if url.scheme() == APP_SCHEME and url.host() == "listen":
+            QTimer.singleShot(0, self.window_ref.start_dictation)
             return False
         if is_main_frame:
             self.apply_cosmetic(url.host())
@@ -138,6 +141,15 @@ class WebView(QWebEngineView):
     def contextMenuEvent(self, event):  # noqa: N802
         menu = self.createStandardContextMenu()
         request = self.lastContextMenuRequest()
+
+        from . import passwords as _pw
+
+        page_url = self.url().toString() if hasattr(self, "url") else ""
+        if _pw.for_host(page_url):
+            fill = menu.addAction("Fill saved login")
+            fill.triggered.connect(
+                lambda _c=False: self.window_ref.fill_saved_login())
+            menu.insertAction(menu.actions()[0], fill)
 
         selected = (request.selectedText() if request is not None else "").strip()
         if selected:
@@ -342,6 +354,7 @@ class BrowserWindow(QMainWindow):
         self.tabs.newTabRequested.connect(lambda: self.new_tab())
         self.tabs.tabDetached.connect(self.detach_tab)
         self.tabs.setOrientation(self.settings.get("tab_orientation", "horizontal"))
+        self.tabs.set_smooth_corners(self.settings.get("smooth_corners", True))
         self.tabs.set_corner_radius(self.settings.get("page_corner_radius", 10))
         self.tabs.set_palette("dark" if self.settings.get("dark_ui") else "light")
         for bar in (self.tabs.h_bar, self.tabs.v_strip):
@@ -492,6 +505,7 @@ class BrowserWindow(QMainWindow):
         menu.addSeparator()
         add("Play page with Merlin's player", lambda: self.open_in_player(),
             "Ctrl+Shift+P")
+        add("Fill a saved login", self.fill_saved_login)
         add("Import from another browser", self.import_from_browser)
         add("Install this page as an app", self.install_web_app)
         add("Codec report", self.show_codecs)
@@ -521,6 +535,7 @@ class BrowserWindow(QMainWindow):
             ("Ctrl+Shift+L", lambda: self.settings.toggle("dark_ui")),
             ("Ctrl+Shift+I", lambda: self.toggle_pin()),
             ("Ctrl+J", self.show_downloads),
+            ("Ctrl+Shift+S", self.start_dictation),
             ("Ctrl+F", self.show_find),
             ("Escape", self.on_escape),
             ("Ctrl+D", self.toggle_bookmark),
@@ -698,12 +713,44 @@ class BrowserWindow(QMainWindow):
 
     def showEvent(self, event):  # noqa: N802
         super().showEvent(event)
+        # The corner overlay is placed while the tabs are built, and then this
+        # window is shown on top of it, so it ends up behind and the corners
+        # look square until something raises it again. That is why hovering the
+        # tab strip appeared to fix it. Re-place it once the window is really
+        # on screen, and again shortly after for platforms that map windows
+        # asynchronously.
+        QTimer.singleShot(0, self._refresh_corners)
+        QTimer.singleShot(350, self._refresh_corners)
         if not getattr(self, "_icon_applied", False):
             from . import winicon
             from .brand import icon_path
 
             # no-op off Windows, so this path is exercised by every test run
             self._icon_applied = winicon.apply_to_window(self, icon_path())
+
+    def moveEvent(self, event):  # noqa: N802
+        super().moveEvent(event)
+        self._refresh_corners()
+
+    def changeEvent(self, event):  # noqa: N802
+        super().changeEvent(event)
+        # Another window taking focus, or this one being minimised and
+        # restored, can leave the corner overlay behind or hidden. Anything
+        # that changes this window's state re-places it.
+        if event.type() in (QEvent.Type.ActivationChange,
+                            QEvent.Type.WindowStateChange):
+            self._refresh_corners()
+
+    def _refresh_corners(self) -> None:
+        tabs = getattr(self, "tabs", None)
+        if tabs is None:
+            return
+        if self.isMinimized() or not self.isVisible():
+            overlay = getattr(tabs, "_overlay", None)
+            if overlay is not None:
+                overlay.hide()
+            return
+        tabs._round_page()
 
     def resizeEvent(self, event):  # noqa: N802
         super().resizeEvent(event)
@@ -805,12 +852,53 @@ class BrowserWindow(QMainWindow):
         if self._closed_tabs:
             self.new_tab(self._closed_tabs.pop())
 
+    def fill_saved_login(self) -> None:
+        """Put a saved username and password into the form on this page."""
+        from . import passwords
+
+        view = self.current()
+        if view is None or not hasattr(view, "url"):
+            return
+        url = view.url().toString()
+        matches = passwords.for_host(url)
+        if not matches:
+            if not passwords.backend():
+                QMessageBox.information(self, "No saved logins",
+                                        passwords.backend_note())
+            else:
+                QMessageBox.information(
+                    self, "No saved login",
+                    f"Nothing saved for {passwords.host_of(url) or 'this site'}."
+                    "\n\nImport logins from the menu, under Import from "
+                    "another browser.")
+            return
+
+        entry = matches[0]
+        if len(matches) > 1:
+            from PyQt6.QtWidgets import QInputDialog
+
+            names = [m.get("username") or "(no username)" for m in matches]
+            chosen, ok = QInputDialog.getItem(
+                self, "Which login?", f"Saved for {entry.get('host', '')}:",
+                names, 0, False)
+            if not ok:
+                return
+            entry = matches[names.index(chosen)]
+
+        script = passwords.fill_script(entry.get("username", ""),
+                                       entry.get("password", ""))
+        view.page().runJavaScript(
+            script, lambda outcome: self.status_label.setText(
+                "Login filled" if outcome == "filled"
+                else str(outcome or "could not fill this page")))
+
     def import_from_browser(self) -> None:
         """Bring bookmarks and history across from another browser."""
         from .importui import ImportDialog
 
         dialog = ImportDialog(self.settings, self.history, self.bookmarks, self)
         dialog.exec()
+        self._refresh_corners()
         self._fill_bookmarks_menu()
         self._refresh_completer()
 
@@ -1023,6 +1111,65 @@ class BrowserWindow(QMainWindow):
         else:
             self.navigate(url)
 
+    def start_dictation(self) -> None:
+        """Speak a search. Recognised locally, never sent anywhere."""
+        from . import dictation
+
+        if getattr(self, "_dictation", None) is not None \
+                and self._dictation.listening():
+            self._dictation.stop()          # pressed again: stop early
+            return
+
+        missing = dictation.what_is_missing(self.settings)
+        if missing:
+            detail = "\n".join(f"  - {item}" for item in missing)
+            answer = QMessageBox.question(
+                self, "Set up voice search?",
+                "Speaking to search runs entirely on this computer: the audio "
+                "is never sent anywhere.\n\nTo do that Merlin needs:\n"
+                + detail
+                + "\n\nFetch them now? It is a one-off, and needs a "
+                  "connection.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            self._speech_setup = dictation.Setup(self.settings, self)
+            self._speech_setup.progress.connect(self.status_label.setText)
+            self._speech_setup.finished.connect(self._speech_setup_done)
+            self.status_label.setText("Setting up voice search...")
+            self._speech_setup.run()
+            return
+
+        self._begin_listening()
+
+    def _speech_setup_done(self, ok: bool, message: str) -> None:
+        self.status_label.setText(message)
+        if ok:
+            self._begin_listening()
+        else:
+            QMessageBox.warning(self, "Voice search not available", message)
+
+    def _begin_listening(self) -> None:
+        from . import dictation
+
+        if getattr(self, "_dictation", None) is None:
+            self._dictation = dictation.Dictation(self.settings, self)
+            self._dictation.started.connect(
+                lambda: self.status_label.setText("Listening... speak now"))
+            self._dictation.finished.connect(self._dictation_result)
+            self._dictation.failed.connect(
+                lambda why: self.status_label.setText(why))
+        self._dictation.start()
+
+    def _dictation_result(self, text: str) -> None:
+        text = (text or "").strip()
+        if not text:
+            self.status_label.setText("Nothing was heard")
+            return
+        self.status_label.setText(f"Heard: {text}")
+        self.navigate(self.settings.search_url(text))
+
     def add_start_tile(self) -> None:
         """Prompt for a shortcut, then refresh every open start page."""
         from PyQt6.QtWidgets import QInputDialog
@@ -1178,6 +1325,8 @@ class BrowserWindow(QMainWindow):
             self.tabs.setOrientation(value)
         elif key == "page_corner_radius":
             self.tabs.set_corner_radius(value)
+        elif key == "smooth_corners":
+            self.tabs.set_smooth_corners(bool(value))
         elif key in ("show_clock", "theme_mode", "theme_light_hour",
                      "theme_dark_hour"):
             self._tick()
@@ -1360,6 +1509,8 @@ class BrowserWindow(QMainWindow):
     def show_settings(self) -> None:
         dialog = SettingsDialog(self.settings, self, self)
         dialog.exec()
+        # a dialog taking and giving back focus disturbs the corner overlay
+        self._refresh_corners()
 
     def _on_update_available(self, version: str, notes: str) -> None:
         self.status_label.setText(

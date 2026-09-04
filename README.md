@@ -59,6 +59,27 @@ Chromium through Qt WebEngine.
 
 ## Installation
 
+There is a graphical installer as well. It runs the same scripts and shows the
+same steps, with the detail available behind a toggle rather than filling the
+screen:
+
+```bash
+python3 install-gui.py      # Linux, needs python3-tk
+install-gui.bat             # Windows
+```
+
+To hand someone a single file with nothing to extract, build the installer into
+one executable. Run this on Windows; a Windows executable has to be built on
+Windows:
+
+```
+tools\build-installer.bat
+```
+
+That produces `dist\MerlinSetup.exe`, the graphical installer with the merlin
+package and `install.bat` packed inside it. It is the same method used for
+Merlin.exe itself: PyInstaller, with the icon in the executable's resources.
+
 ### Linux
 
 ```bash

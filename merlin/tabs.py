@@ -48,13 +48,13 @@ THEME = {
     "dark": {
         "panel": "#1b1c20", "edge": "#26282e",
         "chip": "#232630", "chip_hover": "#2d303a",
-        "chip_active": "#3c414f", "accent": "#6f8ff0",
+        "chip_active": "#3c414f", "accent": "#6f8ff0", "plus": "#c9cbd6",
         "text": "#c8cad2", "text_active": "#ffffff",
     },
     "light": {
         # same background as QMainWindow and the toolbar in LIGHT_QSS, so the
         # strip does not read as a separate panel
-        "panel": "#f6f6f8", "edge": "#e0e2e8",
+        "panel": "#f6f6f8", "edge": "#e0e2e8", "plus": "#2f333c",
         "chip": "#ffffff", "chip_hover": "#ffffff",
         "chip_active": "#dde4f5", "accent": "#3b62d6",
         "text": "#3a3d45", "text_active": "#14161a",
@@ -430,6 +430,7 @@ class VerticalTabStrip(QWidget):
         # shifted it a few pixels and it never sat on the column's axis.
         self.plus = PlusButton(self)
         self.plus.clicked.connect(self.newTabRequested.emit)
+        self._style_plus()
 
         self.frameless = False
 
@@ -443,6 +444,7 @@ class VerticalTabStrip(QWidget):
         # the last tab: the strip stayed open until the pointer was most of the
         # way into the page. Polling is simpler and more reliable here than
         # tracking mouse events across a scroll area and its children.
+        self._leaving = 0
         self._watch = QTimer(self)
         self._watch.setInterval(70)
         self._watch.timeout.connect(self._check_pointer)
@@ -499,6 +501,7 @@ class VerticalTabStrip(QWidget):
         self.update()
 
     def enterEvent(self, event):
+        self._leaving = 0
         self._animate_to(1.0)
         self._watch.start()
         super().enterEvent(event)
@@ -509,26 +512,24 @@ class VerticalTabStrip(QWidget):
         super().leaveEvent(event)
 
     def _pointer_holds_open(self) -> bool:
-        """Open only over the thin column, or over a tab itself."""
-        global_pos = QCursor.pos()
-        local = self.mapFromGlobal(global_pos)
-        if not self.rect().contains(local):
-            return False
-        if self._side == "left":
-            if local.x() <= COLLAPSED_WIDTH:
-                return True
-        elif local.x() >= self.width() - COLLAPSED_WIDTH:
-            return True
-        for row in self.rows:
-            if row.isVisible() and row.rect().contains(row.mapFromGlobal(global_pos)):
-                return True
-        if self.plus.rect().contains(self.plus.mapFromGlobal(global_pos)):
-            return True
-        return False
+        """Open while the pointer is anywhere on the panel.
+
+        This used to be restricted to the thin column and the tab rows, which
+        meant crossing a gap between two rows collapsed the panel under the
+        pointer. The whole panel is the target now, and it closes when the
+        pointer leaves it.
+        """
+        return self.rect().contains(self.mapFromGlobal(QCursor.pos()))
 
     def _check_pointer(self) -> None:
         if self._pointer_holds_open():
+            self._leaving = 0
             return
+        # a short grace period, so brushing the very edge does not snap it shut
+        self._leaving += 1
+        if self._leaving < 2:
+            return
+        self._leaving = 0
         self._watch.stop()
         self._animate_to(0.0)
 
@@ -600,11 +601,20 @@ class VerticalTabStrip(QWidget):
         self.palette_name = name
         for row in self.rows:
             row.set_palette(name)
+        self._style_plus()
         self.update()
 
     def set_corner_radius(self, radius: int) -> None:
         self._corner_radius = max(0, int(radius))
         self.update()
+
+    def _style_plus(self) -> None:
+        """The + takes a dark glyph on light, a light one on dark."""
+        colour = THEME[self.palette_name].get("plus", "#c9cbd6")
+        self.plus.setStyleSheet(
+            f"QToolButton {{ color: {colour}; border: none;"
+            f" background: transparent; font-size: 17px; }}"
+            f"QToolButton:hover {{ color: {THEME[self.palette_name]['accent']}; }}")
 
     def update_selection(self, current: int) -> None:
         for index, row in enumerate(self.rows):
@@ -675,6 +685,8 @@ class TabContainer(QWidget):
         self.v_strip.hide()
 
         self._corner_radius = 10
+        self._smooth_corners = True
+        self._overlay = None
         self.setObjectName("tabContainer")
         self.setAutoFillBackground(True)
         self.root = QVBoxLayout(self)
@@ -888,6 +900,76 @@ class TabContainer(QWidget):
         self._apply_reserved_margin()
         self._round_page()
 
+    def set_smooth_corners(self, smooth: bool) -> None:
+        self._smooth_corners = bool(smooth)
+        if not self._smooth_corners and self._overlay is not None:
+            self._overlay.hide()
+        self._round_page()
+
+    def _keep_overlay_above(self) -> None:
+        """Nudge the overlay back on top.
+
+        There is no signal for "this window was raised", and anything that
+        raises the browser window puts the overlay behind it. Checking once a
+        second is cheap, and only while this window is the active one, so it
+        never fights another application for the front.
+        """
+        overlay = self._overlay
+        if overlay is None or not overlay.isVisible():
+            return
+        window = self.window()
+        if window is not None and window.isActiveWindow():
+            overlay.raise_()
+
+    def _corner_overlay(self):
+        """A translucent top-level that paints the corners with antialiasing.
+
+        Created on demand, and only once. If the platform will not give us a
+        translucent click-through window, None comes back and the region mask
+        is used instead.
+        """
+        if not self._smooth_corners:
+            return None
+        if self._overlay is None:
+            try:
+                from .corners import CornerOverlay
+
+                self._overlay = CornerOverlay(self.window())
+                self._overlay_watch = QTimer(self)
+                self._overlay_watch.setInterval(1000)
+                self._overlay_watch.timeout.connect(self._keep_overlay_above)
+                self._overlay_watch.start()
+            except Exception:                            # noqa: BLE001
+                self._overlay = None
+                self._smooth_corners = False
+        return self._overlay
+
+    def _strip_inset(self) -> tuple[int, int]:
+        """How far the strip currently covers the page, left and right."""
+        if self._orientation not in ("left", "right") or not self.v_strip.isVisible():
+            return 0, 0
+        strip = self.v_strip.geometry()
+        local = self.stack.mapTo(self, self.stack.rect().topLeft()).x()
+        if self._orientation == "left":
+            return max(0, (strip.x() + strip.width()) - local), 0
+        return 0, max(0, (local + self.stack.width()) - strip.x())
+
+    def _page_rect_global(self):
+        origin = self.stack.mapToGlobal(self.stack.rect().topLeft())
+        rect = QRect(origin, self.stack.size())
+        if self._orientation in ("left", "right") and self.v_strip.isVisible():
+            strip = self.v_strip.geometry()
+            local = self.stack.mapTo(self, self.stack.rect().topLeft()).x()
+            if self._orientation == "left":
+                overlap = (strip.x() + strip.width()) - local
+                if overlap > 0:
+                    rect.setLeft(rect.left() + overlap)
+            else:
+                overlap = (local + self.stack.width()) - strip.x()
+                if overlap > 0:
+                    rect.setRight(rect.right() - overlap)
+        return rect
+
     def _round_page(self) -> None:
         """Clip the page to rounded corners, following the strip's edge.
 
@@ -924,12 +1006,31 @@ class TabContainer(QWidget):
             self.stack.clearMask()
             return
 
+        overlay = self._corner_overlay()
+        if overlay is not None and self.isVisible():
+            # covered, not cut: the mask would undo the antialiasing
+            self.stack.clearMask()
+            left, right = self._strip_inset()
+            overlay.configure(radius, THEME[self.v_strip.palette_name]["panel"],
+                              left, right)
+            # fixed geometry, so widening the strip never resizes this window
+            origin = self.stack.mapToGlobal(self.stack.rect().topLeft())
+            overlay.follow(QRect(origin, self.stack.size()))
+            return
+
         path = QPainterPath()
         path.addRoundedRect(rect, radius, radius)
         region = QRegion(path.toFillPolygon().toPolygon())
-        # anything the strip covers is masked out, and the container behind is
-        # the same colour, so nothing shows through
         self.stack.setMask(region)
+
+    def moveEvent(self, event):  # noqa: N802
+        super().moveEvent(event)
+        self._round_page()
+
+    def hideEvent(self, event):  # noqa: N802
+        super().hideEvent(event)
+        if self._overlay is not None:
+            self._overlay.hide()
 
     def resizeEvent(self, event):  # noqa: N802
         super().resizeEvent(event)

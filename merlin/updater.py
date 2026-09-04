@@ -16,13 +16,15 @@ or a version plus notes, first line wins:
 """
 from __future__ import annotations
 
+import os
 import re
+import threading
 import urllib.error
 import urllib.request
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
-from .brand import APP_VERSION
+from .brand import APP_VERSION, user_agent_suffix
 
 REPO_OWNER = "DansDesigns"
 REPO_NAME = "merlin-browser"
@@ -102,6 +104,7 @@ class UpdateCheck(QThread):
 class Updater(QObject):
     status = pyqtSignal(str)          # human-readable line for the dialog
     available = pyqtSignal(str, str)  # version, notes
+    installed = pyqtSignal(bool, str)  # succeeded, message
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -133,3 +136,103 @@ class Updater(QObject):
             self.available.emit(version, notes)
         elif not quiet:
             self.status.emit(f"Up to date. {APP_VERSION} is the latest.")
+
+    # ------------------------------------------------------------- updating
+    def install_latest(self) -> None:
+        """Fetch the newest files and put them in place, on a worker thread."""
+        threading.Thread(target=self._install, daemon=True).start()
+
+    def _install(self) -> None:
+        import io
+        import shutil
+        import sys
+        import tempfile
+        import zipfile
+
+        if getattr(sys, "frozen", False):
+            self.installed.emit(False, (
+                "This copy is a built executable, so its files live inside the "
+                "executable itself and cannot be swapped out. Download the new "
+                "version and run install.bat again; it will rebuild in place "
+                "and keep your settings."))
+            return
+
+        target = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if not os.access(target, os.W_OK):
+            self.installed.emit(False, f"No permission to write to {target}.")
+            return
+
+        self.status.emit("Downloading the new version...")
+        archive = f"{REPO_URL}/archive/refs/heads/main.zip"
+        try:
+            request = urllib.request.Request(
+                archive, headers={"User-Agent": user_agent_suffix()})
+            with urllib.request.urlopen(request, timeout=60) as response:
+                blob = response.read()
+        except Exception as exc:                         # noqa: BLE001
+            self.installed.emit(False, f"Download failed: {exc}")
+            return
+
+        self.status.emit("Unpacking...")
+        try:
+            bundle = zipfile.ZipFile(io.BytesIO(blob))
+        except zipfile.BadZipFile:
+            self.installed.emit(False, "The download was not a valid archive.")
+            return
+
+        # the archive holds one top-level folder, repo-branch
+        names = bundle.namelist()
+        root = names[0].split("/")[0] + "/" if names else ""
+        wanted = ("merlin/", "merlin-run.py", "version.txt")
+
+        staged = tempfile.mkdtemp(prefix="merlin-update-")
+        try:
+            found = False
+            for name in names:
+                if not name.startswith(root) or name.endswith("/"):
+                    continue
+                relative = name[len(root):]
+                if not relative.startswith(wanted):
+                    continue
+                found = True
+                destination = os.path.join(staged, relative)
+                os.makedirs(os.path.dirname(destination), exist_ok=True)
+                with bundle.open(name) as source, \
+                        open(destination, "wb") as handle:
+                    shutil.copyfileobj(source, handle)
+            if not found:
+                self.installed.emit(False, "The archive had no application "
+                                           "files in it.")
+                return
+
+            # Replace rather than uninstall: the virtualenv, the settings and
+            # anything else in the folder are left exactly as they are.
+            self.status.emit("Replacing the application files...")
+            package = os.path.join(staged, "merlin")
+            if os.path.isdir(package):
+                live = os.path.join(target, "merlin")
+                keep = os.path.join(target, "merlin.previous")
+                if os.path.isdir(keep):
+                    shutil.rmtree(keep, ignore_errors=True)
+                if os.path.isdir(live):
+                    os.rename(live, keep)
+                try:
+                    shutil.copytree(package, live)
+                except Exception:                        # noqa: BLE001
+                    # put the old one back rather than leave nothing behind
+                    if os.path.isdir(keep) and not os.path.isdir(live):
+                        os.rename(keep, live)
+                    raise
+                shutil.rmtree(keep, ignore_errors=True)
+            for single in ("merlin-run.py", "version.txt"):
+                source_file = os.path.join(staged, single)
+                if os.path.isfile(source_file):
+                    shutil.copyfile(source_file, os.path.join(target, single))
+        except Exception as exc:                         # noqa: BLE001
+            self.installed.emit(False, f"Could not replace the files: {exc}")
+            return
+        finally:
+            shutil.rmtree(staged, ignore_errors=True)
+
+        self.installed.emit(True, (
+            f"Version {self.latest} is in place. Restart Merlin to use it."))
