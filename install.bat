@@ -200,9 +200,31 @@ call :step 3 "Installing PyQt6 and the web engine, about 150 MB"
 echo        pip prints its own progress below. This is the slow part,
 echo        usually one to three minutes depending on your connection.
 echo.
-echo        Updating pip inside the environment
-echo        $ "%VPY%" -m pip install --upgrade pip
-"%VPY%" -m pip install --upgrade pip
+rem pip is already in the new environment. Upgrading it is usually harmless
+rem and occasionally the difference between a wheel installing and not, but it
+rem is a download, so it is asked rather than assumed.
+set "PIPVER="
+for /f "tokens=2" %%p in ('"%VPY%" -m pip --version 2^>nul') do (
+  if not defined PIPVER set "PIPVER=%%p"
+)
+if defined PIPVER (echo        pip %PIPVER% is already in this environment.)
+
+set "UPGRADE_PIP=%MERLIN_UPGRADE_PIP%"
+if not defined UPGRADE_PIP (
+  if "%SILENT%"=="1" (
+    set "UPGRADE_PIP=0"
+  ) else (
+    choice /c YN /n /m "        Replace it with the latest? [Y/N] "
+    if errorlevel 2 (set "UPGRADE_PIP=0") else (set "UPGRADE_PIP=1")
+  )
+)
+
+if "%UPGRADE_PIP%"=="1" (
+  echo        $ "%VPY%" -m pip install --upgrade pip
+  "%VPY%" -m pip install --upgrade pip
+) else (
+  echo        Keeping pip %PIPVER%.
+)
 call :bar
 echo.
 echo        Downloading and installing PyQt6 and Qt WebEngine
@@ -253,6 +275,7 @@ copy /y "%SRC%\merlin-run.py" "%APPDIR%\merlin-run.py" >nul
 rem version.txt is the only place the version is written, so the installed
 rem copy needs it: without it the browser reports 0.0.0
 if exist "%SRC%\version.txt" copy /y "%SRC%\version.txt" "%APPDIR%\version.txt" >nul
+if exist "%SRC%\changelog.txt" copy /y "%SRC%\changelog.txt" "%APPDIR%\changelog.txt" >nul
 if errorlevel 1 (
   call :endui
   echo  [X] merlin-run.py is missing from the download.

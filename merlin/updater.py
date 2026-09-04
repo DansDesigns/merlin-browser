@@ -31,10 +31,17 @@ REPO_NAME = "merlin-browser"
 REPO_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}"
 RELEASES_URL = f"{REPO_URL}/releases"
 
+RAW_URL = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}"
+
 # Try the usual default branches in order; a repo has one or the other.
 VERSION_URLS = [
-    f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/version.txt",
-    f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/master/version.txt",
+    f"{RAW_URL}/main/version.txt",
+    f"{RAW_URL}/master/version.txt",
+]
+
+CHANGELOG_URLS = [
+    f"{RAW_URL}/main/changelog.txt",
+    f"{RAW_URL}/master/changelog.txt",
 ]
 
 TIMEOUT = 12
@@ -86,9 +93,44 @@ def fetch_version() -> tuple[str, str, str]:
         if not parse_version(version):
             last_error = f"could not read a version from {version[:40]!r}"
             continue
-        notes = "\n".join(lines[1:]).strip()
-        return version, notes, ""
+        # version.txt holds the version and nothing else; the notes for that
+        # release come from changelog.txt
+        return version, fetch_notes(version), ""
     return "", "", last_error or "could not reach GitHub"
+
+
+def fetch_notes(version: str) -> str:
+    """The changelog entry for one version, or an empty string.
+
+    Entries start with the version on a line of its own and run until the next
+    one, so a release's notes can be pulled out without any other structure.
+    """
+    for url in CHANGELOG_URLS:
+        try:
+            request = urllib.request.Request(
+                url, headers={"User-Agent": user_agent_suffix()})
+            with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+                raw = response.read(65536).decode("utf-8", "replace")
+        except Exception:                                 # noqa: BLE001
+            continue
+        return notes_for(raw, version)
+    return ""
+
+
+def notes_for(changelog: str, version: str) -> str:
+    collected: list[str] = []
+    found = False
+    for line in changelog.splitlines():
+        stripped = line.strip()
+        if stripped == version:
+            found = True
+            continue
+        if found:
+            # the next version heading ends this entry
+            if stripped and parse_version(stripped) and stripped != version:
+                break
+            collected.append(line.rstrip())
+    return "\n".join(collected).strip()
 
 
 class UpdateCheck(QThread):
@@ -124,6 +166,12 @@ class Updater(QObject):
         self._thread.start()
 
     def _done(self, version: str, notes: str, error: str, quiet: bool) -> None:
+        if not parse_version(APP_VERSION):
+            # no version.txt beside the package, so there is nothing to compare
+            self.status.emit(
+                "This copy has no version.txt, so updates cannot be checked. "
+                "Add one containing just the version number.")
+            return
         if error:
             if not quiet:
                 self.status.emit(f"Check failed: {error}")

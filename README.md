@@ -31,16 +31,21 @@ Chromium through Qt WebEngine.
 - HTTPS upgrade, third-party cookie blocking, `DNT` and `Sec-GPC` headers, and a
   WebRTC local-IP-leak switch
 - Per-site controls behind the shield button, with a live blocked count
+- GPU fingerprinting protection: one generic WebGL vendor and renderer for
+  every user, emptied WebGPU adapter descriptors, and a WebGL extension list
+  that varies per site so a hash of it cannot follow you around
 
 **Interface**
 
 - Light and dark themes, with toolbar icons drawn to match
 - Configurable new tab page: background gradients or your own image, and up to
   five shortcut tiles
-- Adjustable page corner rounding
+- Adjustable page corner rounding, drawn antialiased by an overlay
+- A clock in the status bar, and a theme that can follow the time of day
 - Optional frameless window, switchable at runtime or from a `.desktop` action
 - Twelve search engines with keyword prefixes, plus a custom engine slot
 - Right-click selected text to search for it
+- Speak to search from the new tab page, recognised on your own machine
 
 **Media**
 
@@ -48,6 +53,13 @@ Chromium through Qt WebEngine.
 - Three playback modes: player embedded in a tab, player in its own window, or
   in-process libVLC
 - `--codecs` reports what your build can decode
+
+**Bringing things across**
+
+- Import bookmarks and history from Chrome, Edge, Brave, Vivaldi, Opera,
+  Chromium and Firefox
+- Import saved logins from a CSV exported by another browser, kept encrypted by
+  DPAPI on Windows or the system keyring elsewhere
 
 **Web apps**
 
@@ -192,8 +204,17 @@ merlin/
   settings.py    configuration
   winicon.py     Windows taskbar icon
   winexe.py      writing the icon into a Windows executable
+  corners.py     the antialiased rounded corner overlay
+  fingerprint.py WebGL and WebGPU de-identification
+  passwords.py   saved logins, encrypted by the operating system
+  importer.py    reading other browsers' bookmarks and history
+  importui.py    the import dialog
+  dictation.py   local speech to text for the search box
+  single.py      one window, so links reuse the browser already open
+  updater.py     version check and in-place update
 tests/           checks for the platform-specific start-up paths
-tools/           the logo generator
+tools/           the logo generator and the installer build script
+changelog.txt    what changed in each release
 ```
 
 ## Built on
@@ -216,13 +237,20 @@ The filter syntax follows the format established by
   `$redirect` filter options are parsed and skipped
 - Session restore saves URLs, not per-tab history
 - Embedded player mode needs X11 or XWayland; window mode covers Wayland
-- Corner rounding uses a region mask, which is not antialiased, so a large
-  radius may show slight stair-stepping
+- Reading another browser's saved passwords directly is not supported, and will
+  not be: that store is encrypted by the operating system, and opening it means
+  shipping the same technique a credential stealer uses. Export to CSV instead
 
 ## Updates
 
 Settings, Updates checks `version.txt` in the project repository and reports
-whether a newer version exists. It never downloads or installs anything.
+whether a newer version exists, with the notes for that release taken from
+`changelog.txt`. If one is found, the button becomes "Download and install",
+which replaces the application files in place and leaves the virtualenv,
+settings, bookmarks and history alone.
+
+`version.txt` holds the version number and nothing else. Everything that shows
+a version reads it from there, so there is one place to change it.
 
 ## Licence
 

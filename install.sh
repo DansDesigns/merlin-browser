@@ -83,8 +83,8 @@ trap ui_done EXIT INT TERM
 bar() {                      # bar [spinner-char]
   local spin="${1:- }"
   local width=$(( TERM_COLS - 30 ))
-  [[ "$width" -gt 46 ]] && width=46
-  [[ "$width" -lt 10 ]] && width=10
+  if [[ "$width" -gt 46 ]]; then width=46; fi
+  if [[ "$width" -lt 10 ]]; then width=10; fi
   local pct=$(( CURRENT_STEP * 100 / TOTAL_STEPS ))
   local filled=$(( CURRENT_STEP * width / TOTAL_STEPS ))
   local track="" i
@@ -145,7 +145,13 @@ echo "  ==========================================================="
 
 [[ -f "$SRC/merlin/app.py" ]] || { say "Run this from the extracted folder."; exit 1; }
 
-SRC_VERSION="$(head -1 "$SRC/version.txt" 2>/dev/null | tr -d '\r' | awk '{print $1}')"
+# Guarded, because version.txt is maintained separately and may not be here.
+# With pipefail set, head failing on a missing file fails the whole assignment,
+# and with errexit that ends the script before anything is installed.
+SRC_VERSION=""
+if [[ -f "$SRC/version.txt" ]]; then
+  SRC_VERSION="$(head -1 "$SRC/version.txt" | tr -d '\r' | awk '{print $1}')"
+fi
 say "Installing version ${SRC_VERSION:-unknown} from $SRC"
 
 # ------------------------------------------------------------------ python
@@ -207,7 +213,28 @@ else
   run "Creating venv" "$PYTHON" -m venv "$VENV"
 fi
 VPY="$VENV/bin/python"
-run "Updating pip" "$VPY" -m pip install --upgrade pip || true
+# pip is already in the new environment. Upgrading it is usually harmless and
+# occasionally the difference between a wheel installing and not, but it is a
+# download, so it is asked rather than assumed.
+PIP_VERSION="$("$VPY" -m pip --version 2>/dev/null | awk '{print $2}')"
+if [[ -n "$PIP_VERSION" ]]; then
+  say "pip $PIP_VERSION is already in this environment."
+fi
+UPGRADE_PIP="${MERLIN_UPGRADE_PIP:-}"
+if [[ -z "$UPGRADE_PIP" ]]; then
+  if [[ "$ASSUME_YES" == "1" ]]; then
+    UPGRADE_PIP=0
+  elif ask "Replace it with the latest?"; then
+    UPGRADE_PIP=1
+  else
+    UPGRADE_PIP=0
+  fi
+fi
+if [[ "$UPGRADE_PIP" == "1" ]]; then
+  run "Updating pip" "$VPY" -m pip install --upgrade pip || true
+else
+  say "Keeping pip ${PIP_VERSION:-as it is}."
+fi
 
 if [[ "$MODE" == "venv" ]]; then
   say "Installing PyQt6 and the web engine, roughly 150 MB."
@@ -257,12 +284,21 @@ status "Copying the merlin package"
 rm -rf "$LIB/merlin"
 cp -r "$SRC/merlin" "$LIB/merlin"
 say "$(find "$LIB/merlin" -type f | wc -l) files copied"
-[[ -f "$SRC/README.md" ]] && cp "$SRC/README.md" "$LIB/README.md"
+if [[ -f "$SRC/README.md" ]]; then
+  cp "$SRC/README.md" "$LIB/README.md"
+fi
 
 cp "$SRC/merlin-run.py" "$LIB/merlin-run.py"
 # version.txt is the only place the version is written, so the installed copy
 # needs it: without it the browser reports 0.0.0
-[[ -f "$SRC/version.txt" ]] && cp "$SRC/version.txt" "$LIB/version.txt"
+# An "&&" here would end the script under set -e whenever the file is absent,
+# which it now is by default: version.txt is maintained separately.
+if [[ -f "$SRC/version.txt" ]]; then
+  cp "$SRC/version.txt" "$LIB/version.txt"
+fi
+if [[ -f "$SRC/changelog.txt" ]]; then
+  cp "$SRC/changelog.txt" "$LIB/changelog.txt"
+fi
 
 cat > "$LIB/merlin-browser" <<LAUNCH
 #!/usr/bin/env bash

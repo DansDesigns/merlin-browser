@@ -35,7 +35,9 @@ from .ui import (
 )
 
 RESIZE_MARGIN = 6
-from .brand import APP_NAME, APP_SCHEME, APP_VERSION, START_URLS
+from .brand import (
+    APP_BLURB, APP_NAME, APP_SCHEME, APP_VERSION, START_URLS,
+)
 
 
 # --------------------------------------------------------------------- page
@@ -1525,8 +1527,7 @@ class BrowserWindow(QMainWindow):
         QMessageBox.about(
             self, "About Merlin",
             f"<h3>{APP_NAME} Browser {APP_VERSION}</h3>"
-            "<p>A web browser built with Python and C++, on Qt and the "
-            "Chromium engine.</p>"
+            f"<p>{APP_BLURB}</p>"
             f"<p>Qt {QT_VERSION_STR}<br>"
             f"{self.filter_engine.rule_count:,} filter rules<br>"
             f"{self._engine_summary()}</p>"

@@ -869,6 +869,13 @@ class SettingsDialog(QDialog):
                                      "block_third_party_cookies"))
         layout.addWidget(self._check("Send Do Not Track / Global Privacy Control",
                                      "send_do_not_track"))
+        layout.addWidget(self._check(
+            "Hide the graphics card from websites", "gpu_protection",
+            "WebGL and WebGPU report your exact GPU and driver. That barely "
+            "changes, so it identifies this machine across unrelated sites. "
+            "Merlin reports one generic value, empties the WebGPU "
+            "descriptors, and varies the extension list per site. Applies to "
+            "new windows."))
         layout.addWidget(self._check("Upgrade navigations to HTTPS", "https_upgrade"))
         layout.addWidget(self._check("Prevent WebRTC local IP leaks",
                                      "block_webrtc_leak"))

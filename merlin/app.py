@@ -405,6 +405,22 @@ def main(argv: list[str] | None = None) -> int:
     interceptor = adblock.RequestInterceptor(filter_engine, settings, app)
     profile.setUrlRequestInterceptor(interceptor)
 
+    if settings.get("gpu_protection", True):
+        from PyQt6.QtWebEngineCore import QWebEngineScript
+
+        from . import fingerprint
+
+        guard = QWebEngineScript()
+        guard.setName("merlin-gpu-guard")
+        guard.setSourceCode(fingerprint.build_script(fingerprint.new_seed()))
+        # before the page's own scripts, or a tracker could read the real
+        # values first, and in the page's world so that page scripts see it
+        guard.setInjectionPoint(
+            QWebEngineScript.InjectionPoint.DocumentCreation)
+        guard.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
+        guard.setRunsOnSubFrames(True)
+        profile.scripts().insert(guard)
+
 
     history = History()
     bookmarks = Bookmarks()

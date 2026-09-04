@@ -1,0 +1,29 @@
+Merlin Browser changelog
+========================
+
+Newest first. Each entry starts with its version on its own line, which is how
+the updater finds the notes for a release. The version number itself lives in
+version.txt and nowhere else.
+
+1.5.2
+  Graphical installer, which runs the same scripts as the text one and shows
+  the same steps with the detail behind a toggle. It can be built into a single
+  MerlinSetup.exe with tools\build-installer.bat.
+  The installer no longer flashes a console window when run from the GUI.
+  Speak to search on the new tab page, recognised locally with Vosk.
+  Saved logins, encrypted by DPAPI on Windows or the system keyring elsewhere,
+  imported from a CSV exported by another browser.
+  Import bookmarks and history from Chrome, Edge, Brave, Vivaldi, Opera,
+  Chromium and Firefox.
+  Updates can be downloaded and installed in place from Settings.
+  Tabs can be reordered and dragged out into their own window.
+  Downloads and history dropdowns; the menu button moved to the far right.
+  A clock in the status bar, and a theme that can follow the time of day.
+  Random new tab background option.
+  Smooth, antialiased page corners drawn by an overlay rather than a mask.
+  Fixed: the taskbar icon on Windows, which needed a real executable rather
+  than a script run through an interpreter.
+  Fixed: sites that redirect to another domain were blocked by the content
+  blocker, which should never filter a top level page.
+  Fixed: the address bar was empty for a tab opened from a link.
+  Fixed: page scrolling could half fill the back and forward gesture arrows.

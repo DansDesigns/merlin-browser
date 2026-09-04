@@ -3,6 +3,7 @@ from __future__ import annotations
 
 APP_NAME = "Merlin"
 APP_TAGLINE = "Merlin Browser"
+APP_BLURB = ("Merlin Browser: unleashing the magic of the internet. Built on Python, C++, Qt and Chromium.")
 APP_SLUG = "merlin"              # config dirs, desktop file, executable name
 APP_SCHEME = "merlin"            # merlin://start
 def _read_version() -> str:
@@ -27,7 +28,10 @@ def _read_version() -> str:
                 return first.split()[0]
         except OSError:
             continue
-    return "0.0.0"
+    # version.txt is not shipped: it is maintained separately and dropped in.
+    # Saying so is better than inventing a number that would make the update
+    # check think every release is newer.
+    return "unknown"
 
 
 APP_VERSION = _read_version()

@@ -92,17 +92,22 @@ class Installer:
             bg=BG, fg=TEXT, font=("Segoe UI", 20, "bold"))
         heading.pack(anchor="w", padx=24, pady=(22, 2))
 
-        tk.Label(root, bg=BG, fg=MUTED, justify="left",
+        tk.Label(root, bg=BG, fg=MUTED, justify="left", wraplength=640,
                  font=("Segoe UI", 10),
-                 text="A web browser built with Python and C++, on Qt and the "
-                      "Chromium engine.").pack(anchor="w", padx=24)
+                 text="Merlin Browser: unleashing the magic of the internet. "
+                      "Built on Python, C++, Qt and Chromium."
+                 ).pack(anchor="w", padx=24)
 
         self.options = tk.Frame(root, bg=BG)
         self.options.pack(fill="x", padx=24, pady=(18, 6))
 
         self.desktop = tk.BooleanVar(value=True)
         self.system_qt = tk.BooleanVar(value=True)
+        self.upgrade_pip = tk.BooleanVar(value=False)
         self._checkbox(self.options, "Add a desktop shortcut", self.desktop)
+        self._checkbox(self.options,
+                       "Replace pip in the new environment with the latest",
+                       self.upgrade_pip)
         if os.name != "nt":
             self._checkbox(
                 self.options,
@@ -215,6 +220,7 @@ class Installer:
         environment["MERLIN_SILENT"] = "1"
         environment["MERLIN_DESKTOP"] = "1" if self.desktop.get() else "0"
         environment["MERLIN_ASSUME_YES"] = "1"
+        environment["MERLIN_UPGRADE_PIP"] = "1" if self.upgrade_pip.get() else "0"
         threading.Thread(target=self.run, args=(environment,),
                          daemon=True).start()
 

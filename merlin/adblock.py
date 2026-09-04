@@ -576,6 +576,22 @@ class RequestInterceptor(QWebEngineUrlRequestInterceptor):
         self.engine = engine
         self.settings = settings
         self.counts: dict[str, int] = defaultdict(int)
+        # host -> the original http address, so a failed upgrade can go back
+        self.upgraded: dict[str, str] = {}
+
+    def no_upgrade(self) -> set:
+        """Hosts where https did not work, so http is used instead."""
+        listed = self.settings.get("https_upgrade_exceptions") or []
+        return {str(h).lower() for h in listed}
+
+    def remember_upgrade_failure(self, host: str) -> None:
+        host = (host or "").lower()
+        if not host:
+            return
+        listed = list(self.settings.get("https_upgrade_exceptions") or [])
+        if host not in listed:
+            listed.append(host)
+            self.settings.set("https_upgrade_exceptions", listed)
 
     def interceptRequest(self, info: QWebEngineUrlRequestInfo) -> None:  # noqa: N802
         url = info.requestUrl()
@@ -590,12 +606,21 @@ class RequestInterceptor(QWebEngineUrlRequestInterceptor):
             info.setHttpHeader(b"DNT", b"1")
             info.setHttpHeader(b"Sec-GPC", b"1")
 
-        # HTTPS upgrade for top-level navigations
+        # HTTPS upgrade for top-level navigations.
+        #
+        # Not every host that answers on http also answers on https. Domain
+        # forwarders in particular often do not: they take a .co.uk and bounce
+        # it to somewhere else, with no certificate of their own. Upgrading
+        # that first hop kills the redirect before it happens, and the site
+        # simply never loads. Hosts that have failed this way once are left
+        # alone afterwards.
         if (self.settings.get("https_upgrade") and scheme == "http"
                 and info.resourceType() == RT.ResourceTypeMainFrame
-                and not _is_local(url)):
+                and not _is_local(url)
+                and url.host().lower() not in self.no_upgrade()):
             upgraded = QUrl(url)
             upgraded.setScheme("https")
+            self.upgraded[url.host().lower()] = url.toString()
             info.redirect(upgraded)
             return
 

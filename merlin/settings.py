@@ -114,7 +114,9 @@ DEFAULTS = {
     "cosmetic_filtering": True,
     "block_third_party_cookies": True,
     "send_do_not_track": True,
+    "gpu_protection": True,            # de-identify WebGL and WebGPU
     "https_upgrade": True,
+    "https_upgrade_exceptions": [],    # hosts that only answer on http
     "block_webrtc_leak": True,
     "shields_exceptions": [],          # hostnames where shields are off
     "filter_lists": list(DEFAULT_FILTER_LISTS),
