@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions EnableDelayedExpansion
 rem ===========================================================================
 rem  Merlin Browser - Windows uninstaller
 rem
@@ -10,6 +10,12 @@ rem  does is copy itself to %TEMP% and re-run from there.
 rem ===========================================================================
 
 title Merlin Browser uninstaller
+
+rem Unattended mode, for the graphical uninstaller. Each prompt takes its
+rem answer from an environment variable instead of the keyboard.
+set "SILENT=0"
+if /i "%~1"=="--yes" set "SILENT=1"
+if "%MERLIN_SILENT%"=="1" set "SILENT=1"
 
 set "TARGET=%LOCALAPPDATA%\Programs\Merlin"
 set "STARTMENU=%APPDATA%\Microsoft\Windows\Start Menu\Programs"
@@ -38,8 +44,11 @@ rem would have closed any other Python program you had open.
 tasklist /fi "IMAGENAME eq Merlin.exe" 2>nul | find /i "Merlin.exe" >nul
 if not errorlevel 1 (
   echo   Merlin is running. It has to close before its files can be removed.
-  choice /c YN /n /m "   Close Merlin now? [Y/N] "
-  if not errorlevel 2 (
+  if "%SILENT%"=="1" (set "CLOSEIT=1") else (
+    choice /c YN /n /m "   Close Merlin now? [Y/N] "
+    if errorlevel 2 (set "CLOSEIT=0") else (set "CLOSEIT=1")
+  )
+  if "!CLOSEIT!"=="1" (
     taskkill /im Merlin.exe >nul 2>&1
     timeout /t 2 >nul
     tasklist /fi "IMAGENAME eq Merlin.exe" 2>nul | find /i "Merlin.exe" >nul
@@ -69,8 +78,16 @@ echo   PATH entry removed.
 echo.
 echo   Bookmarks, history and settings live in:
 echo       %PROFILE%
-choice /c YN /n /m "   Delete those as well? [Y/N] "
-if errorlevel 2 goto :keepprofile
+rem The answer is decided once, into DELPROFILE, and then acted on. Testing
+rem errorlevel further down would pick up whatever ran last instead.
+set "DELPROFILE=0"
+if "%SILENT%"=="1" (
+  if "%MERLIN_KEEP_PROFILE%"=="0" set "DELPROFILE=1"
+) else (
+  choice /c YN /n /m "   Delete those as well? [Y/N] "
+  if not errorlevel 2 set "DELPROFILE=1"
+)
+if not "!DELPROFILE!"=="1" goto :keepprofile
 rmdir /s /q "%PROFILE%"   >nul 2>&1
 rmdir /s /q "%LOCALDATA%" >nul 2>&1
 echo   Profile deleted.

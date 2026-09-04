@@ -6,6 +6,14 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  Fixed: a page installed as an app on Windows opened merlin-run.py in a tab
+  instead of the site. The shortcut handed a script path to Merlin.exe, which
+  is not an interpreter and treated it as an address to open.
+  Settings, General lists the pages installed as apps, with a button to remove
+  one. The shortcut and its icon are deleted; the site is untouched.
+  A graphical uninstaller, uninstall-gui.py and uninstall-gui.bat, installed
+  alongside the text one. It runs the same script and offers to keep or delete
+  the profile.
   Fixed: installing a page as an app on Linux made a shortcut that did nothing.
   A percent sign begins a field code in a desktop entry, so any percent encoded
   address, which is most of them, produced an invalid code and the launcher

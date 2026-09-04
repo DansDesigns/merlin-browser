@@ -294,6 +294,8 @@ if exist "%TARGET%\merlin.ico" (
 )
 if exist "%SRC%\README.md"     copy /y "%SRC%\README.md"     "%TARGET%\README.md"     >nul
 if exist "%SRC%\uninstall.bat" copy /y "%SRC%\uninstall.bat" "%TARGET%\uninstall.bat" >nul
+if exist "%SRC%\uninstall-gui.py" copy /y "%SRC%\uninstall-gui.py" "%TARGET%\uninstall-gui.py" >nul
+if exist "%SRC%\uninstall-gui.bat" copy /y "%SRC%\uninstall-gui.bat" "%TARGET%\uninstall-gui.bat" >nul
 
 rem merlin-run.py puts its own folder on sys.path, so there is no .pth file,
 rem no PYTHONPATH and no site-packages lookup to go wrong.

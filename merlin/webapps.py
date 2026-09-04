@@ -89,10 +89,18 @@ def _write_ico(icon, path: str) -> bool:
 def launcher_command() -> list[str]:
     """How to start Merlin, from wherever this copy happens to live.
 
-    The installed launcher script is preferred over this interpreter and a
-    script path: it keeps working if the virtualenv is rebuilt, which a
-    reinstall does, whereas a baked-in path to a particular python does not.
+    A built Merlin.exe is the whole command. It is not an interpreter and does
+    not take a script: handing it merlin-run.py made it treat that path as an
+    address and open the source file in a tab, which is what an installed web
+    app did on Windows.
+
+    Otherwise the installed launcher script is preferred over this interpreter
+    plus a script path, because a reinstall rebuilds the virtualenv and a
+    baked-in path to one particular python stops working.
     """
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+
     if os.name != "nt":
         launcher = shutil.which(f"{cfg.APP_SLUG}-browser")
         if not launcher:

@@ -436,6 +436,20 @@ class SettingsDialog(QDialog):
             "Reverse the swipe direction", "invert_swipe",
             "Some trackpad configurations report the opposite direction."))
         form.addRow(self._check("Restore tabs from last session", "restore_session"))
+
+        apps_label = QLabel("<b>Pages installed as apps</b>", page)
+        form.addRow(apps_label)
+        self.apps_list = QListWidget(page)
+        self.apps_list.setMaximumHeight(120)
+        form.addRow(self.apps_list)
+
+        apps_row = QHBoxLayout()
+        self.apps_remove = QPushButton("Remove selected", page)
+        self.apps_remove.clicked.connect(self._remove_web_app)
+        apps_row.addWidget(self.apps_remove)
+        apps_row.addStretch(1)
+        form.addRow(apps_row)
+        self._fill_web_apps()
         form.addRow(self._check("Remember window size and position",
                                 "remember_window_geometry"))
         return page
@@ -453,6 +467,56 @@ class SettingsDialog(QDialog):
         frame = margins.left() + margins.right() + 24
         self.setMinimumWidth(max(self.minimumWidth(), needed + frame))
         self.resize(max(self.width(), needed + frame), self.height())
+
+    def _fill_web_apps(self) -> None:
+        """List the pages installed as apps, newest last."""
+        self.apps_list.clear()
+        apps = self.settings.get("web_apps") or []
+        for entry in apps:
+            item = QListWidgetItem(entry.get("name") or entry.get("url", ""))
+            item.setToolTip(entry.get("shortcut") or entry.get("url", ""))
+            item.setData(Qt.ItemDataRole.UserRole, entry)
+            self.apps_list.addItem(item)
+        if not apps:
+            empty = QListWidgetItem("Nothing installed yet")
+            empty.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.apps_list.addItem(empty)
+        else:
+            # keep something selected, or the remove button does nothing on
+            # the click after a removal
+            self.apps_list.setCurrentRow(0)
+        self.apps_remove.setEnabled(bool(apps))
+
+    def _remove_web_app(self) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+
+        from . import webapps
+
+        item = self.apps_list.currentItem()
+        entry = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if not entry:
+            return
+        name = entry.get("name") or entry.get("url", "")
+        answer = QMessageBox.question(
+            self, "Remove app",
+            f"Remove {name}?\n\nThe shortcut and its icon are deleted. The "
+            "site itself is untouched, and you can install it again at any "
+            "time.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        gone = webapps.remove(entry)
+        apps = [a for a in (self.settings.get("web_apps") or [])
+                if a.get("shortcut") != entry.get("shortcut")]
+        self.settings.set("web_apps", apps)
+        self._fill_web_apps()
+        if not gone:
+            QMessageBox.warning(
+                self, "Partly removed",
+                f"{name} is off the list, but its shortcut could not be "
+                "deleted. It may already have been moved.")
 
     # -------------------------------------------------------------- search
     def _search_tab(self) -> QWidget:

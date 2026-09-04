@@ -378,7 +378,14 @@ rm -f "$BIN/merlin-browser"
 rm -f "$APPS/merlin-browser.desktop" "$APPS/merlin-browser-frameless.desktop"
 rm -f "$ICONS/merlin-browser.svg"
 rm -f "$HOME/.local/share/icons/hicolor/256x256/apps/merlin-browser.png"
-read -r -p "Delete bookmarks, history and settings too? [y/N] " reply
+# MERLIN_KEEP_PROFILE lets a front end answer this without a terminal:
+# 1 keeps the profile, 0 deletes it, unset asks.
+reply="n"
+if [[ -n "\${MERLIN_KEEP_PROFILE:-}" ]]; then
+  [[ "\$MERLIN_KEEP_PROFILE" == "0" ]] && reply="y"
+else
+  read -r -p "Delete bookmarks, history and settings too? [y/N] " reply
+fi
 if [[ "\${reply,,}" == "y" ]]; then
   rm -rf "\$HOME/.config/merlin" "\$HOME/.local/share/merlin" "\$HOME/.cache/merlin"
   echo "Profile deleted."
@@ -389,6 +396,12 @@ rm -rf "$LIB"
 echo "Done."
 UNINST
 chmod +x "$LIB/uninstall.sh"
+
+# the graphical uninstaller, beside the one it drives
+if [[ -f "$SRC/uninstall-gui.py" ]]; then
+  cp "$SRC/uninstall-gui.py" "$LIB/uninstall-gui.py"
+  chmod +x "$LIB/uninstall-gui.py"
+fi
 
 CURRENT_STEP=$TOTAL_STEPS
 status "Done"

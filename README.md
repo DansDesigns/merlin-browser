@@ -117,7 +117,8 @@ sudo dnf install python3-qt6 python3-qt6-webengine         # Fedora
 sudo pacman -S python-pyqt6 python-pyqt6-webengine         # Arch
 ```
 
-Uninstall with `~/.local/lib/merlin-browser/uninstall.sh`.
+Uninstall with `~/.local/lib/merlin-browser/uninstall-gui.py` for the graphical
+one, or `uninstall.sh` beside it for the text one.
 
 # Windows
 
@@ -138,7 +139,8 @@ winget install mpv.net
 winget install VideoLAN.VLC
 ```
 
-Uninstall with `%LOCALAPPDATA%\Programs\Merlin\uninstall.bat`.
+Uninstall with `%LOCALAPPDATA%\Programs\Merlin\uninstall-gui.bat` for the
+graphical one, or `uninstall.bat` beside it for the text one.
 
 ### Running without installing
 
