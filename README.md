@@ -1,4 +1,5 @@
 # Merlin Browser
+![version](https://img.shields.io/badge/version-1.5.2-6f8ff0)
 
 A Rust-free desktop web browser built with Python and C++, on Qt and the Chromium engine.
 
@@ -10,7 +11,6 @@ Merlin is a browser shell: the interface, tab handling, content blocking, media
 handling and privacy policy are its own, while page rendering is done by
 Chromium through Qt WebEngine.
 
-![version](https://img.shields.io/badge/version-1.5.2-6f8ff0)
 
 ## Features
 
@@ -63,28 +63,24 @@ Chromium through Qt WebEngine.
 
 ## Installation
 
-There is a graphical installer as well. It runs the same scripts and shows the
-same steps, with the detail available behind a toggle rather than filling the
-screen:
+Download from the Releases page or build from source by cloning this repo then running:
 
 ```bash
 python3 install-gui.py      # Linux, needs python3-tk
 install-gui.bat             # Windows
 ```
 
-To hand someone a single file with nothing to extract, build the installer into
-one executable. Run this on Windows; a Windows executable has to be built on
-Windows:
+To build the installer executable, run this on Windows:
 
 ```
 tools\build-installer.bat
 ```
 
-That produces `dist\MerlinSetup.exe`, the graphical installer with the merlin
-package and `install.bat` packed inside it. It is the same method used for
-Merlin.exe itself: PyInstaller, with the icon in the executable's resources.
+That produces `dist\MerlinSetup.exe`, the graphical installer.
 
-### Linux
+### Build from source:
+
+# Linux
 
 ```bash
 ./install.sh
@@ -111,7 +107,7 @@ sudo pacman -S python-pyqt6 python-pyqt6-webengine         # Arch
 
 Uninstall with `~/.local/lib/merlin-browser/uninstall.sh`.
 
-### Windows
+# Windows
 
 ```
 install.bat
