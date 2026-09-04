@@ -6,6 +6,12 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  Fixed: installing a page as an app on Linux made a shortcut that did nothing.
+  A percent sign begins a field code in a desktop entry, so any percent encoded
+  address, which is most of them, produced an invalid code and the launcher
+  refused to start it without saying so. Percent signs are doubled now, as the
+  specification asks, and the entry uses the installed launcher rather than a
+  path to a particular interpreter, so it survives a reinstall.
   The vertical tab strip opens on touch. It only ever watched for a mouse
   pointer, and touch does not move one, so on a touchscreen there was no way to
   expand it. A touch now opens it and holds it open for a few seconds, since a

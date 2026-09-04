@@ -11,6 +11,7 @@ Linux, so they appear wherever the system lists programs.
 from __future__ import annotations
 
 import os
+import shutil
 import re
 import subprocess
 import sys
@@ -86,12 +87,44 @@ def _write_ico(icon, path: str) -> bool:
 
 
 def launcher_command() -> list[str]:
-    """How to start Merlin, from wherever this copy happens to live."""
+    """How to start Merlin, from wherever this copy happens to live.
+
+    The installed launcher script is preferred over this interpreter and a
+    script path: it keeps working if the virtualenv is rebuilt, which a
+    reinstall does, whereas a baked-in path to a particular python does not.
+    """
+    if os.name != "nt":
+        launcher = shutil.which(f"{cfg.APP_SLUG}-browser")
+        if not launcher:
+            candidate = os.path.expanduser(f"~/.local/bin/{cfg.APP_SLUG}-browser")
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                launcher = candidate
+        if launcher:
+            return [launcher]
+
     run_py = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                           "merlin-run.py")
     if os.path.isfile(run_py):
         return [sys.executable, run_py]
     return [sys.executable, "-m", "merlin"]
+
+
+def exec_value(parts: list) -> str:
+    """Build a Desktop Entry Exec value.
+
+    A percent sign starts a field code there, so a percent-encoded address, a
+    search URL or anything with %20 in it, produces an invalid code such as
+    "%2" and the launcher refuses to start the entry. It does so silently: the
+    shortcut appears, and clicking it does nothing. Doubling the sign is what
+    the specification asks for.
+    """
+    out = []
+    for part in parts:
+        escaped = part.replace("\\", "\\\\").replace('"', '\\"')
+        escaped = escaped.replace("%", "%%")
+        out.append(f'"{escaped}"' if " " in part or any(
+            ch in part for ch in "\t\n\"'\\><~|&;$*?#()`") else escaped)
+    return " ".join(out)
 
 
 def install(name: str, url: str, icon_path: str) -> tuple[bool, str]:
@@ -106,14 +139,14 @@ def _install_linux(name: str, url: str, icon_path: str) -> tuple[bool, str]:
         "applications")
     os.makedirs(apps, exist_ok=True)
     slug = slugify(name)
-    command = " ".join(f'"{part}"' for part in launcher_command())
+    command = exec_value(launcher_command())
     desktop = os.path.join(apps, f"{cfg.APP_SLUG}-app-{slug}.desktop")
     body = (
         "[Desktop Entry]\n"
         "Type=Application\n"
         f"Name={name}\n"
         f"Comment={name}, installed from {APP_NAME}\n"
-        f"Exec={command} --app \"{url}\"\n"
+        f"Exec={command} --app {exec_value([url])}\n"
         f"Icon={icon_path or 'merlin-browser'}\n"
         "Terminal=false\n"
         "Categories=Network;\n"
