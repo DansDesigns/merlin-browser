@@ -37,7 +37,10 @@ def mirror(path, axis):
 # about the middle of the canvas, which keeps the top and bottom margins equal.
 # 30/27.35 would touch both edges exactly; the rest is clearance.
 ART_SHIFT_Y = 1.05
-FILL_SCALE = 1.09
+# Measured, not guessed: 1.15 leaves 2px clear top and bottom at 256, which is
+# as large as the wizard goes without the hat's point or the beard touching the
+# edge. Anything above this clips, which is why the number is not rounder.
+FILL_SCALE = 1.15
 
 
 def render(size, compact=False):

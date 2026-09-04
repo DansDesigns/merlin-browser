@@ -20,7 +20,9 @@ from PyQt6.QtCore import (
     QEasingCurve, QPropertyAnimation, QSize, QTimer, Qt, pyqtProperty,
     pyqtSignal,
 )
-from PyQt6.QtCore import QPoint, QRect, QRectF
+import time
+
+from PyQt6.QtCore import QEvent, QPoint, QRect, QRectF
 from PyQt6.QtGui import (
     QColor, QCursor, QIcon, QPainter, QPainterPath, QRegion,
 )
@@ -109,6 +111,10 @@ class PlusButton(QToolButton):
 # ------------------------------------------------------------- horizontal
 # How far a tab has to be dragged clear of its strip before it is pulled out
 # into a window of its own.
+# How long the panel stays open after a touch, since a finger leaving the
+# screen is not the same as a pointer leaving the widget.
+TOUCH_HOLD = 3.0
+
 DETACH_DISTANCE = 70
 
 
@@ -444,6 +450,13 @@ class VerticalTabStrip(QWidget):
         # the last tab: the strip stayed open until the pointer was most of the
         # way into the page. Polling is simpler and more reliable here than
         # tracking mouse events across a scroll area and its children.
+        # Touch never moves a pointer, so hovering cannot open the strip and
+        # the pointer polling below has nothing to follow. Touches are taken
+        # directly instead, and hold the panel open for a while afterwards
+        # since there is no "leave" to wait for.
+        self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
+        self._touch_until = 0.0
+
         self._leaving = 0
         self._watch = QTimer(self)
         self._watch.setInterval(70)
@@ -511,6 +524,27 @@ class VerticalTabStrip(QWidget):
         self._watch.stop()
         super().leaveEvent(event)
 
+    def event(self, event):
+        """Open on touch, and keep it open while touching continues."""
+        kind = event.type()
+        if kind in (QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate):
+            self.touched()
+            event.accept()
+            return True
+        if kind == QEvent.Type.TouchEnd:
+            # leave it open briefly so a tab can be picked
+            self._touch_until = time.monotonic() + TOUCH_HOLD
+            event.accept()
+            return True
+        return super().event(event)
+
+    def touched(self) -> None:
+        self._touch_until = time.monotonic() + TOUCH_HOLD
+        self._leaving = 0
+        self._animate_to(1.0)
+        if not self._watch.isActive():
+            self._watch.start()
+
     def _pointer_holds_open(self) -> bool:
         """Open while the pointer is anywhere on the panel.
 
@@ -519,6 +553,8 @@ class VerticalTabStrip(QWidget):
         pointer. The whole panel is the target now, and it closes when the
         pointer leaves it.
         """
+        if time.monotonic() < self._touch_until:
+            return True
         return self.rect().contains(self.mapFromGlobal(QCursor.pos()))
 
     def _check_pointer(self) -> None:

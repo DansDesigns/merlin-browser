@@ -171,6 +171,12 @@ import re as _re
 
 root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
+# version.txt is maintained separately and must never be shipped: a stale one
+# would override the real version wherever this is unpacked.
+check("version.txt is not shipped",
+      not os.path.exists(os.path.join(
+          os.path.dirname(os.path.abspath(__file__)), "..", "version.txt")))
+
 # --- batch quoting hazards --------------------------------------------------
 # A PowerShell call with \" escapes inside a for /f broke install.bat twice:
 # cmd has no backslash escape, so the quotes ended the string early and the

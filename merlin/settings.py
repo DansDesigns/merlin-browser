@@ -75,6 +75,20 @@ DEFAULT_FILTER_LISTS = [
     "https://secure.fanboy.co.nz/fanboy-annoyance.txt",
 ]
 
+def _compositing_is_likely() -> bool:
+    """Is a compositor certain to be running?
+
+    Not a probe: this is read before any window exists. Windows composites
+    always, Wayland composites by definition, X11 is a maybe and so treated as
+    a no. The setting is there to turn it on when it does work.
+    """
+    if os.name == "nt":
+        return True
+    if os.environ.get("WAYLAND_DISPLAY"):
+        return True
+    return os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"
+
+
 DEFAULTS = {
     # --- window / chrome ---
     "hide_window_decorations": False,
@@ -82,7 +96,12 @@ DEFAULTS = {
     "remember_window_geometry": True,
     "tab_orientation": "horizontal",   # horizontal | left | right
     "page_corner_radius": 10,
-    "smooth_corners": True,            # antialiased corners via an overlay          # 0 turns the rounded page corners off
+    # Antialiased corners are drawn by a translucent overlay window, which
+    # needs a compositing manager to blend it. Windows always has one, and so
+    # does Wayland by definition. A plain X11 session may not, and without one
+    # the overlay shows the desktop through itself, so it is off there unless
+    # asked for.
+    "smooth_corners": _compositing_is_likely(),          # 0 turns the rounded page corners off
     "start_background": "midnight",    # see ui.START_BACKGROUNDS, or image:<path>
     "start_tiles": [
         {"title": "Wikipedia", "url": "https://wikipedia.org"},

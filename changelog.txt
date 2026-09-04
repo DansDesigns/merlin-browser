@@ -6,6 +6,17 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  The vertical tab strip opens on touch. It only ever watched for a mouse
+  pointer, and touch does not move one, so on a touchscreen there was no way to
+  expand it. A touch now opens it and holds it open for a few seconds, since a
+  finger leaving the screen is not the same as a pointer leaving the panel.
+  Smooth page corners are off by default on a plain X11 session. The overlay
+  that draws them needs a compositing manager to blend it; without one it shows
+  the desktop through itself and the corners come out as a thin line. Windows
+  and Wayland always composite, so it stays on there.
+  The icon fills its tile: the wizard now uses 98 per cent of the height, with
+  two pixels clear top and bottom, which is as large as it goes before the
+  hat's point or the beard touch the edge.
   Fixed: the taskbar icon on Windows, again. Merlin.exe is built from
   merlin-run.py with the package inside it, which is the arrangement that
   produces a working executable. Excluding the package to make updates simpler

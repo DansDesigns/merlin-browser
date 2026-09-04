@@ -693,7 +693,10 @@ class SettingsDialog(QDialog):
         layout.addWidget(self._check(
             "Smooth the page corners", "smooth_corners",
             "Covers the corners with an antialiased overlay instead of cutting "
-            "them with a mask, which cannot be antialiased and looks stepped."))
+            "them with a mask, which cannot be antialiased and looks stepped. "
+            "The overlay needs a compositing manager: without one it shows the "
+            "desktop through itself, so turn this off if the corners look "
+            "wrong."))
 
         bg_row = QHBoxLayout()
         bg_row.addWidget(QLabel("New tab background", page))
