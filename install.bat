@@ -272,6 +272,7 @@ if errorlevel 1 (
   exit /b 1
 )
 copy /y "%SRC%\merlin-run.py" "%APPDIR%\merlin-run.py" >nul
+copy /y "%SRC%\merlin-boot.py" "%APPDIR%\merlin-boot.py" >nul
 rem version.txt is the only place the version is written, so the installed
 rem copy needs it: without it the browser reports 0.0.0
 if exist "%SRC%\version.txt" copy /y "%SRC%\version.txt" "%APPDIR%\version.txt" >nul
@@ -328,17 +329,28 @@ if errorlevel 1 goto :buildfailed
 if exist "%TARGET%\bin" rmdir /s /q "%TARGET%\bin"
 echo.
 echo        $ pyinstaller --windowed --icon merlin.ico merlin-run.py
+rem The merlin package is deliberately NOT bundled. The executable carries the
+rem interpreter, Qt and the web engine, which change only when a dependency
+rem does; the application itself is read from %APPDIR% at run time. An update
+rem is then a matter of replacing .py files, with no rebuild and no need for
+rem anyone to run this script again.
 "%VPY%" -m PyInstaller --noconfirm --onedir --windowed --name Merlin ^
   --icon "%APPDIR%\merlin\merlin.ico" ^
-  --paths "%APPDIR%" ^
-  --add-data "%APPDIR%\merlin\merlin.ico;merlin" ^
-  --add-data "%APPDIR%\merlin\merlin.png;merlin" ^
-  --add-data "%APPDIR%\merlin\merlin.svg;merlin" ^
-  --add-data "%APPDIR%\version.txt;." ^
+  --exclude-module merlin ^
+  --hidden-import PyQt6.QtWebEngineWidgets ^
+  --hidden-import PyQt6.QtWebEngineCore ^
+  --hidden-import PyQt6.QtMultimedia ^
   --distpath "%TARGET%\bin" --workpath "%BUILDDIR%" --specpath "%BUILDDIR%" ^
-  "%APPDIR%\merlin-run.py"
+  "%APPDIR%\merlin-boot.py"
+if exist "%TARGET%\bin\merlin-boot" (
+  if not exist "%TARGET%\bin\Merlin" ren "%TARGET%\bin\merlin-boot" "Merlin"
+)
 if errorlevel 1 goto :buildfailed
 if not exist "%TARGET%\bin\Merlin\Merlin.exe" goto :buildfailed
+
+rem Tell the executable where the application lives, so it does not have to
+rem rely on the folder layout alone.
+> "%TARGET%\bin\Merlin\app-path.txt" echo %APPDIR%
 
 echo.
 echo        Checking the built executable starts...

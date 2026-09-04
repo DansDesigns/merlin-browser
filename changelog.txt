@@ -5,6 +5,28 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.5.4
+  Merlin.exe no longer carries the application inside it. It carries the
+  interpreter, Qt and the web engine, and loads the merlin package from the
+  app folder on disk. Updates replace those files and take effect on the next
+  launch: no rebuild, and nobody has to run install.bat again.
+  Settings, Updates therefore works on a built copy, which it could not before.
+  A rebuild is only needed when a dependency changes, and this file will say so
+  when that happens.
+
+1.5.3
+  Fixed: session restore only remembered the tabs that had been loaded. A
+  restored tab does not load until it is selected, and until then its address
+  is pending rather than current, so quitting without visiting them saved only
+  the first one.
+  Reopening a closed tab works for tabs that were never visited.
+  GPU fingerprinting protection for WebGL and WebGPU.
+  The https upgrade falls back to http for hosts that only answer there, which
+  domain forwarders often do.
+  The installer reports the pip already present and offers to replace it rather
+  than upgrading silently.
+  version.txt now holds only the version; release notes live here.
+
 1.5.2
   Graphical installer, which runs the same scripts as the text one and shows
   the same steps with the detail behind a toggle. It can be built into a single

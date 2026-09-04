@@ -212,6 +212,7 @@ merlin/
   dictation.py   local speech to text for the search box
   single.py      one window, so links reuse the browser already open
   updater.py     version check and in-place update
+merlin-boot.py   entry point for the built executable, finds app on disk
 tests/           checks for the platform-specific start-up paths
 tools/           the logo generator and the installer build script
 changelog.txt    what changed in each release
@@ -248,6 +249,15 @@ whether a newer version exists, with the notes for that release taken from
 `changelog.txt`. If one is found, the button becomes "Download and install",
 which replaces the application files in place and leaves the virtualenv,
 settings, bookmarks and history alone.
+
+`version.txt` holds the version number and nothing else. Everything that shows
+a version reads it from there, so there is one place to change it.
+
+Updating does not need the installer. `Merlin.exe` carries the interpreter, Qt
+and the web engine; the application itself lives as ordinary `.py` files in the
+`app` folder beside it. An update replaces those files and takes effect the
+next time Merlin starts. The executable only needs rebuilding when a dependency
+changes, which the changelog will say.
 
 ## Licence
 
