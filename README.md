@@ -2,6 +2,10 @@
 
 A desktop web browser built with Python and C++, on Qt and the Chromium engine.
 
+
+![Merlin](https://github.com/DansDesigns/merlin-browser/blob/main/Screenshot.png?raw=true)
+
+
 Merlin is a browser shell: the interface, tab handling, content blocking, media
 handling and privacy policy are its own, while page rendering is done by
 Chromium through Qt WebEngine.
