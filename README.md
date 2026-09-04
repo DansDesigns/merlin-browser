@@ -78,7 +78,7 @@ tools\build-installer.bat
 
 That produces `dist\MerlinSetup.exe`, the graphical installer.
 
-### Build from source:
+### Install from Terminal (non-GUI):
 
 # Linux
 
