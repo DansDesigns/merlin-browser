@@ -195,6 +195,19 @@ def run_icon_check() -> int:
         claimed = os.environ.get("MERLIN_APP_ID") == "1"
         print("App ID         :", APP_ID if claimed else
               "not claimed, so the taskbar uses the window icon")
+        status = ""
+        try:
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            with open(os.path.join(root, "build-status.txt"),
+                      encoding="utf-8") as handle:
+                status = handle.read().strip()
+        except OSError:
+            pass
+        if status:
+            print("Merlin.exe     :", "built, so the window is Merlin's own"
+                  if status == "built" else
+                  "NOT built, so the window belongs to the interpreter and "
+                  "the taskbar shows its icon")
         print("Shortcut tagged:",
               "yes -- this overrides the window icon, reinstall to clear it"
               if shortcut_carries_app_id() else "no (correct)")

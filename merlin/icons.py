@@ -52,6 +52,10 @@ PATHS = {
                  '<path d="M8.5 5.5 H18.5 V15.5" ' + _STROKE + '/>'),
     "play":     ('<path d="M8 5.5 L18 12 L8 18.5 Z" fill="{c}" stroke="{c}" '
                  'stroke-width="1.5" stroke-linejoin="round"/>'),
+    # a page waiting to be opened: an outline, so it reads as "not loaded yet"
+    "pending": ('<path d="M6.5 3.5 H14 L18 7.5 V20 H6.5 Z" ' + _STROKE
+                + ' stroke-dasharray="2.4 2.2"/>'
+                '<path d="M13.6 3.6 V8 H18" ' + _STROKE + '/>'),
     "history": ('<path d="M12 7 V12 L15.5 14" ' + _STROKE + '/>'
                 '<path d="M4.2 12 A7.8 7.8 0 1 0 6.9 6.1" ' + _STROKE + '/>'
                 '<path d="M3.6 4.4 V8.4 H7.6" ' + _STROKE + '/>'),

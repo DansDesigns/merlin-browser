@@ -21,6 +21,20 @@ from __future__ import annotations
 import os
 import sys
 
+# Imported here, at the top, and never used directly.
+#
+# PyInstaller decides what to bundle by reading this file's imports. The real
+# work happens after sys.path is adjusted, so without these it sees a script
+# that imports nothing, bundles no Qt, and produces an executable that cannot
+# start. Then the installer falls back to the interpreter and the taskbar icon
+# is Python's again.
+try:  # noqa: SIM105
+    from PyQt6 import QtCore, QtGui, QtNetwork, QtWidgets      # noqa: F401
+    from PyQt6 import QtWebEngineCore, QtWebEngineWidgets      # noqa: F401
+    from PyQt6 import QtMultimedia, QtSvg                      # noqa: F401
+except Exception:                                              # noqa: BLE001
+    pass
+
 
 def _candidates() -> list:
     here = os.path.dirname(os.path.abspath(__file__))

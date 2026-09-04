@@ -1275,6 +1275,20 @@ class SettingsDialog(QDialog):
                     expected = 0
             from .winicon import is_store_python
 
+            try:
+                root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                with open(os.path.join(root, "build-status.txt"),
+                          encoding="utf-8") as handle:
+                    if handle.read().strip() == "fallback":
+                        lines.append(
+                            "Taskbar icon: Merlin.exe was not built during "
+                            "installation, so the window belongs to the "
+                            "interpreter and Windows shows its icon. "
+                            "Reinstalling and watching for the PyInstaller "
+                            "error is the way to fix it.")
+            except OSError:
+                pass
+
             image = privacy_image()
             if is_store_python():
                 lines.append(

@@ -6,6 +6,10 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  Restored tabs show a placeholder icon and the site's host until they are
+  opened, so a restored window no longer looks like it has one tab.
+  The installer says loudly when Merlin.exe could not be built, and Settings,
+  Advanced repeats it, because that is when the taskbar shows Python's icon.
   Merlin.exe no longer carries the application inside it. It carries the
   interpreter, Qt and the web engine, and loads the merlin package from the
   app folder on disk. Updates replace those files and take effect on the next

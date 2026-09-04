@@ -360,16 +360,25 @@ if errorlevel 1 goto :buildfailed
 set "MERLINEXE=%TARGET%\bin\Merlin\Merlin.exe"
 set "MERLINCON=%TARGET%\bin\Merlin\Merlin.exe"
 set "BUILT_EXE=1"
+> "%APPDIR%\build-status.txt" echo built
 echo        Built %MERLINEXE%
 echo        The window now belongs to Merlin.exe, so the taskbar uses its icon.
 goto :buildclean
 
 :buildfailed
 echo.
-echo  [!] The executable could not be built. Merlin will still run, started
-echo      through the virtualenv, but its taskbar icon will be Python's
-echo      because the window belongs to the interpreter.
+echo  ============================================================
+echo   [!] Merlin.exe was NOT built.
 echo.
+echo   Merlin will still run, started through the virtualenv, but the
+echo   window will belong to python.exe and the taskbar will show
+echo   Python's icon rather than Merlin's.
+echo.
+echo   The PyInstaller output above says why. Settings, Advanced
+echo   repeats this.
+echo  ============================================================
+echo.
+> "%APPDIR%\build-status.txt" echo fallback
 
 :buildclean
 rem Remove the build workspace and PyInstaller itself. Neither is needed once

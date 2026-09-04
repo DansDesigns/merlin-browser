@@ -824,6 +824,10 @@ class BrowserWindow(QMainWindow):
             self.tabs.setCurrentIndex(index)
         target = url if url is not None else self.settings.get("new_tab_page")
         if defer and background and target:
+            # Restored tabs are not fetched until selected, so they have no
+            # favicon and looked like empty rows: the window appeared to have
+            # one tab. A placeholder marks them as pages waiting to open.
+            self._set_page_icon(view, "pending")
             view.setProperty("pending_url", target)
             label = QUrl(target).host() or target
             self.tabs.setTabText(index, label[:40] or "Tab")
@@ -840,6 +844,9 @@ class BrowserWindow(QMainWindow):
         view = self.tabs.widget(index)
         if isinstance(view, WebView):
             url = view.url().toString()
+            if not url or url == "about:blank":
+                # never opened, so its address is still only pending
+                url = view.property("pending_url") or ""
             if url and url != "about:blank":
                 self._closed_tabs.append(url)
         self.tabs.removeTab(index)
@@ -1785,15 +1792,25 @@ class BrowserWindow(QMainWindow):
 
     # -------------------------------------------------------------- session
     def save_session(self) -> None:
+        """Remember every tab's address for next time.
+
+        A restored tab is not loaded until it is selected, and until then its
+        url() is empty: the address it is waiting to open sits in pending_url.
+        Reading only url() meant that quitting without visiting the restored
+        tabs saved just the one that had loaded, and the rest were lost.
+        """
         if self.private:
             return
         urls = []
         for i in range(self.tabs.count()):
             view = self.tabs.widget(i)
-            if isinstance(view, WebView) and not view.property("merlin_start"):
-                url = view.url().toString()
-                if url and url != "about:blank":
-                    urls.append(url)
+            if not isinstance(view, WebView) or view.property("merlin_start"):
+                continue
+            url = view.url().toString()
+            if not url or url == "about:blank":
+                url = view.property("pending_url") or ""
+            if url and url != "about:blank":
+                urls.append(url)
         self.settings.set("last_session", urls, save=False)
         if self.settings.get("remember_window_geometry"):
             geometry = self.geometry()

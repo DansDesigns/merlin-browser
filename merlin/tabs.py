@@ -758,6 +758,12 @@ class TabContainer(QWidget):
             return self._tabs[index]["text"]
         return ""
 
+    def tabIcon(self, index: int) -> QIcon:  # noqa: N802
+        """The icon shown for a tab, whichever strip is in use."""
+        if not 0 <= index < len(self._tabs):
+            return QIcon()
+        return self._tabs[index].get("icon") or QIcon()
+
     def setTabIcon(self, index: int, icon: QIcon) -> None:  # noqa: N802
         if not 0 <= index < len(self._tabs):
             return
