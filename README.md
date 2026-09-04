@@ -42,7 +42,7 @@ Chromium through Qt WebEngine.
   five shortcut tiles
 - Adjustable page corner rounding, drawn antialiased by an overlay
 - A clock in the status bar, and a theme that can follow the time of day
-- Optional frameless window, switchable at runtime or from a `.desktop` action
+- Optional frameless window, toggled from the menu or with Ctrl+Shift+D
 - Twelve search engines with keyword prefixes, plus a custom engine slot
 - Right-click selected text to search for it
 - Speak to search from the new tab page, recognised on your own machine
@@ -65,6 +65,7 @@ Chromium through Qt WebEngine.
 
 - Install any page as a standalone app with its own shortcut, icon and frameless
   window
+- Settings, Web apps lists the ones you have installed, and removes them
 
 ## Requirements
 
@@ -127,9 +128,8 @@ install.bat
 ```
 
 Per-user, no administrator rights. It builds a virtualenv in
-`%LOCALAPPDATA%\Programs\Merlin`, installs PyQt6 into it, creates `Merlin.exe`
-with Merlin's icon, and adds Start Menu entries for the normal and frameless
-launch.
+`%LOCALAPPDATA%\Programs\Merlin`, installs PyQt6 into it, builds `Merlin.exe`
+with Merlin's icon, and adds a Start Menu entry.
 
 pip wheels do not include H.264, AAC or HEVC, and there is no distribution
 package on Windows, so install a player for those formats:

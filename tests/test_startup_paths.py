@@ -177,6 +177,21 @@ check("version.txt is not shipped",
       not os.path.exists(os.path.join(
           os.path.dirname(os.path.abspath(__file__)), "..", "version.txt")))
 
+# Two fixes have gone missing between edits and shipped reverted. These check
+# the behaviour is actually in the file rather than only in a passing test run.
+updater_src = open(os.path.join(root, "merlin", "updater.py"),
+                   encoding="utf-8").read()
+check("updater does not refuse to update a built copy",
+      "cannot be swapped out" not in updater_src)
+check("updater finds the app folder on disk",
+      "target = writable_app_dir()" in updater_src)
+
+browser_src = open(os.path.join(root, "merlin", "browser.py"),
+                   encoding="utf-8").read()
+save_session = browser_src.split("def save_session")[1][:900]
+check("session save falls back to a tab's pending address",
+      "pending_url" in save_session)
+
 # --- batch quoting hazards --------------------------------------------------
 # A PowerShell call with \" escapes inside a for /f broke install.bat twice:
 # cmd has no backslash escape, so the quotes ended the string early and the

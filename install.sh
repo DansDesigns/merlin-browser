@@ -329,7 +329,9 @@ fi
 
 echo
 step 5 "Desktop entries"
-for entry in merlin-browser.desktop merlin-browser-frameless.desktop; do
+# One entry only: the title bar is a toggle in the menu, so a second launcher
+# for it was another thing to keep in step for no gain.
+for entry in merlin-browser.desktop; do
   [[ -f "$SRC/$entry" ]] || continue
   sed "s|^Exec=merlin-browser|Exec=$BIN/merlin-browser|" "$SRC/$entry" > "$APPS/$entry"
 done

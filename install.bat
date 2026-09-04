@@ -403,10 +403,6 @@ if "%BUILT_EXE%"=="1" set "RUNARG="
   echo @echo off
   echo start "" "%MERLINEXE%" %RUNARG% %%*
 )
-> "%TARGET%\merlin-frameless.cmd" (
-  echo @echo off
-  echo start "" "%MERLINEXE%" %RUNARG% --no-decorations %%*
-)
 > "%TARGET%\merlin-debug.cmd" (
   echo @echo off
   echo echo Starting Merlin with a console attached. Any error appears below.
@@ -490,7 +486,6 @@ set "PS1=%TEMP%\merlin-shortcuts.ps1"
 >>"%PS1%" echo     Write-Output ("            icon " + $back.IconLocation)
 >>"%PS1%" echo }
 >>"%PS1%" echo New-MerlinShortcut ($menu + '\Merlin Browser.lnk') $args1 'Merlin Browser'
->>"%PS1%" echo New-MerlinShortcut ($menu + '\Merlin Browser (Frameless).lnk') ($args1 + ' --no-decorations') 'Merlin with the title bar hidden'
 >>"%PS1%" echo if ($env:MERLIN_DESKTOP -eq '1') {
 >>"%PS1%" echo     New-MerlinShortcut ([Environment]::GetFolderPath('Desktop') + '\Merlin Browser.lnk') $args1 'Merlin Browser'
 >>"%PS1%" echo }
@@ -693,7 +688,7 @@ echo    Installed version %SRCVER% to %TARGET%
 echo  ===========================================================
 echo.
 echo    Launch           Start Menu, or:  merlin-browser
-echo    No decorations   merlin-browser --no-decorations
+echo    No title bar     toggle it from the menu, or Ctrl+Shift+D
 echo    Codec report     merlin-console --codecs
 echo    If it won't start      "%TARGET%\merlin-debug.cmd"
 echo.

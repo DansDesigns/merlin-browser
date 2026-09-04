@@ -6,11 +6,23 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  Fixed: updating from Settings failed on Windows when installed from
+  MerlinSetup.exe, saying the copy was a built executable and could not be
+  changed. It can: the files it loads are the ones on disk beside it. The
+  updater now finds that folder itself rather than assuming the running import
+  came from it. Linux was unaffected because there is no bundle there.
+  The frameless launcher is gone: one entry, one shortcut. The title bar is a
+  toggle in the menu and on Ctrl+Shift+D, so a second launcher for it was
+  another thing to keep in step for no gain.
   Fixed: a page installed as an app on Windows opened merlin-run.py in a tab
   instead of the site. The shortcut handed a script path to Merlin.exe, which
   is not an interpreter and treated it as an address to open.
-  Settings, General lists the pages installed as apps, with a button to remove
-  one. The shortcut and its icon are deleted; the site is untouched.
+  Settings has a Web apps tab listing the pages installed as apps, with buttons
+  to open or remove one. Removing deletes the shortcut and its icon; the site
+  is untouched.
+  Fixed: a selected row in a list was drawn in the palette's default highlight,
+  which against the dark background was indistinguishable from an unselected
+  one. Lists now have their own selected and hover colours in both themes.
   A graphical uninstaller, uninstall-gui.py and uninstall-gui.bat, installed
   alongside the text one. It runs the same script and offers to keep or delete
   the profile.

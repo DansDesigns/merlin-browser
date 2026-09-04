@@ -53,6 +53,13 @@ QPushButton:hover { background: #3d404a; }
 QListWidget, QPlainTextEdit {
     background: #232429; border: 1px solid #34363d; border-radius: 6px;
 }
+/* Without these a selected row is drawn in the palette's default highlight,
+   which on this dark background is near enough invisible. */
+QListWidget::item { padding: 6px 8px; border-radius: 4px; }
+QListWidget::item:hover { background: #2d303a; }
+QListWidget::item:selected {
+    background: #3c4a78; color: #ffffff;
+}
 QCheckBox { padding: 3px; }
 """
 
@@ -73,6 +80,12 @@ QTabBar::tab {
     min-width: 90px; max-width: 220px;
 }
 QTabBar::tab:selected { background: #ffffff; }
+QListWidget, QPlainTextEdit {
+    background: #ffffff; border: 1px solid #d3d4d9; border-radius: 6px;
+}
+QListWidget::item { padding: 6px 8px; border-radius: 4px; }
+QListWidget::item:hover { background: #eceef3; }
+QListWidget::item:selected { background: #d6def0; color: #14161a; }
 """
 
 
@@ -391,6 +404,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._search_tab(), "Search")
         tabs.addTab(self._appearance_tab(), "Appearance")
         tabs.addTab(self._shortcuts_tab(), "Shortcuts")
+        tabs.addTab(self._build_webapps_page(), "Web apps")
         tabs.addTab(self._shields_tab(), "Shields")
         tabs.addTab(self._media_tab(), "Media")
         tabs.addTab(self._advanced_tab(), "Advanced")
@@ -437,19 +451,6 @@ class SettingsDialog(QDialog):
             "Some trackpad configurations report the opposite direction."))
         form.addRow(self._check("Restore tabs from last session", "restore_session"))
 
-        apps_label = QLabel("<b>Pages installed as apps</b>", page)
-        form.addRow(apps_label)
-        self.apps_list = QListWidget(page)
-        self.apps_list.setMaximumHeight(120)
-        form.addRow(self.apps_list)
-
-        apps_row = QHBoxLayout()
-        self.apps_remove = QPushButton("Remove selected", page)
-        self.apps_remove.clicked.connect(self._remove_web_app)
-        apps_row.addWidget(self.apps_remove)
-        apps_row.addStretch(1)
-        form.addRow(apps_row)
-        self._fill_web_apps()
         form.addRow(self._check("Remember window size and position",
                                 "remember_window_geometry"))
         return page
@@ -467,6 +468,60 @@ class SettingsDialog(QDialog):
         frame = margins.left() + margins.right() + 24
         self.setMinimumWidth(max(self.minimumWidth(), needed + frame))
         self.resize(max(self.width(), needed + frame), self.height())
+
+    def _build_webapps_page(self) -> QWidget:
+        """Pages installed as apps, with a way to remove them."""
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+
+        layout.addWidget(QLabel(
+            "Pages you have installed as apps. Each one has a shortcut that "
+            "opens the site in its own window, without the toolbar.", page))
+
+        self.apps_list = QListWidget(page)
+        self.apps_list.itemSelectionChanged.connect(self._web_app_selected)
+        layout.addWidget(self.apps_list, 1)
+
+        self.apps_detail = QLabel("", page)
+        self.apps_detail.setWordWrap(True)
+        self.apps_detail.setStyleSheet("color:#9a9ba1; font-size:12px;")
+        layout.addWidget(self.apps_detail)
+
+        row = QHBoxLayout()
+        self.apps_remove = QPushButton("Remove selected", page)
+        self.apps_remove.clicked.connect(self._remove_web_app)
+        row.addWidget(self.apps_remove)
+        self.apps_open = QPushButton("Open", page)
+        self.apps_open.clicked.connect(self._open_web_app)
+        row.addWidget(self.apps_open)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        note = QLabel(
+            "Removing one deletes its shortcut and icon. The site itself is "
+            "untouched, and you can install it again from the menu at any "
+            "time.", page)
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#9a9ba1; font-size:12px;")
+        layout.addWidget(note)
+
+        self._fill_web_apps()
+        return page
+
+    def _web_app_selected(self) -> None:
+        item = self.apps_list.currentItem()
+        entry = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if not entry:
+            self.apps_detail.setText("")
+            return
+        self.apps_detail.setText(
+            f"{entry.get('url', '')}\n{entry.get('shortcut', '')}")
+
+    def _open_web_app(self) -> None:
+        item = self.apps_list.currentItem()
+        entry = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if entry and entry.get("url"):
+            self.window_ref.new_tab(entry["url"])
 
     def _fill_web_apps(self) -> None:
         """List the pages installed as apps, newest last."""
@@ -486,6 +541,8 @@ class SettingsDialog(QDialog):
             # the click after a removal
             self.apps_list.setCurrentRow(0)
         self.apps_remove.setEnabled(bool(apps))
+        self.apps_open.setEnabled(bool(apps))
+        self._web_app_selected()
 
     def _remove_web_app(self) -> None:
         from PyQt6.QtWidgets import QMessageBox

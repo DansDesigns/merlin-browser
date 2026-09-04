@@ -197,17 +197,14 @@ class Updater(QObject):
         import tempfile
         import zipfile
 
-        if getattr(sys, "frozen", False):
+        # A built Merlin.exe is updatable: the files it loads next start are
+        # the ones on disk beside it, not the copy inside the executable.
+        # writable_app_dir finds them whichever copy is currently running.
+        target = writable_app_dir()
+        if not target:
             self.installed.emit(False, (
-                "This copy is a built executable, so its files live inside the "
-                "executable itself and cannot be swapped out. Download the new "
-                "version and run install.bat again; it will rebuild in place "
-                "and keep your settings."))
-            return
-
-        target = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        if not os.access(target, os.W_OK):
-            self.installed.emit(False, f"No permission to write to {target}.")
+                "The application folder could not be found, so there is "
+                "nothing to update. Reinstalling will put it back."))
             return
 
         self.status.emit("Downloading the new version...")
@@ -284,3 +281,41 @@ class Updater(QObject):
 
         self.installed.emit(True, (
             f"Version {self.latest} is in place. Restart Merlin to use it."))
+
+
+def writable_app_dir() -> str:
+    """The application folder on disk, whichever copy is running.
+
+    Normally the folder holding this package. Inside a built Merlin.exe the
+    package may be the bundled one, which cannot be written to, but the files
+    that actually get loaded next start are the ones on disk beside the
+    executable. Those are what an update has to replace, so they are found
+    here rather than relying on the import having come from them.
+    """
+    import sys
+
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    bundle = getattr(sys, "_MEIPASS", "")
+    inside_bundle = bool(bundle) and os.path.abspath(here).startswith(
+        os.path.abspath(bundle))
+    if not inside_bundle and os.access(here, os.W_OK):
+        return here
+
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    places = []
+    override = os.environ.get("MERLIN_APP_DIR", "").strip()
+    if override:
+        places.append(override)
+    try:
+        with open(os.path.join(exe_dir, "app-path.txt"), encoding="utf-8") as f:
+            written = f.readline().strip()
+        if written:
+            places.append(written)
+    except OSError:
+        pass
+    places.append(os.path.abspath(os.path.join(exe_dir, "..", "..", "app")))
+    for place in places:
+        if (place and os.path.isfile(os.path.join(place, "merlin", "app.py"))
+                and os.access(place, os.W_OK)):
+            return place
+    return ""
