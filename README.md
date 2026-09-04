@@ -1,6 +1,6 @@
 # Merlin Browser
 
-A desktop web browser built with Python and C++, on Qt and the Chromium engine.
+A Rust-free desktop web browser built with Python and C++, on Qt and the Chromium engine.
 
 
 ![Merlin](https://github.com/DansDesigns/merlin-browser/blob/main/Screenshot.png?raw=true)
