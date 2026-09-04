@@ -249,9 +249,6 @@ whether a newer version exists, with the notes for that release taken from
 which replaces the application files in place and leaves the virtualenv,
 settings, bookmarks and history alone.
 
-`version.txt` holds the version number and nothing else. Everything that shows
-a version reads it from there, so there is one place to change it.
-
 ## Licence
 
 Merlin's own code is available under the GPLv3, which is required by its use of
