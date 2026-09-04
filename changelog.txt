@@ -6,6 +6,14 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  Fixed: a second, transparent window appeared alongside Merlin. The corner
+  overlay had been made an ordinary top level window, which the window manager
+  lists and gives a taskbar button. It is a tool window again, owned by the
+  browser window and not listed.
+  Fixed: Merlin.exe was not being built, because the boot script's imports did
+  not tell PyInstaller that Qt was needed, so the installer fell back to the
+  interpreter and the taskbar showed Python's icon. The fallback now says so
+  loudly instead of passing unnoticed.
   Restored tabs show a placeholder icon and the site's host until they are
   opened, so a restored window no longer looks like it has one tab.
   The installer says loudly when Merlin.exe could not be built, and Settings,

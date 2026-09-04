@@ -26,15 +26,20 @@ from PyQt6.QtWidgets import QWidget
 
 class CornerOverlay(QWidget):
     def __init__(self, parent=None):
-        # Not Qt.Tool. A tool window is hidden by the platform whenever the
-        # application's active window changes, so opening the settings dialog
-        # took the corners with it. A plain frameless window owned by the
-        # browser window stays put and still follows it in the stack.
+        # Qt.Tool: a utility window owned by the browser window, with no
+        # taskbar button and no entry in the window list.
+        #
+        # This was briefly a plain Qt.Window, to stop the platform hiding it
+        # when the active window changed. That gave it its own taskbar button,
+        # and since it is transparent apart from four corner wedges, clicking
+        # it opened what looked like an empty window. The hiding is handled
+        # properly now, by re-placing the overlay whenever the browser window's
+        # activation or state changes, so the tool type can come back.
         super().__init__(parent, Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.Tool
                          | Qt.WindowType.WindowTransparentForInput
                          | Qt.WindowType.WindowDoesNotAcceptFocus
-                         | Qt.WindowType.NoDropShadowWindowHint
-                         | Qt.WindowType.Window)
+                         | Qt.WindowType.NoDropShadowWindowHint)
         self._owner = parent
         self._radius = 10
         self._colour = QColor("#1b1c20")
