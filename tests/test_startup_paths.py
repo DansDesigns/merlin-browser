@@ -192,6 +192,14 @@ save_session = browser_src.split("def save_session")[1][:900]
 check("session save falls back to a tab's pending address",
       "pending_url" in save_session)
 
+browser_src2 = open(os.path.join(root, "merlin", "browser.py"),
+                    encoding="utf-8").read()
+check("deferred callbacks check the view still exists",
+      "def view_is_alive" in browser_src2
+      and browser_src2.count("view_is_alive(view)") >= 2)
+check("closing a tab stops its load first",
+      "view.stop()" in browser_src2.split("def close_tab")[1][:900])
+
 # --- batch quoting hazards --------------------------------------------------
 # A PowerShell call with \" escapes inside a for /f broke install.bat twice:
 # cmd has no backslash escape, so the quotes ended the string early and the

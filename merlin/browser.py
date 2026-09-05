@@ -850,6 +850,19 @@ class BrowserWindow(QMainWindow):
             if url and url != "about:blank":
                 self._closed_tabs.append(url)
         self.tabs.removeTab(index)
+        if isinstance(view, WebView):
+            # Stop the load and drop every connection to this window before
+            # the view goes. Destroying a view that is still fetching a page,
+            # or letting its signals arrive afterwards, is a way to take the
+            # engine down with it.
+            try:
+                view.stop()
+            except Exception:                            # noqa: BLE001
+                pass
+            try:
+                view.disconnect()
+            except Exception:                            # noqa: BLE001
+                pass
         if isinstance(view, QWidget):
             view.deleteLater()
         if self.tabs.count() == 0:
@@ -1310,12 +1323,38 @@ class BrowserWindow(QMainWindow):
         pending = view.property("pending_url")
         if pending:
             view.setProperty("pending_url", None)
-            self.load_in(view, pending)
+            # Start the load on the next turn of the event loop rather than
+            # from inside currentChanged. Switching tabs again while a load
+            # begins meant two loads starting from inside two signals, with
+            # the engine still settling the first.
+            QTimer.singleShot(
+                0, lambda v=view, u=pending: self._load_when_still_open(v, u))
         self._update_url_bar(view.url())
         self._update_nav_actions()
         self._update_shield_badge()
         self._update_bookmark_button()
         self.setWindowTitle(f"{view.title()} - Merlin" if view.title() else "Merlin Browser")
+
+    def view_is_alive(self, view) -> bool:
+        """Is this view still a tab in this window?
+
+        Anything deferred with a timer has to ask. A tab can be closed while
+        the timer is pending, and touching the deleted C++ object then raises
+        out of the timer callback, which ends the process. That is the crash
+        after closing a tab and switching between two that were still loading.
+        """
+        if view is None:
+            return False
+        try:
+            return self.tabs.indexOf(view) >= 0
+        except RuntimeError:
+            return False                                 # already destroyed
+
+    def _load_when_still_open(self, view, url: str) -> None:
+        """Load a restored tab, unless it was closed in the meantime."""
+        if not self.view_is_alive(view):
+            return
+        self.load_in(view, url)
 
     def _on_blocked(self, host: str, url: str) -> None:
         self._blocked_session += 1
@@ -1626,6 +1665,8 @@ class BrowserWindow(QMainWindow):
         tab.deleteLater()
 
     def _offer_player_for_failed_media(self, view) -> None:
+        if not self.view_is_alive(view):
+            return
         """If the engine choked on a media element, offer the player."""
         if not self.settings.get("auto_offer_player"):
             return

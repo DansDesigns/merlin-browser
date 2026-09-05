@@ -6,6 +6,15 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  Fixed: a crash when closing a tab and then switching between restored tabs
+  that were still loading. A timer set 1.5 seconds after a page load ran a
+  script on the view, and if that tab had been closed in the meantime the
+  callback touched a deleted object and took the process with it. Anything
+  deferred now checks the tab is still open, closing a tab stops its load and
+  disconnects it first, and a restored tab starts loading on the next turn of
+  the event loop rather than from inside the tab-changed signal.
+  Selected rows are bright on dark and dark on light, rather than another
+  shade of the background.
   Fixed: updating from Settings failed on Windows when installed from
   MerlinSetup.exe, saying the copy was a built executable and could not be
   changed. It can: the files it loads are the ones on disk beside it. The

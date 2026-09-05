@@ -57,8 +57,11 @@ QListWidget, QPlainTextEdit {
    which on this dark background is near enough invisible. */
 QListWidget::item { padding: 6px 8px; border-radius: 4px; }
 QListWidget::item:hover { background: #2d303a; }
-QListWidget::item:selected {
-    background: #3c4a78; color: #ffffff;
+/* Bright on dark, dark on light: the selection should be the thing that
+   stands out, not another shade of the background. */
+QListWidget::item:selected { background: #8aa4f5; color: #14161a; }
+QTreeWidget::item:selected, QTreeView::item:selected {
+    background: #8aa4f5; color: #14161a;
 }
 QCheckBox { padding: 3px; }
 """
@@ -85,7 +88,10 @@ QListWidget, QPlainTextEdit {
 }
 QListWidget::item { padding: 6px 8px; border-radius: 4px; }
 QListWidget::item:hover { background: #eceef3; }
-QListWidget::item:selected { background: #d6def0; color: #14161a; }
+QListWidget::item:selected { background: #2f3b63; color: #ffffff; }
+QTreeWidget::item:selected, QTreeView::item:selected {
+    background: #2f3b63; color: #ffffff;
+}
 """
 
 
