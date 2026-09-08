@@ -26,15 +26,23 @@ from PyQt6.QtCore import QEvent, QObject, Qt, QTimer
 # Trackpads report pixel deltas; mice report angle deltas in eighths of a degree.
 # The thresholds are deliberately long: a short flick should not take you back a
 # page, and the arrow is there to show how much further you have to go.
-PIXEL_THRESHOLD = 380       # accumulated px before a swipe registers
-ANGLE_THRESHOLD = 900       # accumulated 1/8-degree units for wheel devices
-TOUCH_THRESHOLD = 260       # px of travel for a two-finger touchscreen swipe
+PIXEL_THRESHOLD = 520       # accumulated px before a swipe registers
+ANGLE_THRESHOLD = 1200      # accumulated 1/8-degree units for wheel devices
+TOUCH_THRESHOLD = 340       # px of travel for a two-finger touchscreen swipe
 MIN_DURATION = 0.28         # a swipe faster than this is a flick, not a gesture
-IDLE_TIMEOUT = 1000         # ms of no movement before the arrow fades away
+IDLE_TIMEOUT = 800          # ms of no movement before the arrow fades away
 DOMINANCE = 2.6             # horizontal must beat vertical by this factor
-VERTICAL_CANCEL = 55        # px of vertical travel and the swipe is abandoned
 SHOW_FROM = 0.22            # how far in before the arrow appears at all
 COOLDOWN = 0.6              # seconds between navigations
+
+# How far a finger may wander up and down before the swipe is abandoned.
+#
+# This counts distance travelled, not where it ended up. Measuring the net
+# displacement meant a scroll that went down and then back up came out near
+# zero, so the vertical budget was never spent, while the sideways wobble that
+# comes with scrolling kept adding up in one direction. That is how a plain
+# vertical scroll could end up navigating.
+VERTICAL_TRAVEL_CANCEL = 70
 
 
 class SwipeNavigator(QObject):
@@ -49,6 +57,8 @@ class SwipeNavigator(QObject):
         self._angle_y = 0.0
         self._last_fire = 0.0
         self._touch_start: tuple[float, float] | None = None
+        self._touch_last_y = 0.0
+        self._vertical_travel = 0.0
         self._touch_points = 0
         self._active_window = None
         self._gesture_started = 0.0
@@ -156,6 +166,8 @@ class SwipeNavigator(QObject):
         self._pixel_x = self._pixel_y = 0.0
         self._angle_x = self._angle_y = 0.0
         self._touch_start = None
+        self._touch_last_y = 0.0
+        self._vertical_travel = 0.0
         self._gesture_started = 0.0
         self._idle.stop()
 
@@ -185,6 +197,7 @@ class SwipeNavigator(QObject):
         self._pixel_y += pixel.y()
         self._angle_x += angle.x()
         self._angle_y += angle.y()
+        self._vertical_travel += abs(pixel.y()) or abs(angle.y()) / 8.0
 
         # prefer pixel deltas when the device supplies them
         if abs(self._pixel_x) > 0:
@@ -198,7 +211,7 @@ class SwipeNavigator(QObject):
         # a swipe has to clearly beat the vertical component AND stay within a
         # small vertical budget. Exceeding that budget abandons the gesture
         # outright rather than leaving a half-filled arrow on screen.
-        if abs(vertical) > VERTICAL_CANCEL:
+        if self._vertical_travel > VERTICAL_TRAVEL_CANCEL:
             self._end_gesture(False)
             self._reset()
             return False
@@ -248,6 +261,7 @@ class SwipeNavigator(QObject):
 
         if self._touch_start is None:
             self._touch_start = (centre_x, centre_y)
+            self._touch_last_y = centre_y
             self._gesture_started = time.monotonic()
             return False
 
@@ -261,7 +275,9 @@ class SwipeNavigator(QObject):
         if self.settings.get("invert_swipe", False):
             forward = not forward
 
-        if abs(dy) > VERTICAL_CANCEL:
+        self._vertical_travel += abs(centre_y - self._touch_last_y)
+        self._touch_last_y = centre_y
+        if self._vertical_travel > VERTICAL_TRAVEL_CANCEL:
             self._end_gesture(False)
             self._reset()
             return False

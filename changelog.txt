@@ -6,6 +6,14 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  Swipe navigation needs more distance to fill the arrow, 520px rather than
+  380, and 340 rather than 260 by touch. The arrow now clears after 800ms of
+  no movement instead of a second.
+  Fixed: vertical scrolling could navigate. The sideways budget counted where
+  a finger ended up rather than how far it moved, so a scroll that went down
+  and back up came out near zero and never spent it, while the wobble that
+  comes with scrolling added up in one direction. Distance travelled is what
+  is measured now.
   Fixed: a crash when closing a tab and then switching between restored tabs
   that were still loading. A timer set 1.5 seconds after a page load ran a
   script on the view, and if that tab had been closed in the meantime the
