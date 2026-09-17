@@ -134,6 +134,15 @@ def run_icon_check() -> int:
     path = icon_path()
     print(f"{APP_NAME} {APP_VERSION} icon check")
     print("=" * 52)
+    import merlin
+
+    package = os.path.dirname(os.path.abspath(merlin.__file__))
+    bundle = getattr(sys, "_MEIPASS", "")
+    inside = bool(bundle) and package.startswith(os.path.abspath(bundle))
+    print("Code loaded from:", package)
+    print("Which copy      :",
+          "inside Merlin.exe, so an update placed on disk is NOT running"
+          if inside else "the files on disk, so updates take effect")
     print("Icon file      :", path or "NOT FOUND next to the package")
     print("Platform       :", sys.platform, f"({os.name})")
     from .winicon import process_image
@@ -483,6 +492,7 @@ def main(argv: list[str] | None = None) -> int:
     # --- initial tabs -----------------------------------------------------
     opened = False
     if args.app:
+        window.apply_app_mode()
         window.new_tab(args.app)
         opened = True
     for url in args.urls:
