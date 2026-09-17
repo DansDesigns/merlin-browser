@@ -111,9 +111,10 @@ class PlusButton(QToolButton):
 # ------------------------------------------------------------- horizontal
 # How far a tab has to be dragged clear of its strip before it is pulled out
 # into a window of its own.
-# How long the panel stays open after a touch, since a finger leaving the
-# screen is not the same as a pointer leaving the widget.
-TOUCH_HOLD = 3.0
+# How long the panel stays open after a finger lifts. Long enough to pick a
+# tab, short enough not to sit there afterwards. A touch anywhere else closes
+# it at once, so this only matters when nothing else is touched.
+TOUCH_HOLD = 0.9
 
 DETACH_DISTANCE = 70
 
@@ -525,18 +526,23 @@ class VerticalTabStrip(QWidget):
         super().leaveEvent(event)
 
     def event(self, event):
-        """Open on touch, and keep it open while touching continues."""
+        """Open on touch, without swallowing the touch.
+
+        Accepting these events stopped Qt synthesising the mouse events that
+        buttons rely on, so the + and the close crosses did nothing under a
+        finger. The touch is noted and then passed on untouched.
+        """
         kind = event.type()
         if kind in (QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate):
             self.touched()
-            event.accept()
-            return True
-        if kind == QEvent.Type.TouchEnd:
-            # leave it open briefly so a tab can be picked
+        elif kind == QEvent.Type.TouchEnd:
+            # a moment to pick a tab, then it closes on its own
             self._touch_until = time.monotonic() + TOUCH_HOLD
-            event.accept()
-            return True
         return super().event(event)
+
+    def release_touch(self) -> None:
+        """Stop holding the panel open, because the touch went elsewhere."""
+        self._touch_until = 0.0
 
     def touched(self) -> None:
         self._touch_until = time.monotonic() + TOUCH_HOLD
@@ -714,6 +720,7 @@ class TabContainer(QWidget):
         self.v_strip.currentRequested.connect(self.setCurrentIndex)
         self.v_strip.closeRequested.connect(self.tabCloseRequested.emit)
         self.v_strip.newTabRequested.connect(self.newTabRequested.emit)
+        self.stack.installEventFilter(self)
         self.v_strip.reorderRequested.connect(self._strip_reorder)
         self.v_strip.detachRequested.connect(self.tabDetached.emit)
         self.h_bar.detachRequested.connect(self.tabDetached.emit)
@@ -1116,6 +1123,13 @@ class TabContainer(QWidget):
             if row.rect().contains(row.mapFromGlobal(global_pos)):
                 return index
         return -1
+
+    def eventFilter(self, watched, event):               # noqa: N802
+        """A touch or click on the page stops the strip holding itself open."""
+        if watched is self.stack and event.type() in (
+                QEvent.Type.TouchBegin, QEvent.Type.MouseButtonPress):
+            self.v_strip.release_touch()
+        return super().eventFilter(watched, event)
 
     def _strip_reorder(self, index: int, steps: int) -> None:
         self.move_tab(index, index + steps)

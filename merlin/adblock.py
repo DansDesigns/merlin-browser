@@ -679,9 +679,40 @@ def _host_of(url: str) -> str:
     return host.lower()
 
 
+LOCAL_SUFFIXES = (".local", ".lan", ".home", ".internal", ".localdomain",
+                  ".home.arpa", ".localhost")
+
+
+def is_local_host(host: str) -> bool:
+    """Is this an address on this machine or this network?
+
+    Anything here is left on http: a router, a NAS, a board on the bench,
+    almost none of them have a certificate, so upgrading to https means the
+    page simply never loads. This used to cover only localhost and .local,
+    which left every 192.168 address and every bare machine name broken.
+    """
+    host = (host or "").strip().lower().strip("[]")
+    if not host:
+        return False
+    if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1"):
+        return True
+    if host.endswith(LOCAL_SUFFIXES):
+        return True
+    # a bare machine name, with no dots, is a name on this network
+    if "." not in host and ":" not in host:
+        return True
+    try:
+        import ipaddress
+
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return bool(address.is_private or address.is_loopback
+                or address.is_link_local)
+
+
 def _is_local(url: QUrl) -> bool:
-    host = url.host()
-    return host in ("localhost", "127.0.0.1", "::1") or host.endswith(".local")
+    return is_local_host(url.host())
 
 
 def _registrable(host: str) -> str:

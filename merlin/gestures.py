@@ -26,7 +26,7 @@ from PyQt6.QtCore import QEvent, QObject, Qt, QTimer
 # Trackpads report pixel deltas; mice report angle deltas in eighths of a degree.
 # The thresholds are deliberately long: a short flick should not take you back a
 # page, and the arrow is there to show how much further you have to go.
-PIXEL_THRESHOLD = 520       # accumulated px before a swipe registers
+PIXEL_THRESHOLD = 520       # default px before a swipe registers, adjustable
 ANGLE_THRESHOLD = 1200      # accumulated 1/8-degree units for wheel devices
 TOUCH_THRESHOLD = 340       # px of travel for a two-finger touchscreen swipe
 MIN_DURATION = 0.28         # a swipe faster than this is a flick, not a gesture
@@ -162,6 +162,18 @@ class SwipeNavigator(QObject):
             indicator.reset()
         return True
 
+    def swipe_distance(self) -> float:
+        """How far a swipe must travel, from settings.
+
+        Read on every event rather than cached, so moving the slider takes
+        effect on the next swipe instead of the next restart.
+        """
+        try:
+            value = float(self.settings.get("swipe_distance", PIXEL_THRESHOLD))
+        except (TypeError, ValueError):
+            return float(PIXEL_THRESHOLD)
+        return max(150.0, min(1200.0, value))
+
     def _reset(self) -> None:
         self._pixel_x = self._pixel_y = 0.0
         self._angle_x = self._angle_y = 0.0
@@ -200,12 +212,14 @@ class SwipeNavigator(QObject):
         self._vertical_travel += abs(pixel.y()) or abs(angle.y()) / 8.0
 
         # prefer pixel deltas when the device supplies them
+        distance = self.swipe_distance()
         if abs(self._pixel_x) > 0:
             horizontal, vertical, threshold = (
-                self._pixel_x, self._pixel_y, PIXEL_THRESHOLD)
+                self._pixel_x, self._pixel_y, distance)
         else:
             horizontal, vertical, threshold = (
-                self._angle_x, self._angle_y, ANGLE_THRESHOLD)
+                self._angle_x, self._angle_y,
+                distance * ANGLE_THRESHOLD / PIXEL_THRESHOLD)
 
         # Scrolling a page produces plenty of incidental sideways movement, so
         # a swipe has to clearly beat the vertical component AND stay within a
@@ -282,7 +296,8 @@ class SwipeNavigator(QObject):
             self._reset()
             return False
 
-        progress = min(1.0, abs(dx) / float(TOUCH_THRESHOLD))
+        touch_distance = self.swipe_distance() * TOUCH_THRESHOLD / PIXEL_THRESHOLD
+        progress = min(1.0, abs(dx) / float(touch_distance))
         if progress >= SHOW_FROM:
             self._update_progress(obj, forward, progress)
         if progress < 1.0 or (time.monotonic() - self._gesture_started) < MIN_DURATION:
