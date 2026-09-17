@@ -251,6 +251,8 @@ class BrowserWindow(QMainWindow):
             window_icon = app_icon()
         if not window_icon.isNull():
             self.setWindowIcon(window_icon)
+        self.app_mode = False
+        self._app_title_only = False
         self.setMinimumSize(QSize(420, 320))
         self.setMouseTracking(True)
 
@@ -664,6 +666,35 @@ class BrowserWindow(QMainWindow):
         show.triggered.connect(self.show_bookmarks)
 
     # ------------------------------------------------------------ decorations
+    def apply_app_mode(self) -> None:
+        """Strip the window down to what a single-site app needs.
+
+        An installed page is one site in its own window, so the parts that
+        exist for browsing many are removed rather than hidden behind a
+        setting: no address bar, no tab strip, no home, no bookmarks, no
+        history. Back, forward and reload stay, because a site still has
+        pages. Shields, downloads and the menu stay, because they are about
+        this page rather than about browsing.
+        """
+        self.app_mode = True
+
+        for action in self.toolbar.actions():
+            if self.toolbar.widgetForAction(action) is self.url_bar:
+                action.setVisible(False)
+        self.url_bar.setVisible(False)
+        self.tabs.set_bar_visible(False)
+
+        self.act_home.setVisible(False)
+        # A widget put on a toolbar is wrapped in an action, and the toolbar
+        # lays out by action. Hiding the widget alone leaves the gap and the
+        # widget can be shown again by the layout, so hide both.
+        hidden = {self.btn_bookmark, self.btn_bookmarks, self.btn_history}
+        for action in self.toolbar.actions():
+            if self.toolbar.widgetForAction(action) in hidden:
+                action.setVisible(False)
+        for widget in hidden:
+            widget.setVisible(False)
+
     def apply_decorations(self, hide: bool) -> None:
         """Add or remove the system title bar without losing the session."""
         hide = bool(hide)
@@ -1111,16 +1142,33 @@ class BrowserWindow(QMainWindow):
                          "view-source:", "chrome:", "magnet:")
         if "://" in text or text.startswith(known_schemes):
             return QUrl(text)
+        from .adblock import is_local_host
+
         first = text.split("/")[0]
         host = first.split(":")[0]
-        is_local = host in ("localhost", "127.0.0.1", "0.0.0.0", "[::1]")
+        has_port = ":" in first and first.split(":")[-1].isdigit()
+        # A bare word on its own is a search. With a port, a path, or a dot
+        # it is an address: "omv" searches, "omv/" and "omv:80" do not.
+        looks_addressed = has_port or "/" in text or "." in host
+        is_local = is_local_host(host) and (looks_addressed
+                                            or host == "localhost")
         looks_like_host = is_local or (
             " " not in text and "." in first and not first.endswith(".")
             and not first.startswith(".")
         )
-        if looks_like_host:
-            return QUrl(("http://" if is_local else "https://") + text)
-        return QUrl(self.settings.search_url(text))
+        if not looks_like_host:
+            return QUrl(self.settings.search_url(text))
+
+        if is_local:
+            # a machine on this network: it almost certainly has no
+            # certificate, so asking for https means it never answers
+            return QUrl("http://" + text)
+
+        # Built as https, but remember the http form. If the host turns out to
+        # answer only on http, which domain forwarders often do, the load
+        # failure falls back to it instead of showing nothing.
+        self.interceptor.upgraded.setdefault(host.lower(), "http://" + text)
+        return QUrl("https://" + text)
 
     def search_selection(self, text: str, new_tab: bool = True) -> None:
         """Search the selected text with the current engine."""
@@ -1288,8 +1336,32 @@ class BrowserWindow(QMainWindow):
         if not view.property("merlin_start"):
             self.history.add(url.toString(), view.title())
 
+    def _retry_without_upgrade(self, view, ok: bool) -> bool:
+        """After a failed https load, go back to the address that was asked for.
+
+        Not every host that answers on http also answers on https. A domain
+        forwarder, which takes a .co.uk and bounces it somewhere else, usually
+        does not: upgrading that first hop kills the redirect before it
+        happens and the site simply never loads. Returns True when a retry was
+        started, so the caller leaves the failure alone.
+        """
+        if ok or not self.view_is_alive(view):
+            return False
+        url = view.url()
+        host = (url.host() or "").lower()
+        original = self.interceptor.upgraded.pop(host, "")
+        if not original or url.scheme() != "https":
+            return False
+        self.interceptor.remember_upgrade_failure(host)
+        self.status_label.setText(
+            f"{host} does not answer on https, using the address as given")
+        view.setUrl(QUrl(original))
+        return True
+
     def _on_load_state(self, view: WebView, loading: bool, ok: bool = True) -> None:
         view._loading = loading
+        if not loading and self._retry_without_upgrade(view, ok):
+            return
         if view is self.current():
             dark = bool(self.settings.get("dark_ui"))
             self.act_reload.setIcon(

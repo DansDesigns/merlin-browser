@@ -198,6 +198,40 @@ def test_local_addresses(app) -> None:
     window.close()
 
 
+# ------------------------------------------------------------- app windows
+def test_app_mode(app) -> None:
+    """A page installed as an app gets a window without the browsing parts."""
+    window, _, _ = make_window(app, "t-appmode")
+    window.apply_app_mode()
+    window.new_tab(page("site"))
+    wait(app, 1.0)
+
+    gone = {
+        "address bar": window.url_bar.isVisible(),
+        "tab strip": window.tabs.v_strip.isVisible(),
+        "home": window.act_home.isVisible(),
+        "bookmark star": window.btn_bookmark.isVisible(),
+        "bookmarks menu": window.btn_bookmarks.isVisible(),
+        "history menu": window.btn_history.isVisible(),
+    }
+    still_shown = [name for name, visible in gone.items() if visible]
+    check("an app window drops the browsing parts", not still_shown,
+          str(still_shown))
+
+    kept = {
+        "back": window.act_back.isVisible(),
+        "forward": window.act_forward.isVisible(),
+        "reload": window.act_reload.isVisible(),
+        "shields": window.btn_shields.isVisible(),
+        "downloads": window.btn_downloads.isVisible(),
+        "menu": window.btn_menu.isVisible(),
+    }
+    missing = [name for name, visible in kept.items() if not visible]
+    check("an app window keeps navigation, shields, downloads and the menu",
+          not missing, str(missing))
+    window.close()
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -209,7 +243,7 @@ def wait(app, seconds: float) -> None:
 def main() -> int:
     app = QApplication([sys.argv[0]])
     for test in (test_session, test_placeholders, test_tab_churn,
-                 test_gestures, test_local_addresses):
+                 test_gestures, test_local_addresses, test_app_mode):
         print(f"\n{test.__name__}")
         try:
             test(app)

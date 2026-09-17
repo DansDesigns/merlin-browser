@@ -6,6 +6,27 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  A page installed as an app opens in a window without the browsing parts: no
+  address bar, no tab strip, no home, no bookmarks and no history. Back,
+  forward and reload stay, as does shields, downloads and the menu, because
+  those are about the page rather than about browsing.
+  Fixed: the + and close buttons on the vertical tab strip did nothing under a
+  finger. The strip accepted the touch events to open itself, which stopped Qt
+  turning them into the clicks its buttons rely on. It notes the touch and
+  passes it on now.
+  The strip closes 0.9 seconds after a finger lifts rather than three, and
+  closes at once if anything else on the page is touched.
+  Settings, General has a slider for how far a swipe must travel, 150 to 1200
+  pixels. It takes effect on the next swipe.
+  Fixed: pages on the local network would not load. The https upgrade treated
+  only localhost and .local as local, so every 192.168 or 10.x address, and
+  every bare machine name, was upgraded to https that the device does not
+  answer. Private address ranges, link-local, .lan, .home, .internal and bare
+  hostnames are all left on http now.
+  Typing a machine name with a port or a path, "omv:80" or "omv/", goes to it
+  rather than searching for it. A bare word on its own still searches.
+  Fixed: the fallback from https back to http was missing from the file, so a
+  domain that only answers on http, which forwarders often do, still failed.
   Swipe navigation needs more distance to fill the arrow, 520px rather than
   380, and 340 rather than 260 by touch. The arrow now clears after 800ms of
   no movement instead of a second.
