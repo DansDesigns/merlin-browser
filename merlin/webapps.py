@@ -148,17 +148,24 @@ def _install_linux(name: str, url: str, icon_path: str) -> tuple[bool, str]:
     os.makedirs(apps, exist_ok=True)
     slug = slugify(name)
     command = exec_value(launcher_command())
-    desktop = os.path.join(apps, f"{cfg.APP_SLUG}-app-{slug}.desktop")
+    entry_name = f"{cfg.APP_SLUG}-app-{slug}"
+    desktop = os.path.join(apps, f"{entry_name}.desktop")
+    # --app-name gives the window its own WM_CLASS, matching StartupWMClass
+    # below. Without it every installed app shares Merlin's class, so the
+    # desktop groups them all under Merlin's icon instead of their own.
     body = (
         "[Desktop Entry]\n"
+        "Version=1.0\n"
         "Type=Application\n"
         f"Name={name}\n"
         f"Comment={name}, installed from {APP_NAME}\n"
-        f"Exec={command} --app {exec_value([url])}\n"
+        f"Exec={command} --app {exec_value([url])} "
+        f"--app-name {exec_value([entry_name])}\n"
         f"Icon={icon_path or 'merlin-browser'}\n"
         "Terminal=false\n"
-        "Categories=Network;\n"
-        f"StartupWMClass={cfg.APP_SLUG}-browser\n"
+        "Categories=Network;WebBrowser;Utility;\n"
+        "StartupNotify=true\n"
+        f"StartupWMClass={entry_name}\n"
     )
     try:
         with open(desktop, "w", encoding="utf-8") as handle:

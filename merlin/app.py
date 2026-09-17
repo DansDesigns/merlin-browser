@@ -41,6 +41,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         help="route through a proxy, e.g. socks5://127.0.0.1:1080")
     parser.add_argument("--app", metavar="URL",
                         help="open URL in a frameless single-purpose window")
+    parser.add_argument("--app-name", metavar="NAME", default="",
+                        help="window class for an installed app, so the "
+                             "desktop shows it under its own icon")
     parser.add_argument("--profile", metavar="NAME", default="merlin",
                         help="named storage profile (default: merlin)")
     parser.add_argument("--embed-icon", metavar="EXE",
@@ -359,7 +362,8 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = build_chromium_flags(settings, args)
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
 
-    from PyQt6.QtCore import QTimer
+    from PyQt6.QtCore import QCoreApplication, QTimer
+    from PyQt6.QtGui import QGuiApplication
     from PyQt6.QtWebEngineCore import QWebEngineProfile
     # QtWebEngineWidgets must be imported before the QApplication exists
     from PyQt6 import QtWebEngineWidgets  # noqa: F401
@@ -369,6 +373,13 @@ def main(argv: list[str] | None = None) -> int:
     # Hand over to a Merlin already running, unless this is meant to be its
     # own session. Done before QApplication so the second process costs almost
     # nothing when it is only carrying a link.
+    if getattr(args, "app_name", ""):
+        # Set before the QApplication exists: Qt takes WM_CLASS from the
+        # application name, and the desktop matches that against the entry's
+        # StartupWMClass to decide which icon the window belongs to.
+        QCoreApplication.setApplicationName(args.app_name)
+        QGuiApplication.setDesktopFileName(args.app_name)
+
     share = (settings.get("single_instance", True)
              and not args.private and not args.tor and not args.app)
     if share:
@@ -379,9 +390,14 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication([sys.argv[0]])
     mark("QApplication created")
-    app.setApplicationName("Merlin Browser")
+    # An installed app keeps the name given on the command line, so its
+    # window carries its own WM_CLASS. Overwriting it here put every app back
+    # under Merlin's class, and so under Merlin's icon.
+    if not getattr(args, "app_name", ""):
+        app.setApplicationName("Merlin Browser")
     app.setApplicationDisplayName("Merlin")
-    app.setDesktopFileName("merlin-browser")
+    if not getattr(args, "app_name", ""):
+        app.setDesktopFileName("merlin-browser")
 
     from .brand import app_icon, icon_path
 

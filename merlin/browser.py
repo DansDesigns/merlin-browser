@@ -307,6 +307,18 @@ class BrowserWindow(QMainWindow):
         self._install_completer()
         self.toolbar.addWidget(self.url_bar)
 
+        # The address bar is what pushes everything after it to the right. In
+        # an app window there is no address bar, so without this the shields,
+        # downloads, menu and window buttons bunch up against the reload
+        # button instead of sitting at the right edge.
+        self.toolbar_spacer = QWidget(self)
+        self.toolbar_spacer.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                          QSizePolicy.Policy.Preferred)
+        self.toolbar_spacer.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._spacer_action = self.toolbar.addWidget(self.toolbar_spacer)
+        self._spacer_action.setVisible(False)
+
         self.btn_shields = QToolButton(self)
         self.btn_shields.setToolButtonStyle(
             Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
@@ -682,6 +694,8 @@ class BrowserWindow(QMainWindow):
             if self.toolbar.widgetForAction(action) is self.url_bar:
                 action.setVisible(False)
         self.url_bar.setVisible(False)
+        # takes over the stretch the address bar used to provide
+        self._spacer_action.setVisible(True)
         self.tabs.set_bar_visible(False)
 
         self.act_home.setVisible(False)
