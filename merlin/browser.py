@@ -904,26 +904,10 @@ class BrowserWindow(QMainWindow):
                 view.stop()
             except Exception:                            # noqa: BLE001
                 pass
-                    self.tabs.removeTab(index)
-        if isinstance(view, WebView):
-            # Stop the load and drop our own connections before the view goes.
-            # Destroying a view that is still fetching a page, or letting its
-            # signals arrive afterwards, is a way to take the engine down.
             try:
-                view.stop()
+                view.disconnect()
             except Exception:                            # noqa: BLE001
                 pass
-            # NOT view.disconnect(): a wildcard disconnect also severs Qt's
-            # internal connection from this widget's destroyed signal to
-            # QStyleSheetStyleCaches, which then keeps a dangling pointer and
-            # crashes the next time the application stylesheet changes.
-            for signal in (view.titleChanged, view.iconChanged,
-                           view.urlChanged, view.loadStarted,
-                           view.loadFinished, view.loadProgress):
-                try:
-                    signal.disconnect()
-                except TypeError:                        # nothing connected
-                    pass
         if isinstance(view, QWidget):
             view.deleteLater()
         if self.tabs.count() == 0:
