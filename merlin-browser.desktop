@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=Merlin
+Name=Merlin Web Browser
 GenericName=Web Browser
-Comment=Merlin Browser: unleashing the magic of the internet. Built on Python, C++, Qt and Chromium
+Comment=Merlin Browser: unleashing the magic of the internet. Built on Python, Qt and Chromium
 Exec=merlin-browser %U
 Icon=merlin-browser
 Terminal=false
