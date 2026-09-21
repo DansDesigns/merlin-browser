@@ -1207,7 +1207,7 @@ class BrowserWindow(QMainWindow):
         # Built as https, but remember the http form. If the host turns out to
         # answer only on http, which domain forwarders often do, the load
         # failure falls back to it instead of showing nothing.
-        self.interceptor.upgraded.setdefault(host.lower(), "http://" + text)
+        self.interceptor.remember_http_form(host, "http://" + text)
         return QUrl("https://" + text)
 
     def search_selection(self, text: str, new_tab: bool = True) -> None:
@@ -1389,13 +1389,20 @@ class BrowserWindow(QMainWindow):
             return False
         url = view.url()
         host = (url.host() or "").lower()
-        original = self.interceptor.upgraded.pop(host, "")
+        original = self.interceptor.take_http_form(host)
         if not original or url.scheme() != "https":
             return False
         self.interceptor.remember_upgrade_failure(host)
         self.status_label.setText(
             f"{host} does not answer on https, using the address as given")
-        view.setUrl(QUrl(original))
+
+        # Start the second load on the next turn of the event loop. This runs
+        # from inside loadFinished, and telling the engine to navigate while
+        # it is still reporting the end of the previous navigation is a way to
+        # bring it down. Typing a bare host is the only path that reaches
+        # here, which is why the same address with https:// in front was fine.
+        QTimer.singleShot(
+            0, lambda v=view, u=original: self._load_when_still_open(v, u))
         return True
 
     def _on_load_state(self, view: WebView, loading: bool, ok: bool = True) -> None:

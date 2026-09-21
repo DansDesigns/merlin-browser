@@ -6,6 +6,14 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  Fixed: typing a bare address such as google.com or a local IP could crash,
+  while the same address with https:// in front was fine. Typing it bare is
+  the only path that writes to the request interceptor, and the interceptor
+  runs on the engine's own thread, so a dictionary was being read on one
+  thread while another resized it. Everything shared with that thread is
+  behind a lock now.
+  The icon files are no longer part of this package; they are maintained in
+  the repository.
   Close buttons on tabs are 24 pixels rather than 16, and the ones on the
   horizontal strip match, so they can be hit with a finger.
   A --zoom option sets the page zoom for one window, which is what Chromium's

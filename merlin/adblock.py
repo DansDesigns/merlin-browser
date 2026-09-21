@@ -576,22 +576,52 @@ class RequestInterceptor(QWebEngineUrlRequestInterceptor):
         self.engine = engine
         self.settings = settings
         self.counts: dict[str, int] = defaultdict(int)
-        # host -> the original http address, so a failed upgrade can go back
+        # host -> the original http address, so a failed upgrade can go back.
+        #
+        # interceptRequest runs on the engine's IO thread while the window
+        # writes here from the UI thread, so every touch takes the lock. An
+        # unguarded dict read on one thread while the other resizes it does
+        # not raise, it ends the process.
+        self._lock = threading.Lock()
         self.upgraded: dict[str, str] = {}
+        self._no_upgrade: set[str] = {
+            str(h).lower() for h in (settings.get("https_upgrade_exceptions") or [])
+        }
 
     def no_upgrade(self) -> set:
-        """Hosts where https did not work, so http is used instead."""
-        listed = self.settings.get("https_upgrade_exceptions") or []
-        return {str(h).lower() for h in listed}
+        """Hosts where https did not work, so http is used instead.
+
+        Kept as a set in memory rather than read from settings each time: this
+        is called from the IO thread, and the settings object is not built for
+        that.
+        """
+        with self._lock:
+            return set(self._no_upgrade)
+
+    def remember_http_form(self, host: str, original: str) -> None:
+        """Note the http address a host was typed as, before upgrading it."""
+        host = (host or "").lower()
+        if not host:
+            return
+        with self._lock:
+            self.upgraded.setdefault(host, original)
+
+    def take_http_form(self, host: str) -> str:
+        """The remembered http address for a host, removing it."""
+        with self._lock:
+            return self.upgraded.pop((host or "").lower(), "")
 
     def remember_upgrade_failure(self, host: str) -> None:
         host = (host or "").lower()
         if not host:
             return
-        listed = list(self.settings.get("https_upgrade_exceptions") or [])
-        if host not in listed:
-            listed.append(host)
-            self.settings.set("https_upgrade_exceptions", listed)
+        with self._lock:
+            if host in self._no_upgrade:
+                return
+            self._no_upgrade.add(host)
+            listed = sorted(self._no_upgrade)
+        # settings are written from the UI thread only, outside the lock
+        self.settings.set("https_upgrade_exceptions", listed)
 
     def interceptRequest(self, info: QWebEngineUrlRequestInfo) -> None:  # noqa: N802
         url = info.requestUrl()
@@ -620,7 +650,7 @@ class RequestInterceptor(QWebEngineUrlRequestInterceptor):
                 and url.host().lower() not in self.no_upgrade()):
             upgraded = QUrl(url)
             upgraded.setScheme("https")
-            self.upgraded[url.host().lower()] = url.toString()
+            self.remember_http_form(url.host(), url.toString())
             info.redirect(upgraded)
             return
 
