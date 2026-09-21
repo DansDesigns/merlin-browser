@@ -77,19 +77,24 @@ def _toggle_window_max(window) -> None:
         window.showMaximized()
 
 
+# The cross itself stays small, the button around it does not: 16px was a
+# pointer-sized target and awkward to hit with a finger.
+CLOSE_SIZE = 24
+
+
 class CloseButton(QToolButton):
-    """Small ✕ that sits on the left inside a tab."""
+    """The ✕ that closes a tab."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setText("\u2715")
-        self.setFixedSize(QSize(16, 16))
+        self.setFixedSize(QSize(CLOSE_SIZE, CLOSE_SIZE))
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self.setToolTip("Close tab")
         self.setStyleSheet(
-            "QToolButton { border: none; border-radius: 8px; color: #9a9ba1;"
-            " font-size: 10px; padding: 0; background: transparent; }"
+            "QToolButton { border: none; border-radius: 12px; color: #9a9ba1;"
+            " font-size: 12px; padding: 0; background: transparent; }"
             "QToolButton:hover { background: #d33; color: #fff; }"
         )
 

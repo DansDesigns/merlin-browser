@@ -6,6 +6,10 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  Close buttons on tabs are 24 pixels rather than 16, and the ones on the
+  horizontal strip match, so they can be hit with a finger.
+  A --zoom option sets the page zoom for one window, which is what Chromium's
+  --force-device-scale-factor is used for in a web app launcher.
   Fixed: hiding the window decorations applied to every open window at once,
   and the tick in the menu came from the saved default rather than the window
   in front of you, so in any window that differed from that default, an

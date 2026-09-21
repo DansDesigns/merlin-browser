@@ -252,6 +252,9 @@ class BrowserWindow(QMainWindow):
         if not window_icon.isNull():
             self.setWindowIcon(window_icon)
         self.app_mode = False
+        # a window-wide page zoom from --zoom, overriding the saved default
+        # for this window only. 0 means use the setting.
+        self.window_zoom = 0.0
         self._app_title_only = False
         self.setMinimumSize(QSize(420, 320))
         self.setMouseTracking(True)
@@ -885,7 +888,8 @@ class BrowserWindow(QMainWindow):
         view.loadFinished.connect(
             lambda ok, v=view: v.page().runJavaScript(media.MEDIA_ERROR_WATCH_JS)
             if ok else None)
-        view.setZoomFactor(float(self.settings.get("default_zoom", 1.0)))
+        view.setZoomFactor(self.window_zoom
+                           or float(self.settings.get("default_zoom", 1.0)))
 
         if not background:
             self.tabs.setCurrentIndex(index)

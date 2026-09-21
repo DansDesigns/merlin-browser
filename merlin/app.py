@@ -41,6 +41,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         help="route through a proxy, e.g. socks5://127.0.0.1:1080")
     parser.add_argument("--app", metavar="URL",
                         help="open URL in a frameless single-purpose window")
+    parser.add_argument("--zoom", metavar="FACTOR", type=float, default=0.0,
+                        help="page zoom for this window, 1.3 for a third "
+                             "larger. The equivalent of Chromium's "
+                             "--force-device-scale-factor for page content")
     parser.add_argument("--app-name", metavar="NAME", default="",
                         help="window class for an installed app, so the "
                              "desktop shows it under its own icon")
@@ -507,6 +511,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- initial tabs -----------------------------------------------------
     opened = False
+    if args.zoom and args.zoom > 0:
+        window.window_zoom = max(0.25, min(5.0, args.zoom))
     if args.app:
         window.apply_app_mode()
         window.new_tab(args.app)

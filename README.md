@@ -155,6 +155,9 @@ merlin-browser [URL ...]
   --no-decorations / --decorations   start with or without the title bar
   --persist-decorations              save that choice to settings
   --app URL                          frameless single-purpose window
+  --app-name NAME                    window class for it, so the desktop
+                                     shows it under its own icon
+  --zoom FACTOR                      page zoom for that window
   --private                          off-the-record window
   --profile NAME                     separate storage profile
   --codecs                           print codec and player support

@@ -39,7 +39,11 @@ QTabBar::tab {
 }
 QTabBar::tab:selected { background: #2f3138; color: #ffffff; }
 QTabBar::tab:hover { background: #2a2c32; }
-QTabBar::close-button { image: none; border-radius: 6px; }
+/* a finger-sized target on the horizontal strip too */
+QTabBar::close-button {
+    image: none; border-radius: 11px; width: 22px; height: 22px;
+    margin: 2px;
+}
 QMenu { background: #232429; border: 1px solid #34363d; padding: 5px; }
 QMenu::item { padding: 6px 22px 6px 14px; border-radius: 5px; }
 QMenu::item:selected { background: #3a3d45; }
