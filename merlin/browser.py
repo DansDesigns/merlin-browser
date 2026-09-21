@@ -255,6 +255,11 @@ class BrowserWindow(QMainWindow):
         # a window-wide page zoom from --zoom, overriding the saved default
         # for this window only. 0 means use the setting.
         self.window_zoom = 0.0
+        # host -> the http address it was before an upgrade, so a failed
+        # https load can go back to what was asked for. Written and read on
+        # this thread only: the interceptor tells us by signal rather than
+        # sharing a dictionary across threads.
+        self._http_fallbacks: dict[str, str] = {}
         self._app_title_only = False
         self.setMinimumSize(QSize(420, 320))
         self.setMouseTracking(True)
@@ -264,6 +269,7 @@ class BrowserWindow(QMainWindow):
 
         self.settings.changed.connect(self._on_setting_changed)
         self.interceptor.blocked.connect(self._on_blocked)
+        self.interceptor.upgraded_to_https.connect(self._note_http_fallback)
 
         self.apply_decorations(self.settings.get("hide_window_decorations"))
         self.restore_geometry()
@@ -1207,7 +1213,7 @@ class BrowserWindow(QMainWindow):
         # Built as https, but remember the http form. If the host turns out to
         # answer only on http, which domain forwarders often do, the load
         # failure falls back to it instead of showing nothing.
-        self.interceptor.remember_http_form(host, "http://" + text)
+        self._http_fallbacks.setdefault(host.lower(), "http://" + text)
         return QUrl("https://" + text)
 
     def search_selection(self, text: str, new_tab: bool = True) -> None:
@@ -1376,6 +1382,11 @@ class BrowserWindow(QMainWindow):
         if not view.property("merlin_start"):
             self.history.add(url.toString(), view.title())
 
+    def _note_http_fallback(self, host: str, original: str) -> None:
+        """The interceptor upgraded a page; remember what it was before."""
+        if host:
+            self._http_fallbacks.setdefault(host.lower(), original)
+
     def _retry_without_upgrade(self, view, ok: bool) -> bool:
         """After a failed https load, go back to the address that was asked for.
 
@@ -1389,7 +1400,7 @@ class BrowserWindow(QMainWindow):
             return False
         url = view.url()
         host = (url.host() or "").lower()
-        original = self.interceptor.take_http_form(host)
+        original = self._http_fallbacks.pop(host, "")
         if not original or url.scheme() != "https":
             return False
         self.interceptor.remember_upgrade_failure(host)

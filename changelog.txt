@@ -6,6 +6,13 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  The interceptor no longer shares any dictionary with the window. It reports
+  an upgrade by signal, which Qt delivers to the window's own thread, so the
+  record of what an address was before upgrading is written and read on one
+  thread only.
+  A crash log is written to crash.log beside the ordinary log. A hard crash
+  inside the engine leaves nothing behind otherwise: the window disappears
+  with no exception to catch.
   Fixed: typing a bare address such as google.com or a local IP could crash,
   while the same address with https:// in front was fine. Typing it bare is
   the only path that writes to the request interceptor, and the interceptor

@@ -570,20 +570,20 @@ class RequestInterceptor(QWebEngineUrlRequestInterceptor):
     """Blocks ads/trackers, upgrades to HTTPS, sets privacy headers."""
 
     blocked = pyqtSignal(str, str)   # first-party host, blocked url
+    # host, the http address it was before upgrading. A signal rather than a
+    # shared dictionary: this is emitted on the engine's own thread and Qt
+    # delivers it to the window's thread, so nothing is touched from both.
+    upgraded_to_https = pyqtSignal(str, str)
 
     def __init__(self, engine: FilterEngine, settings: cfg.Settings, parent=None):
         super().__init__(parent)
         self.engine = engine
         self.settings = settings
         self.counts: dict[str, int] = defaultdict(int)
-        # host -> the original http address, so a failed upgrade can go back.
-        #
-        # interceptRequest runs on the engine's IO thread while the window
-        # writes here from the UI thread, so every touch takes the lock. An
-        # unguarded dict read on one thread while the other resizes it does
-        # not raise, it ends the process.
+        # interceptRequest runs on the engine's own thread. Anything it reads
+        # that the window also writes is behind this lock; anything it wants
+        # to tell the window goes out as a signal instead.
         self._lock = threading.Lock()
-        self.upgraded: dict[str, str] = {}
         self._no_upgrade: set[str] = {
             str(h).lower() for h in (settings.get("https_upgrade_exceptions") or [])
         }
@@ -597,19 +597,6 @@ class RequestInterceptor(QWebEngineUrlRequestInterceptor):
         """
         with self._lock:
             return set(self._no_upgrade)
-
-    def remember_http_form(self, host: str, original: str) -> None:
-        """Note the http address a host was typed as, before upgrading it."""
-        host = (host or "").lower()
-        if not host:
-            return
-        with self._lock:
-            self.upgraded.setdefault(host, original)
-
-    def take_http_form(self, host: str) -> str:
-        """The remembered http address for a host, removing it."""
-        with self._lock:
-            return self.upgraded.pop((host or "").lower(), "")
 
     def remember_upgrade_failure(self, host: str) -> None:
         host = (host or "").lower()
@@ -650,7 +637,7 @@ class RequestInterceptor(QWebEngineUrlRequestInterceptor):
                 and url.host().lower() not in self.no_upgrade()):
             upgraded = QUrl(url)
             upgraded.setScheme("https")
-            self.remember_http_form(url.host(), url.toString())
+            self.upgraded_to_https.emit(url.host().lower(), url.toString())
             info.redirect(upgraded)
             return
 

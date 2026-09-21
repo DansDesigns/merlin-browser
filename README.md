@@ -185,6 +185,7 @@ merlin-browser [URL ...]
 | Settings, bookmarks | `~/.config/merlin` | `%APPDATA%\Merlin` |
 | History, filter lists | `~/.local/share/merlin` | `%LOCALAPPDATA%\Merlin\data` |
 | Cache | `~/.cache/merlin` | `%LOCALAPPDATA%\Merlin\cache` |
+| Logs, crash log | `~/.local/state/merlin` | `%LOCALAPPDATA%\Merlin` |
 
 Settings are a single `settings.json`; every option in the dialog is a key in
 that file.

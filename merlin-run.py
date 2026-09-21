@@ -143,7 +143,28 @@ def prefer_disk_copy() -> str:
     return root
 
 
+def enable_crash_log() -> str:
+    """Write a stack trace to the log if the process is killed outright.
+
+    A segmentation fault or an abort inside the engine leaves nothing behind:
+    the window disappears and there is no exception to catch. faulthandler
+    writes the Python side of the stack at that moment, which is usually
+    enough to say which call was in flight.
+    """
+    try:
+        import faulthandler
+
+        path = os.path.join(os.path.dirname(log_path()), "crash.log")
+        handle = open(path, "a", encoding="utf-8", buffering=1)
+        handle.write(f"\n--- started {__import__('datetime').datetime.now()} ---\n")
+        faulthandler.enable(file=handle, all_threads=True)
+        return path
+    except Exception:          # noqa: BLE001
+        return ""
+
+
 def main() -> int:
+    enable_crash_log()
     prefer_disk_copy()
     try:
         from merlin.app import main as run
