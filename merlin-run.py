@@ -37,17 +37,38 @@ _ensure_streams()
 
 
 def log_path() -> str:
+    """The same merlin-log.txt the package writes to, found the same way.
+
+    Kept in step by hand with merlin/crashlog.py: this script is frozen into
+    Merlin.exe and reports a failure to start, which by definition happens
+    when the package may not have loaded, so it cannot import that module.
+    """
+    home = os.path.expanduser("~")
     if os.name == "nt":
-        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        folder = os.path.join(base, "Merlin")
+        documents = os.path.join(home, "Documents")
+        if not os.path.isdir(documents):
+            documents = os.path.join(home, "OneDrive", "Documents")
+        places = [os.path.join(documents, "Merlin")]
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            places.append(os.path.join(local, "Merlin"))
     else:
-        base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
-        folder = os.path.join(base, "merlin")
-    try:
-        os.makedirs(folder, exist_ok=True)
-    except OSError:
-        folder = os.path.expanduser("~")
-    return os.path.join(folder, "startup-error.log")
+        state = os.environ.get("XDG_STATE_HOME") or os.path.join(
+            home, ".local", "state")
+        places = [os.path.join(state, "merlin")]
+    import tempfile
+
+    places.append(os.path.join(tempfile.gettempdir(), "Merlin"))
+    for folder in places:
+        try:
+            os.makedirs(folder, exist_ok=True)
+            path = os.path.join(folder, "merlin-log.txt")
+            with open(path, "a", encoding="utf-8"):
+                pass
+            return path
+        except OSError:
+            continue
+    return os.path.join(home, "merlin-log.txt")
 
 
 def report(message: str) -> None:

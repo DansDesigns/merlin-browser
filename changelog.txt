@@ -6,6 +6,25 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  Fixed: switching theme after opening and closing tabs crashed Merlin. When a
+  tab closed, a disconnect() with no arguments cut every connection its web
+  view had, including the ones Qt WebEngine makes internally, which left its
+  widgets half wired. Setting the application's stylesheet re-polishes every
+  widget it owns, and polishing one of those touched freed memory. The
+  wildcard disconnect is gone; late signals are handled where they land. The
+  theme switch also carries out pending deletions first, and only restyles
+  when the stylesheet actually changes, rather than once per open window.
+  About Merlin has a Donate button, which opens the donation page in a tab.
+  The "Built on" line has a line of its own, and the text and logo sit on the
+  dialog's own background rather than a slightly darker panel.
+  The log is called merlin-log.txt, and there is one of it: starts, which copy
+  of the code is running, a failure to start, and the stack if Merlin is ever
+  killed outright all go to the same file.
+  Clicking into the address bar selects the whole address, so typing replaces
+  it. A second click, once the bar has focus, places the cursor as normal.
+  The new tab button shows a filled circle on hover, as the close buttons do.
+  It takes the accent colour rather than red, since red on the button that
+  adds a tab would read as a warning.
   Fixed: the crash log never ran on Windows. It lived in merlin-run.py, which
   is frozen into Merlin.exe when it is built, and an update from Settings only
   replaces the package on disk, never the executable. It lives in the package

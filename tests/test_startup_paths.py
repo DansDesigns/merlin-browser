@@ -197,8 +197,10 @@ browser_src2 = open(os.path.join(root, "merlin", "browser.py"),
 check("deferred callbacks check the view still exists",
       "def view_is_alive" in browser_src2
       and browser_src2.count("view_is_alive(view)") >= 2)
-check("closing a tab stops its load first",
-      "view.stop()" in browser_src2.split("def close_tab")[1][:900])
+# the whole function, not a fixed number of characters into it: a longer
+# comment should not be able to make this fail
+_close_tab = browser_src2.split("def close_tab")[1].split("\n    def ")[0]
+check("closing a tab stops its load first", "view.stop()" in _close_tab)
 
 check("https fallback retries on http after a failed upgrade",
       "def _retry_without_upgrade" in browser_src2
@@ -215,6 +217,12 @@ app_src = open(os.path.join(root, "merlin", "app.py"), encoding="utf-8").read()
 check("crash log lives in the package, where updates reach it",
       os.path.isfile(os.path.join(root, "merlin", "crashlog.py"))
       and "crashlog.enable()" in app_src)
+
+# A no-argument disconnect() on a web view also cuts Qt WebEngine's own
+# internal connections, and the next restyle of the application crashes.
+import re as _re_dc
+check("no wildcard disconnect on a web view",
+      not _re_dc.search(r"^\s*view\.disconnect\(\)", browser_src2, _re_dc.M))
 
 # --- batch quoting hazards --------------------------------------------------
 # A PowerShell call with \" escapes inside a for /f broke install.bat twice:

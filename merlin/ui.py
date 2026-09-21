@@ -100,7 +100,25 @@ QTreeWidget::item:selected, QTreeView::item:selected {
 
 
 def apply_theme(app, dark: bool) -> None:
-    app.setStyleSheet(DARK_QSS if dark else LIGHT_QSS)
+    """Switch the application stylesheet.
+
+    Setting a stylesheet on the application re-polishes every widget it owns.
+    A tab that has just been closed is queued for deletion rather than gone,
+    and its web view has already been stopped and cut loose from the engine.
+    Polishing it touched freed memory and took the whole process down, which
+    is the crash after opening and closing tabs and then switching theme.
+
+    Pending deletions are carried out first, so only live widgets are
+    restyled. And since every open window reacts to the same setting change,
+    the stylesheet is only set when it actually differs, not once per window.
+    """
+    from PyQt6.QtCore import QCoreApplication, QEvent
+
+    sheet = DARK_QSS if dark else LIGHT_QSS
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    if app.styleSheet() == sheet:
+        return
+    app.setStyleSheet(sheet)
 
 
 def apply_font(app, point_size: int) -> None:
@@ -1434,8 +1452,8 @@ class SettingsDialog(QDialog):
         _inside = bool(_bundle) and _package.startswith(os.path.abspath(_bundle))
         _crash = os.environ.get("MERLIN_CRASH_LOG", "")
         lines = [f"Version: {APP_VERSION}",
-                 f"Crash log: {_crash}" if _crash
-                 else "Crash log: not enabled",
+                 f"Log: {_crash}" if _crash
+                 else "Log: not enabled",
                  ("Code from: inside Merlin.exe, so an update on disk is not "
                   "running; reinstall to rebuild it") if _inside
                  else f"Code from: {_package}",

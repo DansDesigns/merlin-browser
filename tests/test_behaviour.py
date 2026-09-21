@@ -282,6 +282,47 @@ def test_decorations_per_window(app) -> None:
     two.close()
 
 
+def test_address_bar_selects(app) -> None:
+    """Clicking into the address bar selects the whole address."""
+    from PyQt6.QtCore import QPoint as _P
+    from PyQt6.QtTest import QTest
+
+    window, _, _ = make_window(app, "t-select")
+    window.new_tab()
+    wait(app, 0.8)
+    bar = window.url_bar
+    bar.setText("https://www.youtube.com/watch?v=abc")
+    window.current().setFocus()
+    wait(app, 0.2)
+    QTest.mouseClick(bar, Qt.MouseButton.LeftButton,
+                     pos=_P(bar.width() // 2, bar.height() // 2))
+    wait(app, 0.2)
+    check("the first click selects the whole address",
+          bar.selectedText() == bar.text())
+    QTest.mouseClick(bar, Qt.MouseButton.LeftButton,
+                     pos=_P(bar.width() // 3, bar.height() // 2))
+    wait(app, 0.1)
+    check("a second click places the cursor instead", bar.selectedText() == "")
+    window.close()
+
+
+def test_theme_after_closing_tabs(app) -> None:
+    """Close tabs, then switch theme straight away. This used to crash."""
+    window, settings, _ = make_window(app, "t-theme", dark_ui=True,
+                                      theme_mode="manual")
+    window.new_tab()
+    for _ in range(12):
+        for _ in range(3):
+            window.new_tab(page("t", 200))
+        while window.tabs.count() > 1:
+            window.close_tab(window.tabs.count() - 1)
+        window.act_dark.trigger()
+        wait(app, 0.03)
+    check("switching theme right after closing tabs survives", True,
+          "12 rounds")
+    window.close()
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -294,7 +335,8 @@ def main() -> int:
     app = QApplication([sys.argv[0]])
     for test in (test_session, test_placeholders, test_tab_churn,
                  test_gestures, test_local_addresses, test_app_mode,
-                 test_decorations_per_window):
+                 test_decorations_per_window, test_address_bar_selects,
+                 test_theme_after_closing_tabs):
         print(f"\n{test.__name__}")
         try:
             test(app)

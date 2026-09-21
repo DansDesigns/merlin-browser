@@ -662,12 +662,26 @@ class VerticalTabStrip(QWidget):
         self.update()
 
     def _style_plus(self) -> None:
-        """The + takes a dark glyph on light, a light one on dark."""
-        colour = THEME[self.palette_name].get("plus", "#c9cbd6")
+        """The + gets a filled circle on hover, as the close buttons do.
+
+        The close buttons turn red, which means "this will go". The same red
+        on the button that adds a tab would read as a warning, so it takes the
+        accent colour instead: the same gesture, the right meaning.
+
+        This used to set its own font size and no radius, silently overriding
+        the larger size the button is created with, so it now carries both.
+        """
+        theme = THEME[self.palette_name]
+        colour = theme.get("plus", "#c9cbd6")
+        accent = theme["accent"]
+        radius = PLUS_SIZE // 2
         self.plus.setStyleSheet(
             f"QToolButton {{ color: {colour}; border: none;"
-            f" background: transparent; font-size: 17px; }}"
-            f"QToolButton:hover {{ color: {THEME[self.palette_name]['accent']}; }}")
+            f" border-radius: {radius}px; background: transparent;"
+            f" font-size: 21px; font-weight: 500; padding: 0; }}"
+            f"QToolButton:hover {{ background: {accent}; color: #ffffff; }}"
+            f"QToolButton:pressed {{ background: {accent}; color: #ffffff;"
+            f" padding-top: 1px; }}")
 
     def update_selection(self, current: int) -> None:
         for index, row in enumerate(self.rows):

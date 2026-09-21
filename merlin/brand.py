@@ -3,6 +3,8 @@ from __future__ import annotations
 
 APP_NAME = "Merlin"
 APP_TAGLINE = "Merlin Browser"
+DONATE_URL = "https://alternitech.square.site/product/donation/6"
+
 APP_BLURB = ("Merlin Browser: unleashing the magic of the internet. Built on Python, C++, Qt and Chromium.")
 APP_SLUG = "merlin"              # config dirs, desktop file, executable name
 APP_SCHEME = "merlin"            # merlin://start

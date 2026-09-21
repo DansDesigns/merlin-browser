@@ -15,6 +15,9 @@ import os
 
 _HANDLE = None
 
+# .txt so Windows opens it on a double click; the name is the one that matters
+LOG_NAME = "merlin-log.txt"
+
 
 def _code_location() -> str:
     """Which copy of the application is running: disk, or inside the exe.
@@ -91,7 +94,9 @@ def enable() -> str:
         return ""
 
     for folder in crash_log_candidates():
-        path = os.path.join(folder, "crash.log")
+        # one log for everything Merlin writes: starts, which copy is running,
+        # and the stack if it is ever killed outright
+        path = os.path.join(folder, LOG_NAME)
         try:
             os.makedirs(folder, exist_ok=True)
             handle = open(path, "a", encoding="utf-8", buffering=1)

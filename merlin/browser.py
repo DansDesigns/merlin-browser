@@ -311,6 +311,8 @@ class BrowserWindow(QMainWindow):
         self.url_bar.setClearButtonEnabled(True)
         self.url_bar.returnPressed.connect(
             lambda: self.navigate(self.url_bar.text()))
+        # the first click selects the whole address, so typing replaces it
+        self.url_bar.installEventFilter(self)
         self.url_bar.setSizePolicy(QSizePolicy.Policy.Expanding,
                                    QSizePolicy.Policy.Fixed)
         self._install_completer()
@@ -928,16 +930,18 @@ class BrowserWindow(QMainWindow):
                 self._closed_tabs.append(url)
         self.tabs.removeTab(index)
         if isinstance(view, WebView):
-            # Stop the load and drop every connection to this window before
-            # the view goes. Destroying a view that is still fetching a page,
-            # or letting its signals arrive afterwards, is a way to take the
-            # engine down with it.
+            # Stop the load before the view goes: destroying a view that is
+            # still fetching a page is a way to take the engine down with it.
+            #
+            # Do NOT call view.disconnect() here. With no arguments it cuts
+            # every connection the view has, including the ones Qt WebEngine
+            # makes internally, and leaves its widgets half wired. The next
+            # time anything restyled the application, switching theme for
+            # instance, Qt polished one of those and the process died. Late
+            # signals are dealt with where they land instead: every deferred
+            # callback checks view_is_alive first.
             try:
                 view.stop()
-            except Exception:                            # noqa: BLE001
-                pass
-            try:
-                view.disconnect()
             except Exception:                            # noqa: BLE001
                 pass
         if isinstance(view, QWidget):
@@ -1382,6 +1386,22 @@ class BrowserWindow(QMainWindow):
         if not view.property("merlin_start"):
             self.history.add(url.toString(), view.title())
 
+    def eventFilter(self, watched, event):               # noqa: N802
+        """Select the whole address when the address bar is clicked into.
+
+        Only on the click that brings focus in. The press that follows focus
+        would otherwise place the cursor where the pointer landed, undoing the
+        selection, so it is applied once that press has been handled. A second
+        click, with the bar already focused, behaves normally and lets you put
+        the cursor somewhere in the address.
+        """
+        if (watched is getattr(self, "url_bar", None)
+                and event.type() == QEvent.Type.FocusIn
+                and event.reason() in (Qt.FocusReason.MouseFocusReason,
+                                       Qt.FocusReason.OtherFocusReason)):
+            QTimer.singleShot(0, self.url_bar.selectAll)
+        return super().eventFilter(watched, event)
+
     def _note_http_fallback(self, host: str, original: str) -> None:
         """The interceptor upgraded a page; remember what it was before."""
         if host:
@@ -1699,16 +1719,68 @@ class BrowserWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl(RELEASES_URL))
 
     def show_about(self) -> None:
-        from PyQt6.QtCore import QT_VERSION_STR
+        """About Merlin, with a way to support it.
 
-        QMessageBox.about(
-            self, "About Merlin",
-            f"<h3>{APP_NAME} Browser {APP_VERSION}</h3>"
-            f"<p>{APP_BLURB}</p>"
-            f"<p>Qt {QT_VERSION_STR}<br>"
+        A dialog of its own rather than QMessageBox.about. That one draws its
+        text and icon on panels of its own colour, which showed as a darker
+        box inside the dialog, and it has no room for a second button.
+        """
+        from PyQt6.QtCore import QT_VERSION_STR
+        from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QHBoxLayout,
+                                     QLabel, QVBoxLayout)
+
+        from .brand import DONATE_URL, app_icon
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"About {APP_NAME}")
+        dialog.setMinimumWidth(520)
+        # Everything inside is transparent, so it all sits on the dialog's own
+        # background instead of on panels of a slightly different shade.
+        dialog.setStyleSheet("QLabel { background: transparent; }")
+
+        outer = QVBoxLayout(dialog)
+        outer.setContentsMargins(22, 20, 22, 16)
+        outer.setSpacing(14)
+
+        row = QHBoxLayout()
+        row.setSpacing(20)
+        logo = QLabel(dialog)
+        icon = app_icon()
+        if not icon.isNull():
+            logo.setPixmap(icon.pixmap(88, 88))
+        logo.setAlignment(Qt.AlignmentFlag.AlignTop)
+        row.addWidget(logo)
+
+        # the tagline and the "Built on" line are separate lines
+        tagline, _, built = APP_BLURB.partition(" Built on ")
+        text = QLabel(
+            f"<h3 style='margin:0 0 8px 0'>{APP_NAME} Browser {APP_VERSION}</h3>"
+            f"<p style='margin:0 0 4px 0'>{tagline}</p>"
+            + (f"<p style='margin:0 0 10px 0'>Built on {built}</p>" if built else "")
+            + f"<p style='margin:0'>Qt {QT_VERSION_STR}<br>"
             f"{self.filter_engine.rule_count:,} filter rules<br>"
-            f"{self._engine_summary()}</p>"
-        )
+            f"{self._engine_summary()}</p>", dialog)
+        text.setWordWrap(True)
+        text.setTextFormat(Qt.TextFormat.RichText)
+        row.addWidget(text, 1)
+        outer.addLayout(row)
+
+        buttons = QDialogButtonBox(dialog)
+        donate = buttons.addButton(
+            "Donate", QDialogButtonBox.ButtonRole.ActionRole)
+        donate.setToolTip(DONATE_URL)
+
+        def open_donation():
+            dialog.accept()
+            self.new_tab(DONATE_URL)
+
+        donate.clicked.connect(open_donation)
+        ok = buttons.addButton(QDialogButtonBox.StandardButton.Ok)
+        ok.clicked.connect(dialog.accept)
+        ok.setDefault(True)
+        outer.addWidget(buttons)
+
+        dialog.exec()
 
     # ----------------------------------------------------------- diagnostics
     def _engine_summary(self) -> str:
