@@ -1432,7 +1432,10 @@ class SettingsDialog(QDialog):
         _package = os.path.dirname(os.path.abspath(_merlin.__file__))
         _bundle = getattr(_sys, "_MEIPASS", "")
         _inside = bool(_bundle) and _package.startswith(os.path.abspath(_bundle))
+        _crash = os.environ.get("MERLIN_CRASH_LOG", "")
         lines = [f"Version: {APP_VERSION}",
+                 f"Crash log: {_crash}" if _crash
+                 else "Crash log: not enabled",
                  ("Code from: inside Merlin.exe, so an update on disk is not "
                   "running; reinstall to rebuild it") if _inside
                  else f"Code from: {_package}",

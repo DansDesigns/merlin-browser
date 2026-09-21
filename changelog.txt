@@ -10,9 +10,12 @@ version.txt and nowhere else.
   an upgrade by signal, which Qt delivers to the window's own thread, so the
   record of what an address was before upgrading is written and read on one
   thread only.
-  A crash log is written to crash.log beside the ordinary log. A hard crash
-  inside the engine leaves nothing behind otherwise: the window disappears
-  with no exception to catch.
+  A crash log is written to Documents\Merlin\crash.log on Windows, or the
+  state folder on Linux. A hard crash inside the engine leaves nothing behind
+  otherwise: the window disappears with no exception to catch. Several
+  locations are tried and each is proved by actually writing to it, because
+  creating a folder can succeed where writing a file cannot. The path in use
+  is shown in Settings, Advanced and by --icon-check.
   Fixed: typing a bare address such as google.com or a local IP could crash,
   while the same address with https:// in front was fine. Typing it bare is
   the only path that writes to the request interceptor, and the interceptor

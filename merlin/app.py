@@ -146,6 +146,8 @@ def run_icon_check() -> int:
     package = os.path.dirname(os.path.abspath(merlin.__file__))
     bundle = getattr(sys, "_MEIPASS", "")
     inside = bool(bundle) and package.startswith(os.path.abspath(bundle))
+    crash_log = os.environ.get("MERLIN_CRASH_LOG", "")
+    print("Crash log       :", crash_log or "not enabled")
     print("Code loaded from:", package)
     print("Which copy      :",
           "inside Merlin.exe, so an update placed on disk is NOT running"
