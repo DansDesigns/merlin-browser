@@ -209,6 +209,13 @@ adblock_src = open(os.path.join(root, "merlin", "adblock.py"),
 check("local addresses are exempt from the https upgrade",
       "def is_local_host" in adblock_src and "is_private" in adblock_src)
 
+# merlin-run.py is frozen into Merlin.exe, so anything that has to reach an
+# installed copy through an update must live in the package instead.
+app_src = open(os.path.join(root, "merlin", "app.py"), encoding="utf-8").read()
+check("crash log lives in the package, where updates reach it",
+      os.path.isfile(os.path.join(root, "merlin", "crashlog.py"))
+      and "crashlog.enable()" in app_src)
+
 # --- batch quoting hazards --------------------------------------------------
 # A PowerShell call with \" escapes inside a for /f broke install.bat twice:
 # cmd has no backslash escape, so the quotes ended the string early and the

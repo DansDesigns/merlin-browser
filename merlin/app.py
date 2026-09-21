@@ -298,6 +298,12 @@ def build_chromium_flags(settings: cfg.Settings, args=None) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # before anything else, so a crash anywhere after this is written down
+    if not os.environ.get("MERLIN_CRASH_LOG"):
+        from . import crashlog
+
+        crashlog.enable()
+
     import time
 
     started = time.perf_counter()

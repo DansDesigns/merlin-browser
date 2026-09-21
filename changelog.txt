@@ -6,6 +6,12 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  Fixed: the crash log never ran on Windows. It lived in merlin-run.py, which
+  is frozen into Merlin.exe when it is built, and an update from Settings only
+  replaces the package on disk, never the executable. It lives in the package
+  now, so an update carries it. Every start writes a line saying which copy of
+  the code is running, disk or the one inside Merlin.exe, so the log answers
+  that whether or not anything crashes.
   The interceptor no longer shares any dictionary with the window. It reports
   an upgrade by signal, which Qt delivers to the window's own thread, so the
   record of what an address was before upgrading is written and read on one
