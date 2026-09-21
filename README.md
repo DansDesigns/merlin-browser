@@ -1,5 +1,5 @@
 # Merlin Browser
-![version](https://img.shields.io/badge/version-1.5.2-6f8ff0)
+![version](https://img.shields.io/badge/version-1.6-6f8ff0)
 
 A Rust-free desktop web browser built with Python and C++, on Qt and the Chromium engine.
 
