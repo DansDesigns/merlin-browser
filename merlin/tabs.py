@@ -94,16 +94,22 @@ class CloseButton(QToolButton):
         )
 
 
+# Big enough to hit with a fingertip. 26px was fine for a pointer and awkward
+# for touch; the collapsed column is 46 wide, so 38 fits with room either side
+# and still centres on the same axis as the favicons.
+PLUS_SIZE = 38
+
+
 class PlusButton(QToolButton):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setText("+")
-        self.setFixedSize(QSize(26, 26))
+        self.setFixedSize(QSize(PLUS_SIZE, PLUS_SIZE))
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setToolTip("New tab (Ctrl+T)")
         self.setStyleSheet(
-            "QToolButton { border: none; border-radius: 6px; color: #c8c9d0;"
-            " font-size: 17px; font-weight: 500; background: transparent; }"
+            "QToolButton { border: none; border-radius: 9px; color: #c8c9d0;"
+            " font-size: 21px; font-weight: 500; background: transparent; }"
             "QToolButton:hover { background: #34363d; color: #fff; }"
         )
 

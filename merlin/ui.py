@@ -455,6 +455,32 @@ class SettingsDialog(QDialog):
         form.addRow(self._check(
             "Reverse the swipe direction", "invert_swipe",
             "Some trackpad configurations report the opposite direction."))
+
+        swipe_row = QHBoxLayout()
+        self.swipe_slider = QSlider(Qt.Orientation.Horizontal, page)
+        self.swipe_slider.setRange(150, 1200)
+        self.swipe_slider.setSingleStep(10)
+        self.swipe_slider.setPageStep(50)
+        self.swipe_slider.setValue(
+            int(self.settings.get("swipe_distance", 520) or 520))
+        self.swipe_value = QLabel(f"{self.swipe_slider.value()} px", page)
+        self.swipe_value.setMinimumWidth(56)
+
+        def swipe_changed(value):
+            self.swipe_value.setText(f"{value} px")
+            self.settings.set("swipe_distance", value)
+
+        self.swipe_slider.valueChanged.connect(swipe_changed)
+        swipe_row.addWidget(self.swipe_slider, 1)
+        swipe_row.addWidget(self.swipe_value)
+        form.addRow("Swipe distance", swipe_row)
+
+        swipe_note = QLabel(
+            "How far a swipe must travel to complete. Higher means more "
+            "deliberate swipes and fewer set off by scrolling.", page)
+        swipe_note.setWordWrap(True)
+        swipe_note.setStyleSheet("color:#9a9ba1; font-size:12px;")
+        form.addRow(swipe_note)
         form.addRow(self._check("Restore tabs from last session", "restore_session"))
 
         form.addRow(self._check("Remember window size and position",
@@ -706,13 +732,21 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(page)
 
         decorations = QCheckBox("Hide window decorations (frameless window)", page)
-        decorations.setChecked(bool(self.settings.get("hide_window_decorations")))
+        # shows the state of the window this was opened from
+        decorations.setChecked(bool(getattr(self.window_ref, "_frameless",
+                                            self.settings.get(
+                                                "hide_window_decorations"))))
         decorations.setToolTip(
             "Removes the system title bar. Drag the empty tab strip to move the "
             "window; drag the window edges to resize. Shortcut: Ctrl+Shift+D"
         )
-        decorations.toggled.connect(
-            lambda value: self.settings.set("hide_window_decorations", value))
+        def decorations_toggled(value):
+            # this window now, and the default for ones opened later
+            self.settings.set("hide_window_decorations", value)
+            if hasattr(self.window_ref, "apply_decorations"):
+                self.window_ref.apply_decorations(value)
+
+        decorations.toggled.connect(decorations_toggled)
         layout.addWidget(decorations)
 
         layout.addWidget(self._check(
@@ -1389,7 +1423,15 @@ class SettingsDialog(QDialog):
         from .brand import APP_VERSION, icon_path
         from .winicon import process_image as privacy_image
 
+        import merlin as _merlin
+
+        _package = os.path.dirname(os.path.abspath(_merlin.__file__))
+        _bundle = getattr(_sys, "_MEIPASS", "")
+        _inside = bool(_bundle) and _package.startswith(os.path.abspath(_bundle))
         lines = [f"Version: {APP_VERSION}",
+                 ("Code from: inside Merlin.exe, so an update on disk is not "
+                  "running; reinstall to rebuild it") if _inside
+                 else f"Code from: {_package}",
                  f"Package: {os.path.dirname(os.path.abspath(cfg.__file__))}",
                  f"Running as: {os.path.basename(privacy_image())}"]
         if os.name == "nt":
@@ -1418,6 +1460,17 @@ class SettingsDialog(QDialog):
                             "error is the way to fix it.")
             except OSError:
                 pass
+
+            import merlin as _merlin
+
+            package = os.path.dirname(os.path.abspath(_merlin.__file__))
+            bundle = getattr(_sys, "_MEIPASS", "")
+            if bundle and package.startswith(os.path.abspath(bundle)):
+                lines.append(
+                    "Code from: inside Merlin.exe. An update placed on disk "
+                    "is not being used; reinstalling will rebuild it.")
+            else:
+                lines.append(f"Code from: {package}")
 
             image = privacy_image()
             if is_store_python():

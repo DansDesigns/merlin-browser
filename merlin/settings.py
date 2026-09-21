@@ -150,6 +150,7 @@ DEFAULTS = {
     # --- input ---
     "swipe_navigation": True,          # two-finger swipe = back / forward
     "invert_swipe": False,
+    "swipe_distance": 520,             # px of travel to complete a swipe
     # --- updates ---
     "check_updates_on_start": True,
     "last_seen_version": "",

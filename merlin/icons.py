@@ -56,6 +56,11 @@ PATHS = {
     "pending": ('<path d="M6.5 3.5 H14 L18 7.5 V20 H6.5 Z" ' + _STROKE
                 + ' stroke-dasharray="2.4 2.2"/>'
                 '<path d="M13.6 3.6 V8 H18" ' + _STROKE + '/>'),
+    # a window outline with a title bar, for turning the title bar on and off
+    "decorations": ('<rect x="3.6" y="5" width="16.8" height="14" rx="2.2" '
+                    + _STROKE + '/>'
+                    '<path d="M3.6 9.2 H20.4" ' + _STROKE + '/>'
+                    '<circle cx="6.4" cy="7.1" r="0.85" fill="currentColor"/>'),
     "history": ('<path d="M12 7 V12 L15.5 14" ' + _STROKE + '/>'
                 '<path d="M4.2 12 A7.8 7.8 0 1 0 6.9 6.1" ' + _STROKE + '/>'
                 '<path d="M3.6 4.4 V8.4 H7.6" ' + _STROKE + '/>'),

@@ -6,6 +6,27 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  Fixed: hiding the window decorations applied to every open window at once,
+  and the tick in the menu came from the saved default rather than the window
+  in front of you, so in any window that differed from that default, an
+  installed app above all, the toggle appeared to work backwards. It is per
+  window now, and the tick always reports the window it belongs to. The
+  setting is still remembered as the default for windows opened later.
+  An app window has no menus. It carries back, forward, reload and a button
+  for the title bar, then the window controls at the right.
+  The new tab button is 38 pixels rather than 26, which is a fingertip rather
+  than a pointer.
+  In an app window the shields, downloads, menu and window controls sit at the
+  right of the toolbar. The address bar is what used to push them there, so
+  without it they bunched against the reload button.
+  An installed app gets its own window class, so the desktop shows it under
+  its own icon rather than grouping every app under Merlin's. The generated
+  desktop entry carries a matching StartupWMClass, StartupNotify and the
+  Network, WebBrowser and Utility categories.
+  Settings, Advanced and --icon-check say which copy of the code is running:
+  the files on disk, or the one inside Merlin.exe. An update replaces the
+  files on disk, so if the executable's own copy is being used the update is
+  not in effect and that is worth being able to see.
   A page installed as an app opens in a window without the browsing parts: no
   address bar, no tab strip, no home, no bookmarks and no history. Back,
   forward and reload stay, as does shields, downloads and the menu, because

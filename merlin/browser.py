@@ -507,9 +507,13 @@ class BrowserWindow(QMainWindow):
 
         self.act_decorations = QAction("Hide window decorations", self, checkable=True)
         self.act_decorations.setShortcut(QKeySequence("Ctrl+Shift+D"))
-        self.act_decorations.setChecked(bool(self.settings.get("hide_window_decorations")))
+        # Reflects this window, not a global setting. Reading the setting made
+        # the tick disagree with reality in any window whose decorations were
+        # not the default, an installed app above all, which looked like the
+        # toggle working backwards.
+        self.act_decorations.setChecked(bool(self._frameless))
         self.act_decorations.triggered.connect(
-            lambda checked: self.settings.set("hide_window_decorations", checked))
+            lambda checked: self.apply_decorations(checked))
         menu.addAction(self.act_decorations)
 
         add("Full screen", self.toggle_fullscreen, "F11")
@@ -547,7 +551,7 @@ class BrowserWindow(QMainWindow):
             ("F5", self.reload_or_stop),
             ("Ctrl+Shift+R", lambda: self._current_do("reload_bypass")),
             ("F11", self.toggle_fullscreen),
-            ("Ctrl+Shift+D", lambda: self.settings.toggle("hide_window_decorations")),
+            ("Ctrl+Shift+D", lambda: self.apply_decorations(not self._frameless)),
             ("Ctrl+Shift+L", lambda: self.settings.toggle("dark_ui")),
             ("Ctrl+Shift+I", lambda: self.toggle_pin()),
             ("Ctrl+J", self.show_downloads),
@@ -702,12 +706,26 @@ class BrowserWindow(QMainWindow):
         # A widget put on a toolbar is wrapped in an action, and the toolbar
         # lays out by action. Hiding the widget alone leaves the gap and the
         # widget can be shown again by the layout, so hide both.
-        hidden = {self.btn_bookmark, self.btn_bookmarks, self.btn_history}
+        hidden = {self.btn_bookmark, self.btn_bookmarks, self.btn_history,
+                  self.btn_shields, self.btn_downloads, self.btn_menu}
         for action in self.toolbar.actions():
             if self.toolbar.widgetForAction(action) in hidden:
                 action.setVisible(False)
         for widget in hidden:
             widget.setVisible(False)
+
+        # One button of its own: an app window has no menu, so the title bar
+        # needs somewhere to be turned on and off.
+        self.btn_decorations = QToolButton(self)
+        self.btn_decorations.setCheckable(True)
+        self.btn_decorations.setChecked(bool(self._frameless))
+        self.btn_decorations.setToolTip("Title bar (Ctrl+Shift+D)")
+        self.btn_decorations.setIcon(
+            icons.themed_icon("decorations", bool(self.settings.get("dark_ui"))))
+        self.btn_decorations.toggled.connect(self.apply_decorations)
+
+        # straight after reload, before the spacer
+        self.toolbar.insertWidget(self._spacer_action, self.btn_decorations)
 
     def apply_decorations(self, hide: bool) -> None:
         """Add or remove the system title bar without losing the session."""
@@ -726,6 +744,10 @@ class BrowserWindow(QMainWindow):
             flags &= ~Qt.WindowType.FramelessWindowHint
         self.setWindowFlags(flags)
 
+        if hasattr(self, "act_decorations"):
+            self.act_decorations.setChecked(hide)
+        if hasattr(self, "btn_decorations"):
+            self.btn_decorations.setChecked(hide)
         self.tabs.set_frameless(hide)
         self.window_buttons_action.setVisible(
             hide and bool(self.settings.get("show_window_buttons_when_frameless")))
@@ -1450,9 +1472,10 @@ class BrowserWindow(QMainWindow):
 
     def _on_setting_changed(self, key: str, value) -> None:
         if key == "hide_window_decorations":
-            self.apply_decorations(value)
-            if hasattr(self, "act_decorations"):
-                self.act_decorations.setChecked(bool(value))
+            # Stored as the default for windows opened from now on. Applying
+            # it here changed every open window at once, so hiding the title
+            # bar on one took it off all of them.
+            pass
         elif key == "show_window_buttons_when_frameless":
             self.window_buttons_action.setVisible(self._frameless and bool(value))
         elif key == "tab_orientation":

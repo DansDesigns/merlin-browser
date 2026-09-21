@@ -200,6 +200,15 @@ check("deferred callbacks check the view still exists",
 check("closing a tab stops its load first",
       "view.stop()" in browser_src2.split("def close_tab")[1][:900])
 
+check("https fallback retries on http after a failed upgrade",
+      "def _retry_without_upgrade" in browser_src2
+      and "_retry_without_upgrade(view, ok)" in browser_src2)
+
+adblock_src = open(os.path.join(root, "merlin", "adblock.py"),
+                   encoding="utf-8").read()
+check("local addresses are exempt from the https upgrade",
+      "def is_local_host" in adblock_src and "is_private" in adblock_src)
+
 # --- batch quoting hazards --------------------------------------------------
 # A PowerShell call with \" escapes inside a for /f broke install.bat twice:
 # cmd has no backslash escape, so the quotes ended the string early and the

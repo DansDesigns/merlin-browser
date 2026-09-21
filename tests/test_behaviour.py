@@ -218,18 +218,68 @@ def test_app_mode(app) -> None:
     check("an app window drops the browsing parts", not still_shown,
           str(still_shown))
 
+    gone["shields"] = window.btn_shields.isVisible()
+    gone["downloads"] = window.btn_downloads.isVisible()
+    gone["menu"] = window.btn_menu.isVisible()
+    still_shown = [name for name, visible in gone.items() if visible]
+    check("an app window has no menus at all", not still_shown,
+          str(still_shown))
+
     kept = {
         "back": window.act_back.isVisible(),
         "forward": window.act_forward.isVisible(),
         "reload": window.act_reload.isVisible(),
-        "shields": window.btn_shields.isVisible(),
-        "downloads": window.btn_downloads.isVisible(),
-        "menu": window.btn_menu.isVisible(),
+        "title bar toggle": window.btn_decorations.isVisible(),
     }
     missing = [name for name, visible in kept.items() if not visible]
-    check("an app window keeps navigation, shields, downloads and the menu",
+    check("an app window keeps back, forward, reload and the title bar toggle",
           not missing, str(missing))
+
+    # with no address bar to push them over, the right hand group needs the
+    # spacer or it bunches up against the reload button
+    window.apply_decorations(True)
+    wait(app, 0.4)
+    buttons = window.window_buttons
+    right_edge = buttons.x() + buttons.width()
+    check("window controls sit at the right of the toolbar",
+          right_edge >= window.toolbar.width() - 14,
+          f"ends at {right_edge} of {window.toolbar.width()}")
+    # the menu is gone from an app window; the title bar toggle is the last
+    # thing before the spacer
+    check("the title bar toggle sits left of the window controls",
+          window.btn_decorations.x() < buttons.x())
     window.close()
+
+
+def test_decorations_per_window(app) -> None:
+    """The title bar belongs to one window, and the tick tells the truth."""
+    from PyQt6.QtCore import Qt as _Qt
+
+    one, settings, _ = make_window(app, "t-dec1",
+                                   hide_window_decorations=False)
+    one.new_tab(page("one"))
+    two, _, _ = make_window(app, "t-dec2")
+    two.new_tab(page("two"))
+    wait(app, 0.8)
+
+    def frameless(window):
+        return bool(window.windowFlags() & _Qt.WindowType.FramelessWindowHint)
+
+    check("the tick starts in step with the window",
+          one.act_decorations.isChecked() == frameless(one))
+
+    one.act_decorations.trigger()
+    wait(app, 0.3)
+    check("hiding the title bar changes only that window",
+          frameless(one) and not frameless(two))
+    check("the tick still agrees after toggling",
+          one.act_decorations.isChecked() == frameless(one))
+
+    one.act_decorations.trigger()
+    wait(app, 0.3)
+    check("toggling back brings the title bar back", not frameless(one))
+    one.close()
+    two.close()
 
 
 # ------------------------------------------------------------------- run
@@ -243,7 +293,8 @@ def wait(app, seconds: float) -> None:
 def main() -> int:
     app = QApplication([sys.argv[0]])
     for test in (test_session, test_placeholders, test_tab_churn,
-                 test_gestures, test_local_addresses, test_app_mode):
+                 test_gestures, test_local_addresses, test_app_mode,
+                 test_decorations_per_window):
         print(f"\n{test.__name__}")
         try:
             test(app)
