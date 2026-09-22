@@ -395,9 +395,11 @@ class NoticeBar(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("NoticeBar")
-        self.setStyleSheet(
-            "#NoticeBar { background: #2b3350; }"
-            "#NoticeBar QLabel { color: #e6e8f0; background: transparent; }")
+        # Without this a plain QWidget ignores its stylesheet background, so
+        # the bar drew on whatever was behind it: near-white text on the light
+        # theme's pale toolbar, which could barely be read at all.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._apply_colours()
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 5, 8, 5)
         self.text = QLabel("", self)
@@ -405,7 +407,10 @@ class NoticeBar(QWidget):
         self.action = QPushButton("", self)
         self.action.clicked.connect(self.accepted.emit)
         close_button = QPushButton("\u2715", self)
-        close_button.setFixedWidth(30)
+        close_button.setFixedSize(30, 28)
+        # its own padding: the dark theme's button padding is wider than this
+        # button, which left no room for the cross and it disappeared
+        close_button.setStyleSheet("QPushButton { padding: 0; }")
         close_button.setToolTip("Dismiss")
         close_button.clicked.connect(self.dismissed.emit)
         layout.addWidget(self.text, 1)
@@ -413,7 +418,29 @@ class NoticeBar(QWidget):
         layout.addWidget(close_button)
         self.setVisible(False)
 
+    def _apply_colours(self) -> None:
+        """A tinted bar that reads well against either theme.
+
+        Chosen from the window colour at the moment it is shown, so a theme
+        change in between is picked up without anything having to tell it.
+        """
+        # Merlin themes with a stylesheet rather than the palette, so the
+        # palette stays light in dark mode: the active stylesheet says which.
+        from PyQt6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        dark = app is not None and app.styleSheet() == DARK_QSS
+        if dark:
+            background, text, border = "#2b3350", "#eef0f7", "#3a4570"
+        else:
+            background, text, border = "#dfe6fb", "#15192b", "#b9c6ee"
+        self.setStyleSheet(
+            f"#NoticeBar {{ background: {background};"
+            f" border-bottom: 1px solid {border}; }}"
+            f"#NoticeBar QLabel {{ color: {text}; background: transparent; }}")
+
     def show_notice(self, message: str, action: str) -> None:
+        self._apply_colours()
         self.text.setText(message)
         self.action.setText(action)
         self.action.setEnabled(True)

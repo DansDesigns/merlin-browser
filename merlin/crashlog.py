@@ -147,3 +147,16 @@ def install_excepthook() -> None:
                 pass
 
     sys.excepthook = hook
+
+
+def note(text: str) -> None:
+    """A timestamped line in merlin-log.txt, for things worth timing."""
+    import datetime
+
+    if _HANDLE is None:
+        return
+    try:
+        _HANDLE.write(f"{datetime.datetime.now():%H:%M:%S.%f} {text}\n")
+        _HANDLE.flush()
+    except Exception:                                    # noqa: BLE001
+        pass

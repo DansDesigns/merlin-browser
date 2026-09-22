@@ -6,6 +6,22 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  Fixed: fetching Deno failed on Windows with "No module named 'platform'".
+  Merlin.exe carries only the standard modules that were in use when it was
+  built, and the package, which updates from disk, can be newer. That module
+  is no longer used. More to the point, the exe now carries the standard
+  library broadly, through merlin/stdlib_anchor.py, and a test fails if the
+  package ever imports a standard module the exe would not have. That part
+  needs the installer rebuilt; the Deno fix itself arrives with an update.
+  Closing Merlin is prompt. Teardown was left to the interpreter, which
+  destroys things in no particular order, and the web engine waits if a page
+  outlives its profile. Pages are now released before the profile, any yt-dlp
+  or Deno lookup still running is stopped rather than left to its timeout, and
+  a watchdog ends the process if it is somehow still there six seconds on.
+  Each step is timed in merlin-log.txt.
+  Fixed: the bar above the page could barely be read in the light theme. It
+  never painted its own background, so its near-white text sat on the pale
+  toolbar. It does now, in colours chosen for each theme.
   An error in any part of Merlin that runs from a timer or a signal no longer
   closes the browser. PyQt ends the whole application when a Python exception
   escapes one of those, unless a handler is installed; now one is, so the

@@ -422,6 +422,83 @@ def test_slot_errors_are_not_fatal(app) -> None:
           f"exit {done.returncode}")
 
 
+def test_notice_bar_is_readable(app) -> None:
+    """The notice bar's text stands out from its background in both themes."""
+    from merlin.ui import NoticeBar, apply_theme as _theme
+
+    def luminance(colour):
+        def channel(value):
+            value /= 255
+            return value / 12.92 if value <= 0.03928 else (
+                (value + 0.055) / 1.055) ** 2.4
+        return (0.2126 * channel(colour.red()) + 0.7152 * channel(colour.green())
+                + 0.0722 * channel(colour.blue()))
+
+    for dark in (False, True):
+        _theme(app, dark)
+        bar = NoticeBar()
+        bar.resize(640, 40)
+        bar.show_notice("A live stream this engine cannot decode.", "Play")
+        bar.show()
+        wait(app, 0.2)
+        image = bar.grab().toImage()
+        background = image.pixelColor(3, image.height() // 2)
+        middle = image.height() // 2
+        glyph = max((image.pixelColor(x, y) for x in range(10, 280)
+                     for y in range(middle - 6, middle + 6)),
+                    key=lambda c: abs(c.lightness() - background.lightness()))
+        high, low = sorted((luminance(glyph), luminance(background)), reverse=True)
+        ratio = (high + 0.05) / (low + 0.05)
+        check(f"the notice bar is readable in the {'dark' if dark else 'light'} theme",
+              ratio >= 4.5, f"contrast {ratio:.1f}:1")
+        bar.close()
+    _theme(app, True)
+
+
+def test_closing_is_prompt(app) -> None:
+    """Merlin's process ends promptly after its window closes."""
+    import subprocess
+
+    script = (
+        "import os, sys, threading, time\n"
+        "os.environ['QT_QPA_PLATFORM'] = 'offscreen'\n"
+        "os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = '--no-sandbox --disable-gpu'\n"
+        f"sys.path.insert(0, {ROOT!r})\n"
+        "import merlin.browser as B\n"
+        "from merlin import media\n"
+        "from PyQt6.QtCore import QTimer\n"
+        "Real = B.BrowserWindow\n"
+        "class W(Real):\n"
+        "    def __init__(self, *a, **k):\n"
+        "        super().__init__(*a, **k)\n"
+        "        QTimer.singleShot(2500, self.go)\n"
+        "    def go(self):\n"
+        "        def run():\n"
+        "            try:\n"
+        "                media._run_helper(['sleep', '60'], timeout=90)\n"
+        "            except Exception:\n"
+        "                pass\n"
+        "        threading.Thread(target=run, daemon=True).start()\n"
+        "        time.sleep(0.3)\n"
+        "        print('CLOSING', time.time(), flush=True)\n"
+        "        self.close()\n"
+        "B.BrowserWindow = W\n"
+        "import merlin.app as A\n"
+        "A.BrowserWindow = W\n"
+        "A.main([])\n")
+    home = tempfile.mkdtemp(prefix="merlin-close-")
+    env = dict(os.environ, HOME=home)
+    started = time.time()
+    done = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                          text=True, timeout=90, env=env)
+    ended = time.time()
+    closing = [float(line.split()[1]) for line in done.stdout.splitlines()
+               if line.startswith("CLOSING")]
+    after = ended - closing[0] if closing else ended - started
+    check("the process ends within a few seconds of closing, even mid-lookup",
+          bool(closing) and after < 5.0, f"{after:.2f}s after close")
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -438,7 +515,8 @@ def main() -> int:
                  test_theme_after_closing_tabs, test_live_stream_offer,
                  test_builtin_player_decodes_h264,
                  test_youtube_needs_a_runtime,
-                 test_slot_errors_are_not_fatal):
+                 test_slot_errors_are_not_fatal, test_notice_bar_is_readable,
+                 test_closing_is_prompt):
         print(f"\n{test.__name__}")
         try:
             test(app)

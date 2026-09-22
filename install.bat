@@ -330,6 +330,11 @@ if errorlevel 1 goto :buildfailed
 if exist "%TARGET%\bin" rmdir /s /q "%TARGET%\bin"
 echo.
 echo        $ pyinstaller --windowed --icon merlin.ico merlin-run.py
+rem merlin.stdlib_anchor carries the standard library broadly. The package
+rem loads from disk and can be newer than this exe, and an update using a
+rem standard module nothing used at build time would otherwise fail on Windows
+rem alone. That is how fetching Deno broke, on the platform module.
+rem
 rem Qt Multimedia is named explicitly: the built-in player only imports it
 rem when it is first used, so PyInstaller would not see it and would leave out
 rem the FFmpeg that decodes H.264 streams the web engine cannot.
@@ -350,6 +355,7 @@ rem change for an update to take effect.
   --add-data "%APPDIR%\merlin\merlin.ico;merlin" ^
   --add-data "%APPDIR%\merlin\merlin.png;merlin" ^
   --add-data "%APPDIR%\merlin\merlin.svg;merlin" ^
+  --hidden-import merlin.stdlib_anchor ^
   --hidden-import PyQt6.QtMultimedia ^
   --hidden-import PyQt6.QtMultimediaWidgets ^
   --distpath "%TARGET%\bin" --workpath "%BUILDDIR%" --specpath "%BUILDDIR%" ^

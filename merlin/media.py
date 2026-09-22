@@ -229,10 +229,24 @@ def ytdlp_path() -> str:
 DENO_RELEASES = "https://github.com/denoland/deno/releases/latest/download/"
 
 
-def _deno_asset() -> str:
-    import platform
+def _machine() -> str:
+    """The processor architecture, from the environment rather than platform.
 
-    machine = platform.machine().lower()
+    Not the platform module: Merlin.exe only contains the standard modules
+    that were in use when it was built, and platform was not, so importing it
+    from an update failed with "No module named 'platform'".
+    """
+    if os.name == "nt":
+        return (os.environ.get("PROCESSOR_ARCHITEW6432")
+                or os.environ.get("PROCESSOR_ARCHITECTURE") or "AMD64").lower()
+    try:
+        return os.uname().machine.lower()
+    except AttributeError:
+        return "x86_64"
+
+
+def _deno_asset() -> str:
+    machine = _machine()
     arm = machine in ("aarch64", "arm64")
     if os.name == "nt":
         return "deno-x86_64-pc-windows-msvc.zip"
@@ -298,8 +312,7 @@ def deno_version() -> tuple[bool, str]:
     if not path:
         return False, "not installed"
     try:
-        done = subprocess.run([path, "--version"], capture_output=True,
-                              text=True, timeout=30, **_hidden())
+        done = _run_helper([path, "--version"], timeout=30)
     except Exception as exc:                      # noqa: BLE001
         return False, str(exc)
     if done.returncode != 0:
@@ -315,6 +328,44 @@ def _needs_js_runtime(url: str) -> bool:
 
 def has_ytdlp() -> bool:
     return bool(ytdlp_path() or shutil.which("youtube-dl"))
+
+
+_HELPERS: set = set()
+
+
+def _run_helper(argv: list, timeout: int) -> subprocess.CompletedProcess:
+    """Run yt-dlp or Deno, and remember it until it finishes.
+
+    A lookup still running when Merlin closes would otherwise carry on for
+    up to its whole timeout, keeping a process alive after the window has
+    gone. stop_helpers() ends anything still listed here.
+    """
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            stdin=subprocess.DEVNULL, text=True, **_hidden())
+    _HELPERS.add(proc)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, err = proc.communicate()
+        raise
+    finally:
+        _HELPERS.discard(proc)
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
+def stop_helpers() -> int:
+    """End any yt-dlp or Deno process still running. Returns how many."""
+    stopped = 0
+    for proc in list(_HELPERS):
+        if proc.poll() is None:
+            try:
+                proc.kill()
+                stopped += 1
+            except Exception:                     # noqa: BLE001
+                pass
+    _HELPERS.clear()
+    return stopped
 
 
 def _hidden() -> dict:
@@ -377,9 +428,7 @@ def ytdlp_version() -> tuple[bool, str]:
     if not path:
         return False, "not installed"
     try:
-        done = subprocess.run(_ytdlp_argv(path) + ["--version"],
-                              capture_output=True, text=True, timeout=30,
-                              **_hidden())
+        done = _run_helper(_ytdlp_argv(path) + ["--version"], timeout=30)
     except Exception as exc:                      # noqa: BLE001
         return False, str(exc)
     if done.returncode != 0:
@@ -414,8 +463,7 @@ def resolve_stream(url: str, timeout: int = 60) -> tuple[bool, str]:
         return False, JS_RUNTIME_MISSING
     argv.append(url)
     try:
-        done = subprocess.run(argv, capture_output=True, text=True,
-                              timeout=timeout, **_hidden())
+        done = _run_helper(argv, timeout=timeout)
     except subprocess.TimeoutExpired:
         return False, "yt-dlp took too long to answer"
     except Exception as exc:                      # noqa: BLE001

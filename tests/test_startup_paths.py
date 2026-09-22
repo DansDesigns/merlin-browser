@@ -232,6 +232,42 @@ check("Qt Multimedia is bundled into Merlin.exe",
 check("the runtime retry cannot loop",
       "JS_RUNTIME_MISSING and not media.deno_path()" in browser_src2)
 
+# Merlin.exe only holds the standard modules it was built with, and the
+# package updates from disk. Every standard module the package imports must
+# be in the anchor, or an update can fail on Windows with no sign of it here.
+import ast as _ast
+_anchor_src = open(os.path.join(root, "merlin", "stdlib_anchor.py"),
+                   encoding="utf-8").read()
+_anchored = {n.names[0].name.split(".")[0]
+             for n in _ast.walk(_ast.parse(_anchor_src))
+             if isinstance(n, _ast.Import)}
+_used = set()
+for _name in os.listdir(os.path.join(root, "merlin")):
+    if not _name.endswith(".py") or _name == "stdlib_anchor.py":
+        continue
+    _tree = _ast.parse(open(os.path.join(root, "merlin", _name),
+                            encoding="utf-8").read())
+    for _node in _ast.walk(_tree):
+        if isinstance(_node, _ast.Import):
+            _mods = [a.name for a in _node.names]
+        elif isinstance(_node, _ast.ImportFrom) and _node.module and _node.level == 0:
+            _mods = [_node.module]
+        else:
+            continue
+        for _m in _mods:
+            _top = _m.split(".")[0]
+            if _top in sys.stdlib_module_names:
+                _used.add(_top)
+_missing = sorted(_used - _anchored)
+check("every standard module the package uses is carried in Merlin.exe",
+      not _missing, ", ".join(_missing))
+check("install.bat bundles the standard-library anchor",
+      "--hidden-import merlin.stdlib_anchor" in bat_src)
+
+check("shutdown is bounded by a watchdog",
+      "watchdog = threading.Timer(6.0, give_up)" in app_src
+      and "app.aboutToQuit.connect" in app_src)
+
 # --- batch quoting hazards --------------------------------------------------
 # A PowerShell call with \" escapes inside a for /f broke install.bat twice:
 # cmd has no backslash escape, so the quotes ended the string early and the

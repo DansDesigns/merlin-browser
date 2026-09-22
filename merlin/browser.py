@@ -2275,6 +2275,30 @@ class BrowserWindow(QMainWindow):
         self.save_session()
         super().closeEvent(event)
 
+    def release_pages(self) -> int:
+        """Stop and let go of every page, ahead of the engine shutting down.
+
+        The web engine has to see every page gone before its profile goes, or
+        it waits on them at exit. Left to the interpreter, those are destroyed
+        in no particular order, which is one way a close can hang for seconds.
+        """
+        released = 0
+        for index in range(self.tabs.count() - 1, -1, -1):
+            view = self.tabs.widget(index)
+            if isinstance(view, WebView):
+                try:
+                    view.stop()
+                except Exception:                        # noqa: BLE001
+                    pass
+                view.deleteLater()
+                released += 1
+            elif hasattr(view, "stop"):
+                try:
+                    view.stop()                          # a player tab
+                except Exception:                        # noqa: BLE001
+                    pass
+        return released
+
     # ------------------------------------------------------------ downloads
     def _fill_history_menu(self) -> None:
         """Recent pages, newest first.

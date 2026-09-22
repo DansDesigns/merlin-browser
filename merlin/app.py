@@ -580,7 +580,61 @@ def main(argv: list[str] | None = None) -> int:
         lambda count: window.status_label.setText(f"{count:,} filter rules loaded"))
     filter_loader.status.connect(window.status_label.setText)
 
-    return app.exec()
+    app.aboutToQuit.connect(lambda: _shut_down(app, profile))
+    code = app.exec()
+    from . import crashlog
+
+    crashlog.note("shutdown: finished, process exiting")
+    return code
+
+
+def _shut_down(app, profile) -> None:
+    """Close down in an order the web engine is happy with, and in bounded time.
+
+    Everything left to the interpreter at exit is destroyed in no fixed order,
+    and the web engine waits if a page outlives its profile, which is how a
+    close could leave the process running for a good while after the window
+    had gone. So: stop helper processes, release every page, then let the
+    profile go. Each step is timed in merlin-log.txt, so if a close is ever slow
+    again the log says which part.
+
+    A watchdog then ends the process a few seconds later if it is somehow still
+    there. Normal teardown finishes well before it fires, so it only ever
+    cuts short a shutdown that has already stalled.
+    """
+    import threading
+
+    from PyQt6.QtCore import QCoreApplication, QEvent
+
+    from . import crashlog, media
+    from .browser import BrowserWindow
+
+    crashlog.note("shutdown: event loop ending")
+    stopped = media.stop_helpers()
+    if stopped:
+        crashlog.note(f"shutdown: stopped {stopped} yt-dlp/Deno process(es)")
+
+    released = 0
+    for widget in app.topLevelWidgets():
+        if isinstance(widget, BrowserWindow):
+            released += widget.release_pages()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    crashlog.note(f"shutdown: released {released} page(s)")
+
+    try:
+        profile.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    except Exception:                                    # noqa: BLE001
+        pass
+    crashlog.note("shutdown: profile released")
+
+    def give_up():
+        crashlog.note("shutdown: still running after 6s, ending the process")
+        os._exit(0)
+
+    watchdog = threading.Timer(6.0, give_up)
+    watchdog.daemon = True
+    watchdog.start()
 
 
 if __name__ == "__main__":
