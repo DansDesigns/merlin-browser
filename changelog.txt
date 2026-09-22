@@ -6,6 +6,18 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  An error in any part of Merlin that runs from a timer or a signal no longer
+  closes the browser. PyQt ends the whole application when a Python exception
+  escapes one of those, unless a handler is installed; now one is, so the
+  error is written to merlin-log.txt and every window and tab stays open.
+  Fixed: playing a YouTube live stream in Merlin's player failed with
+  "Requested format is not available". Since late 2025 YouTube only gives its
+  video formats to a client that can solve a JavaScript challenge, and yt-dlp
+  needs a JavaScript runtime to do it; without one it sees only thumbnails.
+  Merlin now fetches Deno, the runtime yt-dlp recommends, alongside yt-dlp,
+  and names it to yt-dlp explicitly. One question covers whatever is missing.
+  Merlin prefers its own copy of yt-dlp over one on the PATH, since the
+  official build carries the challenge solver scripts and others may not.
   YouTube live streams play. The web engine was built without H.264, and live
   streams are usually offered in nothing else, while ordinary videos come as
   VP9, which is why only live ones failed. Qt's multimedia module ships its own

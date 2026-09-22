@@ -203,12 +203,114 @@ def _ytdlp_asset() -> str:
 
 
 def ytdlp_path() -> str:
-    """The yt-dlp to use: one on the PATH, else the one Merlin fetched."""
-    found = shutil.which("yt-dlp")
-    if found:
-        return found
+    """The yt-dlp to use: the one Merlin fetched, else one on the PATH.
+
+    Merlin's own copy comes first. It is the official build, which carries
+    the challenge solver scripts YouTube now needs; a copy installed some
+    other way, with pip or a package manager, may not.
+    """
     local = os.path.join(ytdlp_folder(), _ytdlp_asset())
-    return local if os.path.isfile(local) else ""
+    if os.path.isfile(local):
+        return local
+    return shutil.which("yt-dlp") or ""
+
+
+# -------------------------------------------------------------------- deno
+#
+# Since late 2025 YouTube only hands its video formats to a client that can
+# solve a JavaScript challenge. yt-dlp does that with an external JavaScript
+# runtime, and without one YouTube offers nothing but thumbnails, which yt-dlp
+# reports as "Requested format is not available".
+#
+# Deno is the runtime yt-dlp recommends and enables by default, and it runs
+# the challenge scripts with no file system or network access. Fetched from
+# Deno's own GitHub releases on first use, like yt-dlp.
+
+DENO_RELEASES = "https://github.com/denoland/deno/releases/latest/download/"
+
+
+def _deno_asset() -> str:
+    import platform
+
+    machine = platform.machine().lower()
+    arm = machine in ("aarch64", "arm64")
+    if os.name == "nt":
+        return "deno-x86_64-pc-windows-msvc.zip"
+    if sys.platform == "darwin":
+        return ("deno-aarch64-apple-darwin.zip" if arm
+                else "deno-x86_64-apple-darwin.zip")
+    return ("deno-aarch64-unknown-linux-gnu.zip" if arm
+            else "deno-x86_64-unknown-linux-gnu.zip")
+
+
+def _deno_name() -> str:
+    return "deno.exe" if os.name == "nt" else "deno"
+
+
+def deno_path() -> str:
+    """Deno for yt-dlp: the one Merlin fetched, else one on the PATH."""
+    local = os.path.join(ytdlp_folder(), _deno_name())
+    if os.path.isfile(local):
+        return local
+    return shutil.which("deno") or ""
+
+
+def fetch_deno(timeout: int = 300) -> tuple[bool, str]:
+    """Download Deno from its GitHub releases into Merlin's tools folder."""
+    import tempfile
+    import urllib.request
+    import zipfile
+
+    folder = ytdlp_folder()
+    target = os.path.join(folder, _deno_name())
+    try:
+        os.makedirs(folder, exist_ok=True)
+        request = urllib.request.Request(
+            DENO_RELEASES + _deno_asset(),
+            headers={"User-Agent": "Merlin Browser"})
+        with tempfile.TemporaryDirectory() as scratch:
+            archive = os.path.join(scratch, "deno.zip")
+            with urllib.request.urlopen(request, timeout=timeout) as response, \
+                    open(archive, "wb") as out:
+                shutil.copyfileobj(response, out)
+            with zipfile.ZipFile(archive) as bundle:
+                names = [n for n in bundle.namelist()
+                         if os.path.basename(n) == _deno_name()]
+                if not names:
+                    return False, "The Deno download did not contain deno."
+                partial = target + ".part"
+                with bundle.open(names[0]) as source, open(partial, "wb") as out:
+                    shutil.copyfileobj(source, out)
+            os.replace(partial, target)
+        if os.name != "nt":
+            os.chmod(target, 0o755)
+    except Exception as exc:                      # noqa: BLE001
+        return False, f"Could not fetch Deno: {exc}"
+
+    ok, version = deno_version()
+    if not ok:
+        return False, f"Deno was fetched but will not run: {version}"
+    return True, f"Deno {version} is ready"
+
+
+def deno_version() -> tuple[bool, str]:
+    path = deno_path()
+    if not path:
+        return False, "not installed"
+    try:
+        done = subprocess.run([path, "--version"], capture_output=True,
+                              text=True, timeout=30, **_hidden())
+    except Exception as exc:                      # noqa: BLE001
+        return False, str(exc)
+    if done.returncode != 0:
+        return False, (done.stderr or done.stdout).strip()[:200]
+    first = done.stdout.strip().splitlines()[0] if done.stdout.strip() else ""
+    return True, first.replace("deno ", "").split(" ")[0] or first
+
+
+def _needs_js_runtime(url: str) -> bool:
+    host = url.split("/")[2].lower() if url.count("/") >= 2 else ""
+    return host == "youtu.be" or host == "youtube.com" or host.endswith(".youtube.com")
 
 
 def has_ytdlp() -> bool:
@@ -285,6 +387,11 @@ def ytdlp_version() -> tuple[bool, str]:
     return True, done.stdout.strip()
 
 
+JS_RUNTIME_MISSING = (
+    "YouTube only gives its video to a client that can solve a JavaScript "
+    "challenge, and yt-dlp needs a JavaScript runtime, Deno, to do that.")
+
+
 def resolve_stream(url: str, timeout: int = 60) -> tuple[bool, str]:
     """The direct address of the stream on a page, or why there is none.
 
@@ -297,7 +404,15 @@ def resolve_stream(url: str, timeout: int = 60) -> tuple[bool, str]:
         return False, "yt-dlp is not installed"
     argv = _ytdlp_argv(path) + [
         "--get-url", "--no-playlist", "--no-warnings",
-        "-f", "best[acodec!=none][vcodec!=none]/best", url]
+        "-f", "best[acodec!=none][vcodec!=none]/best"]
+    deno = deno_path()
+    if deno:
+        # named explicitly rather than left to be found: on Linux yt-dlp only
+        # looks on the PATH, and Merlin's copy lives in its own folder
+        argv += ["--js-runtimes", f"deno:{deno}"]
+    elif _needs_js_runtime(url):
+        return False, JS_RUNTIME_MISSING
+    argv.append(url)
     try:
         done = subprocess.run(argv, capture_output=True, text=True,
                               timeout=timeout, **_hidden())
@@ -310,6 +425,8 @@ def resolve_stream(url: str, timeout: int = 60) -> tuple[bool, str]:
     if done.returncode == 0 and lines:
         return True, lines[0]
     message = (done.stderr or done.stdout or "no stream found").strip()
+    if "JavaScript runtime" in message or "challenge solving failed" in message:
+        return False, JS_RUNTIME_MISSING
     return False, message.splitlines()[-1][:240] if message else "no stream found"
 
 

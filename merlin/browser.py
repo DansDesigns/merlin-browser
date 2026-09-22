@@ -219,7 +219,7 @@ class BrowserWindow(QMainWindow):
     # Results from worker threads. Emitting a signal from another thread
     # queues it onto this window's thread, so the slots can touch widgets.
     _stream_resolved = pyqtSignal(str, bool, str)    # page, ok, stream or why
-    _ytdlp_fetched = pyqtSignal(str, bool, str)      # page, ok, message
+    _tools_fetched = pyqtSignal(str, bool, str)      # page, ok, message
 
     def __init__(self, app: QApplication, settings: cfg.Settings,
                  profile: QWebEngineProfile, filter_engine, filter_loader,
@@ -409,7 +409,7 @@ class BrowserWindow(QMainWindow):
         self._notice_page = ""
         self._offered_streams: set[str] = set()
         self._stream_resolved.connect(self._on_stream_resolved)
-        self._ytdlp_fetched.connect(self._on_ytdlp_fetched)
+        self._tools_fetched.connect(self._on_tools_fetched)
 
         layout.addWidget(self.notice_bar)
         layout.addWidget(self.tabs, 1)
@@ -1442,28 +1442,49 @@ class BrowserWindow(QMainWindow):
     def play_stream(self, page: str) -> None:
         """Find the stream on a page with yt-dlp, then play it here.
 
-        yt-dlp is fetched first if it is not installed, after asking. Both the
-        fetch and the lookup run off this thread and report back by signal.
+        Whatever is missing is fetched first, after one question: yt-dlp,
+        and for YouTube, Deno, the JavaScript runtime yt-dlp now needs to get
+        past YouTube's challenge. Fetching and the lookup both run off this
+        thread and report back by signal.
         """
         import threading
 
+        missing = []
         if not media.has_ytdlp():
+            missing.append(("yt-dlp", "about 3 MB", media.fetch_ytdlp))
+        if media._needs_js_runtime(page) and not media.deno_path():
+            missing.append(("Deno", "about 40 MB", media.fetch_deno))
+
+        if missing:
+            listing = "\n".join(f"  \u2022 {name}, {size}"
+                                 for name, size, _fetch in missing)
+            why = ("yt-dlp finds the stream on the page"
+                   + (", and Deno is the JavaScript runtime it needs to solve "
+                      "YouTube's challenge, without which YouTube offers no "
+                      "video at all" if any(n == "Deno" for n, _s, _f in missing)
+                      else "") + ".")
             answer = QMessageBox.question(
-                self, "Fetch yt-dlp",
-                "Merlin uses yt-dlp to find the stream on a page. It is not "
-                "installed yet.\n\nDownload the official build from "
-                "github.com/yt-dlp (about 3 MB)? It is kept in Merlin's own "
-                "folder and nothing else is changed.",
+                self, "Fetch what the player needs",
+                f"To play this, Merlin needs:\n\n{listing}\n\n{why}\n\n"
+                "Both come from their projects' own GitHub releases and are "
+                "kept in Merlin's folder. Nothing else on the system is "
+                "changed. Fetch them now?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.Yes)
             if answer != QMessageBox.StandardButton.Yes:
+                self.notice_bar.setVisible(False)
                 return
             self.notice_bar.setVisible(True)
-            self.notice_bar.busy("Fetching yt-dlp...")
+            names = " and ".join(name for name, _s, _f in missing)
+            self.notice_bar.busy(f"Fetching {names}...")
 
             def fetch():
-                ok, message = media.fetch_ytdlp()
-                self._ytdlp_fetched.emit(page, ok, message)
+                for name, _size, fetch_one in missing:
+                    ok, message = fetch_one()
+                    if not ok:
+                        self._tools_fetched.emit(page, False, message)
+                        return
+                self._tools_fetched.emit(page, True, f"{names} ready")
 
             threading.Thread(target=fetch, daemon=True).start()
             return
@@ -1477,17 +1498,23 @@ class BrowserWindow(QMainWindow):
 
         threading.Thread(target=resolve, daemon=True).start()
 
-    def _on_ytdlp_fetched(self, page: str, ok: bool, message: str) -> None:
+    def _on_tools_fetched(self, page: str, ok: bool, message: str) -> None:
         self.status_label.setText(message)
         if not ok:
             self.notice_bar.setVisible(False)
-            QMessageBox.warning(self, "yt-dlp", message)
+            QMessageBox.warning(self, "Could not fetch", message)
             return
         self.play_stream(page)
 
     def _on_stream_resolved(self, page: str, ok: bool, result: str) -> None:
         self.notice_bar.setVisible(False)
         self._notice_page = ""
+        if not ok and result == media.JS_RUNTIME_MISSING and not media.deno_path():
+            # nothing to find until Deno is there: fetch it and try again.
+            # Only when it is really missing; a Deno that is present and still
+            # fails, one too old on the PATH, would otherwise loop for ever.
+            self.play_stream(page)
+            return
         if not ok:
             self.status_label.setText(f"No stream found: {result}")
             QMessageBox.information(

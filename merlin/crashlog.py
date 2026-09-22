@@ -113,8 +113,37 @@ def enable() -> str:
             continue
         global _HANDLE
         _HANDLE = handle          # kept alive for the life of the process
+        install_excepthook()
         os.environ["MERLIN_CRASH_LOG"] = path
         return path
     return ""
 
 
+def install_excepthook() -> None:
+    """Log an error in a Qt slot instead of letting it end the process.
+
+    PyQt6 aborts the whole application when a Python exception escapes a
+    slot or a timer callback, but only while the default exception hook is in
+    place. With this one, a bug in, say, a favicon handler is written to
+    merlin-log.txt and the browser carries on, rather than taking every window
+    and tab down with it.
+    """
+    import datetime
+    import sys
+    import traceback
+
+    def hook(kind, value, trace):
+        text = "".join(traceback.format_exception(kind, value, trace))
+        try:
+            sys.__stderr__.write(text)
+        except Exception:                                # noqa: BLE001
+            pass
+        if _HANDLE is not None:
+            try:
+                _HANDLE.write(f"\n--- error {datetime.datetime.now()} ---\n")
+                _HANDLE.write(text)
+                _HANDLE.flush()
+            except Exception:                            # noqa: BLE001
+                pass
+
+    sys.excepthook = hook

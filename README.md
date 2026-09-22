@@ -1,7 +1,5 @@
 # Merlin Browser
-![version](https://img.shields.io/badge/version-1.6-6f8ff0)
-
-### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6 Requires a reinstall as there has been a fundamental change to the folder structure. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
+![version](https://img.shields.io/badge/version-1.5.2-6f8ff0)
 
 A Rust-free desktop web browser built with Python and C++, on Qt and the Chromium engine.
 
@@ -73,30 +71,76 @@ Chromium through Qt WebEngine.
 
 - Python 3.9 or newer
 - PyQt6 and PyQt6-WebEngine
-- Optional: mpv or VLC for media the engine cannot decode, and [yt-dlp](https://github.com/yt-dlp/yt-dlp) for
-  streaming sites
+- Optional: mpv or VLC for media the engine cannot decode. Merlin's own player
+  covers most of it with nothing installed, and yt-dlp is fetched on first use
 
-# Installation
+### YouTube live and other H.264 streams
 
-Download from the [Releases](https://github.com/DansDesigns/merlin-browser/releases) page or build from source by cloning this repo then running:
+The web engine in the pip wheels is built without H.264 and AAC, which are
+patent-encumbered. Ordinary YouTube videos still play, because YouTube serves
+them as VP9, but most live streams are only offered in H.264, so they fail.
 
-```
-python3 install-gui.py      # Linux
+Qt's multimedia module ships its own FFmpeg, separate from the web engine's,
+and that one does decode H.264. When Merlin sees a live stream the page cannot
+play, a bar above the page offers to play it in Merlin's player instead.
+yt-dlp finds the stream on the page. For YouTube it also needs a JavaScript
+runtime: since late 2025 YouTube only gives its video formats to a client that
+can solve a JavaScript challenge, and without one yt-dlp sees nothing but
+thumbnails. Merlin uses Deno, which yt-dlp recommends and which runs the
+challenge with no file or network access. If either is missing, Merlin asks
+once and fetches the official builds from GitHub (yt-dlp about 3 MB, Deno
+about 40 MB) into its own tools folder, where they can be kept up to date. It is deliberately not built into Merlin.exe:
+YouTube changes often and yt-dlp changes to match, so a frozen copy would go
+stale. Ctrl+Shift+P does the same for any page.
+
+## Installation
+
+Download from the Releases page or build from source by cloning this repo then running:
+
+```bash
+python3 install-gui.py      # Linux, needs python3-tk
 install-gui.bat             # Windows
 ```
 
-# Install from Terminal (non-GUI):
+To build the installer executable, run this on Windows:
 
-### Linux
+```
+tools\build-installer.bat
+```
+
+That produces `dist\MerlinSetup.exe`, the graphical installer.
+
+### Install from Terminal (non-GUI):
+
+# Linux
 
 ```bash
 ./install.sh
 ```
 
+The installer builds a virtualenv, so nothing is added to your system Python.
+Two modes are available:
+
+| Mode | Engine | H.264 and AAC |
+|---|---|---|
+| `--system-qt` | your distribution's Qt WebEngine | yes |
+| `--venv-only` | PyQt6 from pip | no |
+
+`--system-qt` is the default when a system PyQt6 is present, because
+distribution builds enable the licensed codecs. Add `--yes` to skip the prompts.
+
+Requires `python3-venv`. To install the engine from your distribution first:
+
+```bash
+sudo apt install python3-pyqt6 python3-pyqt6.qtwebengine   # Debian, Ubuntu
+sudo dnf install python3-qt6 python3-qt6-webengine         # Fedora
+sudo pacman -S python-pyqt6 python-pyqt6-webengine         # Arch
+```
+
 Uninstall with `~/.local/lib/merlin-browser/uninstall-gui.py` for the graphical
 one, or `uninstall.sh` beside it for the text one.
 
-### Windows
+# Windows
 
 ```
 install.bat
@@ -105,6 +149,14 @@ install.bat
 Per-user, no administrator rights. It builds a virtualenv in
 `%LOCALAPPDATA%\Programs\Merlin`, installs PyQt6 into it, builds `Merlin.exe`
 with Merlin's icon, and adds a Start Menu entry.
+
+pip wheels do not include H.264, AAC or HEVC, and there is no distribution
+package on Windows, so install a player for those formats:
+
+```
+winget install mpv.net
+winget install VideoLAN.VLC
+```
 
 Uninstall with `%LOCALAPPDATA%\Programs\Merlin\uninstall-gui.bat` for the
 graphical one, or `uninstall.bat` beside it for the text one.
@@ -198,7 +250,8 @@ changelog.txt    what changed in each release
 - **[PyQt6](https://www.riverbankcomputing.com/software/pyqt/)** — Python bindings for Qt, GPLv3 or commercial
 - **[EasyList](https://easylist.to/)** — filter lists for the content blocker, CC BY-SA 3.0 / GPLv3
 - **[mpv](https://mpv.io/)**, **[VLC](https://www.videolan.org/)** and **[FFmpeg](https://ffmpeg.org/)** — optional media playback
-- **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** — optional, resolves streaming sites for the player
+- **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** — fetched on first use, finds the stream on a page for the player
+- **[Deno](https://deno.com/)** — fetched on first use, the JavaScript runtime yt-dlp needs for YouTube
 
 The filter syntax follows the format established by
 [Adblock Plus](https://adblockplus.org/filter-cheatsheet) and extended by

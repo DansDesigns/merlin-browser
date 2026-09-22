@@ -229,6 +229,9 @@ check("Qt Multimedia is bundled into Merlin.exe",
       "--hidden-import PyQt6.QtMultimedia " in bat_src
       and "--hidden-import PyQt6.QtMultimediaWidgets" in bat_src)
 
+check("the runtime retry cannot loop",
+      "JS_RUNTIME_MISSING and not media.deno_path()" in browser_src2)
+
 # --- batch quoting hazards --------------------------------------------------
 # A PowerShell call with \" escapes inside a for /f broke install.bat twice:
 # cmd has no backslash escape, so the quotes ended the string early and the

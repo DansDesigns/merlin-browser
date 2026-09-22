@@ -326,7 +326,10 @@ def test_theme_after_closing_tabs(app) -> None:
 def test_live_stream_offer(app) -> None:
     """A live stream the engine cannot decode raises the offer bar."""
     window, _, _ = make_window(app, "t-live")
-    original = BrowserWindow._is_youtube_video
+    # from the class dictionary, so the staticmethod wrapper itself is kept:
+    # reading it as an attribute gives the bare function, and putting that
+    # back turns it into an ordinary method that takes the wrong arguments
+    original = BrowserWindow.__dict__["_is_youtube_video"]
     BrowserWindow._is_youtube_video = staticmethod(lambda url: True)
     try:
         view = window.new_tab()
@@ -375,6 +378,50 @@ def test_builtin_player_decodes_h264(app) -> None:
           f"{len(frames)} frames")
 
 
+def test_youtube_needs_a_runtime(app) -> None:
+    """Without Deno, a YouTube lookup says why instead of failing oddly."""
+    from merlin import media as _media
+
+    original = _media.deno_path
+    _media.deno_path = lambda: ""
+    original_ytdlp = _media.ytdlp_path
+    _media.ytdlp_path = lambda: "/bin/true"
+    try:
+        ok, why = _media.resolve_stream("https://www.youtube.com/watch?v=x")
+        check("a YouTube lookup without Deno names the missing runtime",
+              not ok and why == _media.JS_RUNTIME_MISSING)
+        check("other sites are not held back by it",
+              _media._needs_js_runtime("https://example.com/a") is False)
+    finally:
+        _media.deno_path = original
+        _media.ytdlp_path = original_ytdlp
+
+
+def test_slot_errors_are_not_fatal(app) -> None:
+    """An exception in a timer callback is logged, and Merlin keeps going."""
+    import subprocess
+
+    script = (
+        "import os, sys\n"
+        "os.environ['QT_QPA_PLATFORM'] = 'offscreen'\n"
+        f"sys.path.insert(0, {ROOT!r})\n"
+        "from merlin import crashlog\n"
+        "crashlog.enable()\n"
+        "from PyQt6.QtWidgets import QApplication\n"
+        "from PyQt6.QtCore import QTimer\n"
+        "app = QApplication([sys.argv[0]])\n"
+        "def broken():\n"
+        "    raise TypeError('a bug in a timer callback')\n"
+        "QTimer.singleShot(100, broken)\n"
+        "QTimer.singleShot(600, lambda: (print('ALIVE'), app.quit()))\n"
+        "app.exec()\n")
+    done = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                          text=True, timeout=60)
+    check("an error in a slot does not end Merlin",
+          done.returncode == 0 and "ALIVE" in done.stdout,
+          f"exit {done.returncode}")
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -389,7 +436,9 @@ def main() -> int:
                  test_gestures, test_local_addresses, test_app_mode,
                  test_decorations_per_window, test_address_bar_selects,
                  test_theme_after_closing_tabs, test_live_stream_offer,
-                 test_builtin_player_decodes_h264):
+                 test_builtin_player_decodes_h264,
+                 test_youtube_needs_a_runtime,
+                 test_slot_errors_are_not_fatal):
         print(f"\n{test.__name__}")
         try:
             test(app)

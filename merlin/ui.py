@@ -1218,7 +1218,10 @@ class SettingsDialog(QDialog):
         bits.append("Tab embedding: " + ("available" if embeddable else why))
         bits.append("libVLC bindings: " + (media.libvlc_version() or "not installed"))
         bits.append("yt-dlp: " + ("installed" if media.has_ytdlp()
-                                  else "not installed (needed for streaming sites)"))
+                                  else "not installed, fetched when first needed"))
+        bits.append("Deno: " + ("installed" if media.deno_path()
+                                else "not installed, fetched when first needed "
+                                     "(YouTube needs it)"))
         status = QLabel("\n".join(bits), page)
         status.setWordWrap(True)
         status.setStyleSheet("color:#9a9ba1; font-size:12px;")
