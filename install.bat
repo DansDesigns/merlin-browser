@@ -330,6 +330,10 @@ if errorlevel 1 goto :buildfailed
 if exist "%TARGET%\bin" rmdir /s /q "%TARGET%\bin"
 echo.
 echo        $ pyinstaller --windowed --icon merlin.ico merlin-run.py
+rem Qt Multimedia is named explicitly: the built-in player only imports it
+rem when it is first used, so PyInstaller would not see it and would leave out
+rem the FFmpeg that decodes H.264 streams the web engine cannot.
+rem
 rem Built from merlin-run.py with the package included. That script imports
 rem PyQt6 for real, so PyInstaller collects Qt and the web engine properly and
 rem the result is an application that owns its window, which is the only thing
@@ -346,6 +350,8 @@ rem change for an update to take effect.
   --add-data "%APPDIR%\merlin\merlin.ico;merlin" ^
   --add-data "%APPDIR%\merlin\merlin.png;merlin" ^
   --add-data "%APPDIR%\merlin\merlin.svg;merlin" ^
+  --hidden-import PyQt6.QtMultimedia ^
+  --hidden-import PyQt6.QtMultimediaWidgets ^
   --distpath "%TARGET%\bin" --workpath "%BUILDDIR%" --specpath "%BUILDDIR%" ^
   "%APPDIR%\merlin-run.py"
 if errorlevel 1 goto :buildfailed

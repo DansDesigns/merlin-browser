@@ -381,6 +381,49 @@ class WindowButtons(QWidget):
             self._window.showMaximized()
 
 
+class NoticeBar(QWidget):
+    """A slim bar above the page: a message, one action, and dismiss.
+
+    Used where a dialog would be too much, such as offering the player for a
+    live stream the engine cannot decode. It does not take focus or block the
+    page, and it goes away by itself when the tab changes.
+    """
+
+    accepted = pyqtSignal()
+    dismissed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("NoticeBar")
+        self.setStyleSheet(
+            "#NoticeBar { background: #2b3350; }"
+            "#NoticeBar QLabel { color: #e6e8f0; background: transparent; }")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 5, 8, 5)
+        self.text = QLabel("", self)
+        self.text.setWordWrap(True)
+        self.action = QPushButton("", self)
+        self.action.clicked.connect(self.accepted.emit)
+        close_button = QPushButton("\u2715", self)
+        close_button.setFixedWidth(30)
+        close_button.setToolTip("Dismiss")
+        close_button.clicked.connect(self.dismissed.emit)
+        layout.addWidget(self.text, 1)
+        layout.addWidget(self.action)
+        layout.addWidget(close_button)
+        self.setVisible(False)
+
+    def show_notice(self, message: str, action: str) -> None:
+        self.text.setText(message)
+        self.action.setText(action)
+        self.action.setEnabled(True)
+        self.setVisible(True)
+
+    def busy(self, message: str) -> None:
+        self.text.setText(message)
+        self.action.setEnabled(False)
+
+
 class FindBar(QWidget):
     search = pyqtSignal(str, bool)     # text, forward
     closed = pyqtSignal()
@@ -1125,6 +1168,7 @@ class SettingsDialog(QDialog):
         self._modes = [
             ("embedded", "In a tab, as a separate process"),
             ("window", "In its own window, as a separate process"),
+            ("builtin", "In a tab, Merlin's own player (nothing to install)"),
             ("libvlc", "In a tab, inside this process (libVLC)"),
             ("off", "Disabled"),
         ]
@@ -1245,6 +1289,11 @@ class SettingsDialog(QDialog):
             "window": "The player opens normally, in its own window. The most "
                       "robust option, and the only one that works on native "
                       "Wayland.",
+            "builtin": "Qt's own multimedia module, which ships with Merlin. It "
+                       "decodes H.264, which the web engine was built without, "
+                       "so it plays YouTube live streams with nothing extra "
+                       "installed. yt-dlp, fetched on first use, finds the "
+                       "stream on the page.",
             "libvlc": media.LIBVLC_NOTE,
             "off": "Media the engine cannot decode simply fails, as it would in "
                    "any other browser.",

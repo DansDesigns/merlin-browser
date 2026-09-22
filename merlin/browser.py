@@ -7,6 +7,7 @@ import time
 
 from PyQt6.QtCore import (
     QEvent, QSize, QStandardPaths, QStringListModel, Qt, QTimer, QUrl,
+    pyqtSignal,
 )
 from PyQt6.QtGui import QAction, QCursor, QDesktopServices, QIcon, QKeySequence, QShortcut
 from PyQt6.QtWebEngineCore import (
@@ -30,7 +31,8 @@ from .store import Bookmarks, History
 from .swipeui import SwipeIndicator
 from .tabs import TabContainer
 from .ui import (
-    FindBar, SettingsDialog, WindowButtons, apply_font, apply_theme, icon,
+    FindBar, NoticeBar, SettingsDialog, WindowButtons, apply_font, apply_theme,
+    icon,
     start_page_html,
 )
 
@@ -214,6 +216,11 @@ class WebView(QWebEngineView):
 
 # ------------------------------------------------------------------- window
 class BrowserWindow(QMainWindow):
+    # Results from worker threads. Emitting a signal from another thread
+    # queues it onto this window's thread, so the slots can touch widgets.
+    _stream_resolved = pyqtSignal(str, bool, str)    # page, ok, stream or why
+    _ytdlp_fetched = pyqtSignal(str, bool, str)      # page, ok, message
+
     def __init__(self, app: QApplication, settings: cfg.Settings,
                  profile: QWebEngineProfile, filter_engine, filter_loader,
                  interceptor, history: History, bookmarks: Bookmarks,
@@ -396,6 +403,15 @@ class BrowserWindow(QMainWindow):
         self.find_bar.search.connect(self._do_find)
         self.find_bar.closed.connect(self.hide_find)
 
+        self.notice_bar = NoticeBar(self)
+        self.notice_bar.accepted.connect(self._notice_accepted)
+        self.notice_bar.dismissed.connect(self._notice_dismissed)
+        self._notice_page = ""
+        self._offered_streams: set[str] = set()
+        self._stream_resolved.connect(self._on_stream_resolved)
+        self._ytdlp_fetched.connect(self._on_ytdlp_fetched)
+
+        layout.addWidget(self.notice_bar)
         layout.addWidget(self.tabs, 1)
         layout.addWidget(self.find_bar)
         self.setCentralWidget(central)
@@ -1369,7 +1385,128 @@ class BrowserWindow(QMainWindow):
         if index >= 0 and not ico.isNull():
             self.tabs.setTabIcon(index, ico)
 
+    # ------------------------------------------------------------ live streams
+    @staticmethod
+    def _is_youtube_video(url: QUrl) -> bool:
+        host = (url.host() or "").lower()
+        if not (host == "youtube.com" or host.endswith(".youtube.com")):
+            return False
+        path = url.path()
+        return path.startswith(("/watch", "/live")) or "/live" in path
+
+    def _schedule_live_check(self, view) -> None:
+        """Look again once YouTube's player has had time to start.
+
+        YouTube moves between videos without loading a new page, so this runs
+        on every address change, not only on page loads. Twice, since a live
+        stream can take a few seconds to announce itself.
+        """
+        if not self._is_youtube_video(view.url()):
+            return
+        for delay in (3000, 7000):
+            QTimer.singleShot(delay, lambda v=view: self._check_live_stream(v))
+
+    def _check_live_stream(self, view) -> None:
+        if not self.view_is_alive(view) or view is not self.current():
+            return
+        page = view.url().toString()
+        if not self._is_youtube_video(view.url()) or page in self._offered_streams:
+            return
+
+        def got(result):
+            if not isinstance(result, dict) or not self.view_is_alive(view):
+                return
+            no_h264 = result.get("h264") == ""
+            if not no_h264 or not (result.get("live") or result.get("failed")):
+                return
+            if view is not self.current() or view.url().toString() != page:
+                return
+            self._offered_streams.add(page)
+            self._notice_page = page
+            what = "live stream" if result.get("live") else "video"
+            self.notice_bar.show_notice(
+                f"This {what} uses H.264, which the page's video engine was "
+                "built without. Merlin's player can play it.",
+                "Play in Merlin's player")
+
+        view.page().runJavaScript(media.YOUTUBE_LIVE_JS, got)
+
+    def _notice_accepted(self) -> None:
+        if self._notice_page:
+            self.play_stream(self._notice_page)
+
+    def _notice_dismissed(self) -> None:
+        self.notice_bar.setVisible(False)
+        self._notice_page = ""
+
+    def play_stream(self, page: str) -> None:
+        """Find the stream on a page with yt-dlp, then play it here.
+
+        yt-dlp is fetched first if it is not installed, after asking. Both the
+        fetch and the lookup run off this thread and report back by signal.
+        """
+        import threading
+
+        if not media.has_ytdlp():
+            answer = QMessageBox.question(
+                self, "Fetch yt-dlp",
+                "Merlin uses yt-dlp to find the stream on a page. It is not "
+                "installed yet.\n\nDownload the official build from "
+                "github.com/yt-dlp (about 3 MB)? It is kept in Merlin's own "
+                "folder and nothing else is changed.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            self.notice_bar.setVisible(True)
+            self.notice_bar.busy("Fetching yt-dlp...")
+
+            def fetch():
+                ok, message = media.fetch_ytdlp()
+                self._ytdlp_fetched.emit(page, ok, message)
+
+            threading.Thread(target=fetch, daemon=True).start()
+            return
+
+        self.notice_bar.setVisible(True)
+        self.notice_bar.busy("Finding the stream...")
+
+        def resolve():
+            ok, result = media.resolve_stream(page)
+            self._stream_resolved.emit(page, ok, result)
+
+        threading.Thread(target=resolve, daemon=True).start()
+
+    def _on_ytdlp_fetched(self, page: str, ok: bool, message: str) -> None:
+        self.status_label.setText(message)
+        if not ok:
+            self.notice_bar.setVisible(False)
+            QMessageBox.warning(self, "yt-dlp", message)
+            return
+        self.play_stream(page)
+
+    def _on_stream_resolved(self, page: str, ok: bool, result: str) -> None:
+        self.notice_bar.setVisible(False)
+        self._notice_page = ""
+        if not ok:
+            self.status_label.setText(f"No stream found: {result}")
+            QMessageBox.information(
+                self, "Stream", f"yt-dlp could not find a stream on that page."
+                f"\n\n{result}")
+            return
+        # Stop the page's own player: it cannot decode the stream anyway, and
+        # leaving it running doubles the network traffic.
+        view = self.current()
+        if isinstance(view, WebView) and view.url().toString() == page:
+            view.page().runJavaScript(
+                "document.querySelectorAll('video').forEach(v => v.pause())")
+        self.open_in_player(result, title=page, builtin=True)
+
     def _on_url(self, view: WebView, url: QUrl) -> None:
+        if view is self.current() and self._notice_page and \
+                url.toString() != self._notice_page:
+            self._notice_dismissed()
+        self._schedule_live_check(view)
         if url.scheme() in ("http", "https", "file", "ftp"):
             if view.property("merlin_start") or view.property("merlin_icon"):
                 view.setProperty("merlin_start", False)
@@ -1467,6 +1604,8 @@ class BrowserWindow(QMainWindow):
         self.status_label.setText(link[:200])
 
     def _on_tab_changed(self, index: int) -> None:
+        if hasattr(self, "notice_bar") and self._notice_page:
+            self._notice_dismissed()
         view = self.current()
         if not view:
             return
@@ -1832,8 +1971,13 @@ class BrowserWindow(QMainWindow):
         else:
             self.probe_codecs(then=render)
 
-    def open_in_player(self, url: str = "", new_tab: bool = True) -> None:
-        """Send a URL to the media player, in a tab or its own window."""
+    def open_in_player(self, url: str = "", new_tab: bool = True,
+                       title: str = "", builtin: bool = False) -> None:
+        """Send a URL to the media player, in a tab or its own window.
+
+        builtin forces Qt's own multimedia module, which is what a stream the
+        web engine cannot decode needs: it plays H.264 with nothing installed.
+        """
         view = self.current()
         if not url and view:
             url = view.url().toString()
@@ -1842,6 +1986,28 @@ class BrowserWindow(QMainWindow):
         mode = self.settings.get("player_mode", "embedded")
         if mode == "off":
             self.status_label.setText("Player is disabled in Settings, Media.")
+            return
+
+        # The built-in player needs the stream itself, not the page it is on.
+        # An external mpv resolves pages on its own, so only this case needs
+        # yt-dlp's help first.
+        will_be_builtin = builtin or mode == "builtin" or not media.find_player(
+            self.settings.get("player_command"))
+        if (will_be_builtin and not builtin and url.startswith(("http://", "https://"))
+                and not media.looks_like_media(url)):
+            self.play_stream(url)
+            return
+
+        if builtin:
+            tab = PlayerTab(url, self.settings, self)
+            tab.force_builtin = True
+            tab.title_hint = title
+            index = self.tabs.addTab(tab, tab.display_name())
+            tab.titleChanged.connect(
+                lambda t_, t=tab: self.tabs.setTabText(self.tabs.indexOf(t), t_))
+            tab.closed.connect(lambda t=tab: self._close_player_tab(t))
+            self.tabs.setCurrentIndex(index)
+            self.status_label.setText("Playing in Merlin's player")
             return
 
         if mode == "window" or not new_tab:

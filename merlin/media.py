@@ -147,8 +147,170 @@ def find_player(preferred: str = "") -> str:
     return ""
 
 
+# ------------------------------------------------------------------- yt-dlp
+#
+# yt-dlp turns a page on a streaming site into the address of the stream
+# itself, which a player can then open. It matters most for YouTube live: those
+# streams are usually offered only in H.264, which the web engine was built
+# without, while Qt's own multimedia module decodes it fine.
+#
+# One on the PATH is used if present. Otherwise the official build is fetched
+# from the project's GitHub releases on first use, after asking, into Merlin's
+# data folder, where it can update itself. It is not bundled into Merlin.exe:
+# sites change often and yt-dlp is updated to match, so a copy frozen into the
+# executable would go stale and need a rebuild to fix.
+
+YTDLP_RELEASES = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/"
+
+# Run on a YouTube page: is this a live stream, and can the engine play H.264?
+# Several signals, since YouTube is a single page application and the one set
+# on first load is not updated when you move between videos.
+YOUTUBE_LIVE_JS = r"""
+(function () {
+  try {
+    var video = document.createElement('video');
+    var h264 = video.canPlayType('video/mp4; codecs="avc1.4d401e"');
+    var live = false;
+    var player = document.getElementById('movie_player');
+    if (player && player.getVideoData) {
+      var data = player.getVideoData();
+      if (data && data.isLive) { live = true; }
+    }
+    var badge = document.querySelector('.ytp-live-badge');
+    if (badge && badge.offsetParent !== null &&
+        !badge.hasAttribute('disabled')) { live = true; }
+    if (document.querySelector('.ytp-live')) { live = true; }
+    var failed = !!document.querySelector('.ytp-error');
+    return {live: live, h264: h264, failed: failed};
+  } catch (e) {
+    return {live: false, h264: 'unknown', failed: false};
+  }
+})()
+"""
+
+
+def ytdlp_folder() -> str:
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "Merlin", "tools")
+    base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser(
+        "~/.local/share")
+    return os.path.join(base, "merlin", "tools")
+
+
+def _ytdlp_asset() -> str:
+    return "yt-dlp.exe" if os.name == "nt" else "yt-dlp"
+
+
+def ytdlp_path() -> str:
+    """The yt-dlp to use: one on the PATH, else the one Merlin fetched."""
+    found = shutil.which("yt-dlp")
+    if found:
+        return found
+    local = os.path.join(ytdlp_folder(), _ytdlp_asset())
+    return local if os.path.isfile(local) else ""
+
+
 def has_ytdlp() -> bool:
-    return bool(shutil.which("yt-dlp") or shutil.which("youtube-dl"))
+    return bool(ytdlp_path() or shutil.which("youtube-dl"))
+
+
+def _hidden() -> dict:
+    """No console window flashing up for a helper process on Windows."""
+    if os.name != "nt":
+        return {}
+    return {"creationflags": 0x08000000}          # CREATE_NO_WINDOW
+
+
+def _ytdlp_argv(path: str) -> list:
+    # The Linux release is a Python zip application. Run it with this
+    # interpreter rather than trusting a shebang, which may name a python
+    # that is not there.
+    if os.name != "nt" and not getattr(sys, "frozen", False):
+        try:
+            with open(path, "rb") as handle:
+                if handle.read(2) == b"#!":
+                    return [sys.executable, path]
+        except OSError:
+            pass
+    return [path]
+
+
+def fetch_ytdlp(timeout: int = 120) -> tuple[bool, str]:
+    """Download the official yt-dlp build into Merlin's tools folder."""
+    import urllib.request
+
+    folder = ytdlp_folder()
+    target = os.path.join(folder, _ytdlp_asset())
+    partial = target + ".part"
+    try:
+        os.makedirs(folder, exist_ok=True)
+        request = urllib.request.Request(
+            YTDLP_RELEASES + _ytdlp_asset(),
+            headers={"User-Agent": "Merlin Browser"})
+        with urllib.request.urlopen(request, timeout=timeout) as response, \
+                open(partial, "wb") as out:
+            shutil.copyfileobj(response, out)
+        if os.path.getsize(partial) < 100_000:
+            os.remove(partial)
+            return False, "The download was too small to be yt-dlp."
+        os.replace(partial, target)
+        if os.name != "nt":
+            os.chmod(target, 0o755)
+    except Exception as exc:                      # noqa: BLE001
+        try:
+            os.remove(partial)
+        except OSError:
+            pass
+        return False, f"Could not fetch yt-dlp: {exc}"
+
+    ok, version = ytdlp_version()
+    if not ok:
+        return False, f"yt-dlp was fetched but will not run: {version}"
+    return True, f"yt-dlp {version} is ready"
+
+
+def ytdlp_version() -> tuple[bool, str]:
+    path = ytdlp_path()
+    if not path:
+        return False, "not installed"
+    try:
+        done = subprocess.run(_ytdlp_argv(path) + ["--version"],
+                              capture_output=True, text=True, timeout=30,
+                              **_hidden())
+    except Exception as exc:                      # noqa: BLE001
+        return False, str(exc)
+    if done.returncode != 0:
+        return False, (done.stderr or done.stdout).strip()[:200]
+    return True, done.stdout.strip()
+
+
+def resolve_stream(url: str, timeout: int = 60) -> tuple[bool, str]:
+    """The direct address of the stream on a page, or why there is none.
+
+    Asks for a single format with audio and video together. For a YouTube
+    live stream that is the HLS playlist, which Qt's multimedia module plays.
+    Slow, since it has to fetch the page, so call it off the UI thread.
+    """
+    path = ytdlp_path()
+    if not path:
+        return False, "yt-dlp is not installed"
+    argv = _ytdlp_argv(path) + [
+        "--get-url", "--no-playlist", "--no-warnings",
+        "-f", "best[acodec!=none][vcodec!=none]/best", url]
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True,
+                              timeout=timeout, **_hidden())
+    except subprocess.TimeoutExpired:
+        return False, "yt-dlp took too long to answer"
+    except Exception as exc:                      # noqa: BLE001
+        return False, str(exc)
+    lines = [line.strip() for line in done.stdout.splitlines()
+             if line.strip().startswith(("http://", "https://"))]
+    if done.returncode == 0 and lines:
+        return True, lines[0]
+    message = (done.stderr or done.stdout or "no stream found").strip()
+    return False, message.splitlines()[-1][:240] if message else "no stream found"
 
 
 def has_libvlc() -> bool:

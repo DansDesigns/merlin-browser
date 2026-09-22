@@ -49,7 +49,16 @@ class PlayerTab(QWidget):
         self.process = None
         self._vlc_instance = None
         self._vlc_player = None
+        self._qt_player = None
+        self._qt_audio = None
+        self._qt_video = None
         self.backend = "none"
+        # force_builtin: set by the browser for streams the web engine cannot
+        # decode, so they play here even when no external player is installed
+        self.force_builtin = False
+        # the page a stream came from, for a readable tab name: the stream's
+        # own address is a long CDN path that says nothing useful
+        self.title_hint = ""
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -92,6 +101,10 @@ class PlayerTab(QWidget):
 
     # ------------------------------------------------------------------
     def display_name(self) -> str:
+        if self.title_hint:
+            hint = QUrl(self.title_hint)
+            host = (hint.host() or "").replace("www.", "")
+            return f"\u25b6 {host}"[:38] if host else "\u25b6 Stream"
         name = os.path.basename(QUrl(self.url).path()) or self.url
         return name[:38] or "Player"
 
@@ -99,6 +112,14 @@ class PlayerTab(QWidget):
         mode = self.settings.get("player_mode", "embedded")
         if mode == "libvlc" and media.has_libvlc():
             if self._start_libvlc():
+                return
+        # Qt's own multimedia module: nothing to install, and its FFmpeg has
+        # H.264, which the web engine's does not. Used when asked for, and as
+        # the fallback when no external player can be found.
+        wants_builtin = self.force_builtin or mode == "builtin"
+        if wants_builtin or not media.find_player(
+                self.settings.get("player_command")):
+            if self._start_builtin():
                 return
         embeddable, why = media.embedding_supported()
         window_id = int(self.surface.winId()) if (mode == "embedded" and embeddable) else 0
@@ -154,7 +175,57 @@ class PlayerTab(QWidget):
         return True
 
     # ------------------------------------------------------------- controls
+    def _start_builtin(self) -> bool:
+        """Play in Qt's multimedia module, inside this tab."""
+        try:
+            from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
+            from PyQt6.QtMultimediaWidgets import QVideoWidget
+        except Exception as exc:                         # noqa: BLE001
+            self.info.setText(f"Built-in player unavailable: {exc}")
+            return False
+
+        video = QVideoWidget(self)
+        video.setStyleSheet("background:#000;")
+        layout = self.layout()
+        index = layout.indexOf(self.surface)
+        layout.insertWidget(index, video, 1)
+        self.surface.hide()
+
+        player = QMediaPlayer(self)
+        audio = QAudioOutput(self)
+        player.setAudioOutput(audio)
+        player.setVideoOutput(video)
+        player.errorOccurred.connect(
+            lambda _code, text: self.info.setText(f"Could not play: {text}"))
+        player.playbackStateChanged.connect(self._builtin_state)
+        player.setSource(QUrl(self.url))
+        player.play()
+
+        self._qt_player, self._qt_audio, self._qt_video = player, audio, video
+        self.backend = "builtin"
+        self.btn_play.setEnabled(True)
+        self.position.setEnabled(True)
+        self.info.setText("Built-in player")
+        self._timer.start()
+        self.titleChanged.emit(self.display_name())
+        return True
+
+    def _builtin_state(self, state) -> None:
+        from PyQt6.QtMultimedia import QMediaPlayer
+
+        playing = state == QMediaPlayer.PlaybackState.PlayingState
+        self.btn_play.setText("\u23f8" if playing else "\u25b6")
+
     def toggle_pause(self) -> None:
+        if self._qt_player is not None:
+            from PyQt6.QtMultimedia import QMediaPlayer
+
+            if self._qt_player.playbackState() == \
+                    QMediaPlayer.PlaybackState.PlayingState:
+                self._qt_player.pause()
+            else:
+                self._qt_player.play()
+            return
         if self._vlc_player is not None:
             self._vlc_player.pause()
             self.btn_play.setText(
@@ -162,6 +233,12 @@ class PlayerTab(QWidget):
 
     def stop(self) -> None:
         self._timer.stop()
+        if self._qt_player is not None:
+            try:
+                self._qt_player.stop()
+                self._qt_player.setSource(QUrl())
+            except Exception:                            # noqa: BLE001
+                pass
         if self._vlc_player is not None:
             try:
                 self._vlc_player.stop()
@@ -172,10 +249,28 @@ class PlayerTab(QWidget):
         self.closed.emit()
 
     def _seek(self, value: int) -> None:
+        if self._qt_player is not None:
+            length = self._qt_player.duration()
+            if length > 0 and self._qt_player.isSeekable():
+                self._qt_player.setPosition(int(length * value / 1000))
+            return
         if self._vlc_player is not None:
             self._vlc_player.set_position(value / 1000.0)
 
     def _tick(self) -> None:
+        if self._qt_player is not None:
+            now = self._qt_player.position() // 1000
+            length = self._qt_player.duration() // 1000
+            if length > 0 and self._qt_player.isSeekable():
+                if not self.position.isSliderDown():
+                    self.position.setValue(int(1000 * now / max(1, length)))
+                self.info.setText(f"{now // 60}:{now % 60:02d} / "
+                                  f"{length // 60}:{length % 60:02d}")
+            else:
+                # a live stream has no end to seek towards
+                self.position.setEnabled(False)
+                self.info.setText(f"LIVE  {now // 60}:{now % 60:02d}")
+            return
         if self._vlc_player is None:
             return
         try:

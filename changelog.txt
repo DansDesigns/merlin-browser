@@ -6,6 +6,19 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  YouTube live streams play. The web engine was built without H.264, and live
+  streams are usually offered in nothing else, while ordinary videos come as
+  VP9, which is why only live ones failed. Qt's multimedia module ships its own
+  FFmpeg, and that one decodes H.264. On a live stream the page cannot play, a
+  bar above the page offers Merlin's player; yt-dlp finds the stream and
+  Merlin's player plays it, with nothing else to install.
+  yt-dlp is actually used now. It was listed in the README and reported in the
+  codec report but nothing called it. Merlin uses one on the PATH, or offers to
+  fetch the official build from GitHub on first use.
+  Settings, Media offers Merlin's own player as a playback mode.
+  Merlin.exe bundles Qt Multimedia. The player only imports it on first use,
+  so the build has to be told, or it leaves it out. This one needs a rebuild of
+  the installer to reach Windows.
   Fixed: switching theme after opening and closing tabs crashed Merlin. When a
   tab closed, a disconnect() with no arguments cut every connection its web
   view had, including the ones Qt WebEngine makes internally, which left its

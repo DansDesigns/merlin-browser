@@ -323,6 +323,58 @@ def test_theme_after_closing_tabs(app) -> None:
     window.close()
 
 
+def test_live_stream_offer(app) -> None:
+    """A live stream the engine cannot decode raises the offer bar."""
+    window, _, _ = make_window(app, "t-live")
+    original = BrowserWindow._is_youtube_video
+    BrowserWindow._is_youtube_video = staticmethod(lambda url: True)
+    try:
+        view = window.new_tab()
+        view.setHtml("<title>live</title><div id=movie_player>"
+                     "<div class='ytp-live-badge'>LIVE</div></div>",
+                     QUrl("https://www.youtube.com/watch?v=test"))
+        wait(app, 2.0)
+        window._check_live_stream(view)
+        wait(app, 1.0)
+        # only offered where the engine really lacks H.264
+        engine_lacks_h264 = True
+        check("a live stream the engine cannot play offers the player",
+              window.notice_bar.isVisible() == engine_lacks_h264,
+              window.notice_bar.text.text()[:40])
+        window._notice_dismissed()
+        check("dismissing the offer clears the bar",
+              not window.notice_bar.isVisible())
+    finally:
+        BrowserWindow._is_youtube_video = original
+        window.close()
+
+
+def test_builtin_player_decodes_h264(app) -> None:
+    """Qt Multimedia really decodes H.264, the codec live streams use.
+
+    Plays a one second H.264 clip and counts decoded frames. Qt's list of
+    advertised codecs cannot be trusted for this: it leaves H.264 out even
+    though its own bundled FFmpeg decodes it.
+    """
+    try:
+        from PyQt6.QtMultimedia import QMediaPlayer, QVideoSink
+    except Exception as exc:                              # noqa: BLE001
+        check("Qt Multimedia is installed", False, str(exc))
+        return
+    sample = os.path.join(ROOT, "tests", "data", "h264-sample.mp4")
+    player = QMediaPlayer()
+    sink = QVideoSink()
+    player.setVideoSink(sink)
+    frames = []
+    sink.videoFrameChanged.connect(lambda frame: frames.append(frame.width()))
+    player.setSource(QUrl.fromLocalFile(sample))
+    player.play()
+    wait(app, 3.0)
+    player.stop()
+    check("Qt Multimedia decodes H.264", len(frames) > 3,
+          f"{len(frames)} frames")
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -336,7 +388,8 @@ def main() -> int:
     for test in (test_session, test_placeholders, test_tab_churn,
                  test_gestures, test_local_addresses, test_app_mode,
                  test_decorations_per_window, test_address_bar_selects,
-                 test_theme_after_closing_tabs):
+                 test_theme_after_closing_tabs, test_live_stream_offer,
+                 test_builtin_player_decodes_h264):
         print(f"\n{test.__name__}")
         try:
             test(app)

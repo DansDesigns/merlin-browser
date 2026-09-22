@@ -189,6 +189,7 @@ if [[ "$MODE" == "system" ]]; then
   if [[ "$SYSTEM_QT" == "0" ]]; then
     say "      WARNING: no system PyQt6 found. Install it first:"
     say "          sudo apt install python3-pyqt6 python3-pyqt6.qtwebengine"
+    say "      and, for Merlin's built-in media player, python3-pyqt6.qtmultimedia"
     exit 1
   fi
 else

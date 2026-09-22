@@ -224,6 +224,11 @@ import re as _re_dc
 check("no wildcard disconnect on a web view",
       not _re_dc.search(r"^\s*view\.disconnect\(\)", browser_src2, _re_dc.M))
 
+bat_src = open(os.path.join(root, "install.bat"), encoding="utf-8").read()
+check("Qt Multimedia is bundled into Merlin.exe",
+      "--hidden-import PyQt6.QtMultimedia " in bat_src
+      and "--hidden-import PyQt6.QtMultimediaWidgets" in bat_src)
+
 # --- batch quoting hazards --------------------------------------------------
 # A PowerShell call with \" escapes inside a for /f broke install.bat twice:
 # cmd has no backslash escape, so the quotes ended the string early and the
