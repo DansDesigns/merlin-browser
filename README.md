@@ -1,8 +1,7 @@
 # Merlin Browser
 ![version](https://img.shields.io/badge/version-1.6-6f8ff0)
 
-# /!\ - IMPORTANT - /!\
-V1.6 Requires a reinstall as there has been a fundamental chnge to the folder structure.
+# V1.6 Requires a reinstall as there has been a fundamental chnge to the folder structure.
 
 A Rust-free desktop web browser built with Python and C++, on Qt and the Chromium engine.
 
