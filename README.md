@@ -73,7 +73,7 @@ Chromium through Qt WebEngine.
 
 - Python 3.9 or newer
 - PyQt6 and PyQt6-WebEngine
-- Optional: mpv or VLC for media the engine cannot decode, and yt-dlp for
+- Optional: mpv or VLC for media the engine cannot decode, and [yt-dlp](https://github.com/yt-dlp/yt-dlp) for
   streaming sites
 
 # Installation
