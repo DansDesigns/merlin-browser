@@ -1517,9 +1517,11 @@ class BrowserWindow(QMainWindow):
             return
         if not ok:
             self.status_label.setText(f"No stream found: {result}")
+            log = os.environ.get("MERLIN_CRASH_LOG", "")
+            where = (f"\n\nEverything yt-dlp said is in:\n{log}" if log else "")
             QMessageBox.information(
-                self, "Stream", f"yt-dlp could not find a stream on that page."
-                f"\n\n{result}")
+                self, "Stream", "yt-dlp could not find a stream on that page."
+                f"\n\n{result}{where}")
             return
         # Stop the page's own player: it cannot decode the stream anyway, and
         # leaving it running doubles the network traffic.

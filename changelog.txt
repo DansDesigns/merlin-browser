@@ -6,6 +6,15 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  Fixed: YouTube live still failed with "Requested format is not available"
+  once Deno was in place. YouTube's ordinary web client now gets only SABR
+  formats, which yt-dlp cannot download, and yt-dlp's own guide gives the way
+  round it: the Safari client provides HLS formats that need no PO token, and
+  HLS live streams need none at all. Merlin asks for those first, then tries
+  the TV client, then yt-dlp's default. If all three fail it updates its own
+  yt-dlp once and tries again, since YouTube changes often.
+  yt-dlp's warnings are kept now rather than discarded, and every attempt with
+  what yt-dlp said goes into merlin-log.txt. The failure message says where.
   Fixed: fetching Deno failed on Windows with "No module named 'platform'".
   Merlin.exe carries only the standard modules that were in use when it was
   built, and the package, which updates from disk, can be newer. That module

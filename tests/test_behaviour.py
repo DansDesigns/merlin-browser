@@ -499,6 +499,38 @@ def test_closing_is_prompt(app) -> None:
           bool(closing) and after < 5.0, f"{after:.2f}s after close")
 
 
+def test_youtube_asks_for_hls_first(app) -> None:
+    """YouTube's HLS formats are asked for first, then other clients."""
+    import stat
+
+    from merlin import media as _media
+
+    folder = tempfile.mkdtemp(prefix="fake-ytdlp-")
+    fake = os.path.join(folder, "yt-dlp")
+    with open(fake, "w") as handle:
+        handle.write(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "a = ' '.join(sys.argv[1:])\n"
+            "if 'player_client=web_safari' in a:\n"
+            "    print('https://example.invalid/live.m3u8'); sys.exit(0)\n"
+            "sys.stderr.write('ERROR: Requested format is not available\\n')\n"
+            "sys.exit(1)\n")
+    os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
+    saved = (_media.ytdlp_path, _media.deno_path, _media._ytdlp_argv)
+    _media.ytdlp_path = lambda: fake
+    _media.deno_path = lambda: "/bin/true"
+    _media._ytdlp_argv = lambda p: [p]
+    try:
+        ok, found = _media.resolve_stream("https://www.youtube.com/watch?v=x")
+        check("a YouTube live page is found through its HLS formats",
+              ok and found.endswith(".m3u8"), found)
+        check("HLS through the Safari client is asked for first",
+              "web_safari" in " ".join(_media.YOUTUBE_ATTEMPTS[0][1]))
+    finally:
+        _media.ytdlp_path, _media.deno_path, _media._ytdlp_argv = saved
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -516,7 +548,7 @@ def main() -> int:
                  test_builtin_player_decodes_h264,
                  test_youtube_needs_a_runtime,
                  test_slot_errors_are_not_fatal, test_notice_bar_is_readable,
-                 test_closing_is_prompt):
+                 test_closing_is_prompt, test_youtube_asks_for_hls_first):
         print(f"\n{test.__name__}")
         try:
             test(app)

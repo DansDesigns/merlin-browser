@@ -441,41 +441,120 @@ JS_RUNTIME_MISSING = (
     "challenge, and yt-dlp needs a JavaScript runtime, Deno, to do that.")
 
 
+# How to ask YouTube for something playable, tried in order until one works.
+#
+# YouTube's ordinary web client now gets only SABR formats, which yt-dlp
+# cannot download and skips, and when nothing else is left it reports
+# "Requested format is not available". yt-dlp's own PO Token guide gives the
+# way round it: the web_safari client provides HLS formats that need no PO
+# token, and HLS live streams need none either. An HLS format also carries
+# audio and video together, which is exactly what Merlin's player wants.
+#
+# So HLS from web_safari first, then the TV client, then yt-dlp's own choice.
+YOUTUBE_ATTEMPTS = (
+    ("HLS through the Safari client",
+     ["--extractor-args", "youtube:player_client=web_safari",
+      "-f", "best[protocol^=m3u8]/best[acodec!=none][vcodec!=none]/best"]),
+    ("the TV client",
+     ["--extractor-args", "youtube:player_client=tv",
+      "-f", "best[protocol^=m3u8]/best[acodec!=none][vcodec!=none]/best"]),
+    ("yt-dlp's default clients",
+     ["-f", "best[protocol^=m3u8]/best[acodec!=none][vcodec!=none]/best"]),
+)
+OTHER_ATTEMPTS = (
+    ("yt-dlp's default choice",
+     ["-f", "best[acodec!=none][vcodec!=none]/best"]),
+)
+
+
+_UPDATED_THIS_SESSION = False
+
+
+def _is_youtube(url: str) -> bool:
+    return _needs_js_runtime(url)
+
+
+def _telling_lines(text: str) -> list:
+    """The lines of yt-dlp's output that say why, not the whole transcript."""
+    keep = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith(("ERROR", "WARNING")) and line not in keep:
+            keep.append(line)
+    return keep
+
+
 def resolve_stream(url: str, timeout: int = 60) -> tuple[bool, str]:
     """The direct address of the stream on a page, or why there is none.
 
-    Asks for a single format with audio and video together. For a YouTube
-    live stream that is the HLS playlist, which Qt's multimedia module plays.
-    Slow, since it has to fetch the page, so call it off the UI thread.
+    Tries each way of asking in turn and returns the first address found.
+    Every attempt, and what yt-dlp said about it, goes into merlin-log.txt,
+    so a failure can be read in full rather than guessed at from its last
+    line. Slow, since each attempt fetches the page: call it off the UI thread.
     """
     path = ytdlp_path()
     if not path:
         return False, "yt-dlp is not installed"
-    argv = _ytdlp_argv(path) + [
-        "--get-url", "--no-playlist", "--no-warnings",
-        "-f", "best[acodec!=none][vcodec!=none]/best"]
+    base = _ytdlp_argv(path) + ["--get-url", "--no-playlist"]
     deno = deno_path()
     if deno:
         # named explicitly rather than left to be found: on Linux yt-dlp only
         # looks on the PATH, and Merlin's copy lives in its own folder
-        argv += ["--js-runtimes", f"deno:{deno}"]
+        base += ["--js-runtimes", f"deno:{deno}"]
     elif _needs_js_runtime(url):
         return False, JS_RUNTIME_MISSING
-    argv.append(url)
+
     try:
-        done = _run_helper(argv, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return False, "yt-dlp took too long to answer"
-    except Exception as exc:                      # noqa: BLE001
-        return False, str(exc)
-    lines = [line.strip() for line in done.stdout.splitlines()
-             if line.strip().startswith(("http://", "https://"))]
-    if done.returncode == 0 and lines:
-        return True, lines[0]
-    message = (done.stderr or done.stdout or "no stream found").strip()
-    if "JavaScript runtime" in message or "challenge solving failed" in message:
-        return False, JS_RUNTIME_MISSING
-    return False, message.splitlines()[-1][:240] if message else "no stream found"
+        from . import crashlog
+        note = crashlog.note
+    except Exception:                             # noqa: BLE001
+        def note(_text):
+            return None
+
+    attempts = YOUTUBE_ATTEMPTS if _is_youtube(url) else OTHER_ATTEMPTS
+    reasons = []
+    for label, extra in attempts:
+        try:
+            done = _run_helper(base + extra + [url], timeout=timeout)
+        except subprocess.TimeoutExpired:
+            note(f"stream lookup, {label}: timed out")
+            reasons.append(f"{label}: timed out")
+            continue
+        except Exception as exc:                  # noqa: BLE001
+            return False, str(exc)
+        found = [line.strip() for line in done.stdout.splitlines()
+                 if line.strip().startswith(("http://", "https://"))]
+        if done.returncode == 0 and found:
+            note(f"stream lookup, {label}: found a stream")
+            return True, found[0]
+        telling = _telling_lines(done.stderr or done.stdout or "")
+        note(f"stream lookup, {label}: nothing usable")
+        for line in telling:
+            note(f"    {line}")
+        joined = " ".join(telling)
+        if "JavaScript runtime" in joined or "challenge solving failed" in joined:
+            if not deno:
+                return False, JS_RUNTIME_MISSING
+        reasons.append(f"{label}: {telling[-1] if telling else 'no stream found'}")
+
+    # YouTube changes often and yt-dlp follows it, so a failure is often just
+    # an out of date yt-dlp. Merlin's own copy can update itself: do that once
+    # per session and try again, before giving up.
+    global _UPDATED_THIS_SESSION
+    own = os.path.join(ytdlp_folder(), _ytdlp_asset())
+    if not _UPDATED_THIS_SESSION and os.path.abspath(path) == os.path.abspath(own):
+        _UPDATED_THIS_SESSION = True
+        note("stream lookup: every way failed, updating yt-dlp and trying again")
+        try:
+            updated = _run_helper(_ytdlp_argv(path) + ["-U"], timeout=180)
+            note("    " + (updated.stdout or updated.stderr).strip().splitlines()[-1]
+                 if (updated.stdout or updated.stderr).strip() else "    (no output)")
+        except Exception as exc:                  # noqa: BLE001
+            note(f"    update failed: {exc}")
+        else:
+            return resolve_stream(url, timeout)
+
+    return False, "\n".join(r[:220] for r in reasons) or "no stream found"
 
 
 def has_libvlc() -> bool:
