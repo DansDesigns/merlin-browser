@@ -1,5 +1,7 @@
 # Merlin Browser
-![version](https://img.shields.io/badge/version-1.5.2-6f8ff0)
+![version](https://img.shields.io/badge/version-1.6-6f8ff0)
+
+### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6 Requires a reinstall as there has been a fundamental change to the folder structure. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
 
 A Rust-free desktop web browser built with Python and C++, on Qt and the Chromium engine.
 
@@ -93,26 +95,18 @@ about 40 MB) into its own tools folder, where they can be kept up to date. It is
 YouTube changes often and yt-dlp changes to match, so a frozen copy would go
 stale. Ctrl+Shift+P does the same for any page.
 
-## Installation
+# Installation
 
-Download from the Releases page or build from source by cloning this repo then running:
+Download from the [Releases](https://github.com/DansDesigns/merlin-browser/releases) page or build from source by cloning this repo then running:
 
 ```bash
 python3 install-gui.py      # Linux, needs python3-tk
 install-gui.bat             # Windows
 ```
 
-To build the installer executable, run this on Windows:
+# Install from Terminal (non-GUI):
 
-```
-tools\build-installer.bat
-```
-
-That produces `dist\MerlinSetup.exe`, the graphical installer.
-
-### Install from Terminal (non-GUI):
-
-# Linux
+### Linux
 
 ```bash
 ./install.sh
@@ -140,7 +134,7 @@ sudo pacman -S python-pyqt6 python-pyqt6-webengine         # Arch
 Uninstall with `~/.local/lib/merlin-browser/uninstall-gui.py` for the graphical
 one, or `uninstall.sh` beside it for the text one.
 
-# Windows
+### Windows
 
 ```
 install.bat
