@@ -76,54 +76,27 @@ Chromium through Qt WebEngine.
 - Optional: mpv or VLC for media the engine cannot decode, and yt-dlp for
   streaming sites
 
-## Installation
+# Installation
 
-Download from the Releases page or build from source by cloning this repo then running:
+Download from the [Releases](https://github.com/DansDesigns/merlin-browser/releases) page or build from source by cloning this repo then running:
 
-```bash
-python3 install-gui.py      # Linux, needs python3-tk
+```
+python3 install-gui.py      # Linux
 install-gui.bat             # Windows
 ```
 
-To build the installer executable, run this on Windows:
+# Install from Terminal (non-GUI):
 
-```
-tools\build-installer.bat
-```
-
-That produces `dist\MerlinSetup.exe`, the graphical installer.
-
-### Install from Terminal (non-GUI):
-
-# Linux
+### Linux
 
 ```bash
 ./install.sh
 ```
 
-The installer builds a virtualenv, so nothing is added to your system Python.
-Two modes are available:
-
-| Mode | Engine | H.264 and AAC |
-|---|---|---|
-| `--system-qt` | your distribution's Qt WebEngine | yes |
-| `--venv-only` | PyQt6 from pip | no |
-
-`--system-qt` is the default when a system PyQt6 is present, because
-distribution builds enable the licensed codecs. Add `--yes` to skip the prompts.
-
-Requires `python3-venv`. To install the engine from your distribution first:
-
-```bash
-sudo apt install python3-pyqt6 python3-pyqt6.qtwebengine   # Debian, Ubuntu
-sudo dnf install python3-qt6 python3-qt6-webengine         # Fedora
-sudo pacman -S python-pyqt6 python-pyqt6-webengine         # Arch
-```
-
 Uninstall with `~/.local/lib/merlin-browser/uninstall-gui.py` for the graphical
 one, or `uninstall.sh` beside it for the text one.
 
-# Windows
+### Windows
 
 ```
 install.bat
@@ -132,14 +105,6 @@ install.bat
 Per-user, no administrator rights. It builds a virtualenv in
 `%LOCALAPPDATA%\Programs\Merlin`, installs PyQt6 into it, builds `Merlin.exe`
 with Merlin's icon, and adds a Start Menu entry.
-
-pip wheels do not include H.264, AAC or HEVC, and there is no distribution
-package on Windows, so install a player for those formats:
-
-```
-winget install mpv.net
-winget install VideoLAN.VLC
-```
 
 Uninstall with `%LOCALAPPDATA%\Programs\Merlin\uninstall-gui.bat` for the
 graphical one, or `uninstall.bat` beside it for the text one.
