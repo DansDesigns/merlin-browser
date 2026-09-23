@@ -1,5 +1,5 @@
 # Merlin Browser
-![version](https://img.shields.io/badge/version-1.6.4-6f8ff0)
+![version](https://img.shields.io/badge/version-1.6.5-6f8ff0)
 
 ### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6 Requires a reinstall as there has been a fundamental change to the folder structure. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
 
@@ -123,14 +123,18 @@ publishes the build.
 #### Until a build is published
 
 If nothing is published yet for the engine version installed, the standard
-engine is kept, and on a live stream a bar above the page offers Merlin's own
-player instead. Qt's multimedia module ships its own FFmpeg, separate from the
-web engine's, and that one decodes H.264. yt-dlp finds the stream on the page,
-and for YouTube it needs a JavaScript runtime, Deno, to solve YouTube's
-challenge. If either is missing, Merlin asks once and fetches the official
-builds from GitHub (yt-dlp about 3 MB, Deno about 40 MB) into its own tools
-folder. YouTube works hard against yt-dlp, so treat this as a fallback rather
-than the fix. Ctrl+Shift+P does the same for any page.
+engine is kept, and a live stream it cannot play opens in Merlin's own player
+by itself. Qt's multimedia module ships its own FFmpeg, separate from the web
+engine's, and that one decodes H.264.
+
+The stream's address comes from YouTube's own player first. The page, running
+in Merlin, has already done everything YouTube asks of a client, so for a live
+stream its player holds an HLS address that plays as it is. Only if the page
+has none is yt-dlp asked, with Deno to solve YouTube's challenge; Merlin fetches
+both from GitHub on first use (yt-dlp about 3 MB, Deno about 40 MB). YouTube
+works hard against yt-dlp, so when every way of asking fails, Merlin moves its
+own copy to yt-dlp's nightly build, where YouTube fixes usually land first, and
+tries once more. Ctrl+Shift+P plays any page in the player the same way.
 
 # Installation
 

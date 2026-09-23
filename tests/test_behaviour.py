@@ -324,13 +324,12 @@ def test_theme_after_closing_tabs(app) -> None:
 
 
 def test_live_stream_offer(app) -> None:
-    """A live stream the engine cannot decode raises the offer bar."""
+    """A live stream the engine cannot play goes to the player by itself."""
     window, _, _ = make_window(app, "t-live")
-    # from the class dictionary, so the staticmethod wrapper itself is kept:
-    # reading it as an attribute gives the bare function, and putting that
-    # back turns it into an ordinary method that takes the wrong arguments
     original = BrowserWindow.__dict__["_is_youtube_video"]
     BrowserWindow._is_youtube_video = staticmethod(lambda url: True)
+    started = []
+    window.play_stream = lambda page: started.append(page)
     try:
         view = window.new_tab()
         view.setHtml("<title>live</title><div id=movie_player>"
@@ -339,14 +338,12 @@ def test_live_stream_offer(app) -> None:
         wait(app, 2.0)
         window._check_live_stream(view)
         wait(app, 1.0)
-        # only offered where the engine really lacks H.264
-        engine_lacks_h264 = True
-        check("a live stream the engine cannot play offers the player",
-              window.notice_bar.isVisible() == engine_lacks_h264,
-              window.notice_bar.text.text()[:40])
-        window._notice_dismissed()
-        check("dismissing the offer clears the bar",
-              not window.notice_bar.isVisible())
+        check("a live stream the engine cannot play opens in the player by itself",
+              started == ["https://www.youtube.com/watch?v=test"], str(started))
+        check("with no bar to click first", not window.notice_bar.isVisible())
+        window._check_live_stream(view)
+        wait(app, 1.0)
+        check("and only once for the same page", len(started) == 1)
     finally:
         BrowserWindow._is_youtube_video = original
         window.close()
@@ -725,6 +722,43 @@ def test_engine_update_bookkeeping(app) -> None:
                 os.environ[key] = value
 
 
+def test_stream_taken_from_the_page(app) -> None:
+    """The live stream's address comes from YouTube's own player, and only
+    for the video actually on screen."""
+    from merlin import media as _media
+
+    window, _, _ = make_window(app, "t-pagestream")
+    view = window.new_tab()
+    results = {}
+
+    def ask(name, html, address):
+        view.setHtml(html, QUrl(address))
+        wait(app, 1.2)
+        view.page().runJavaScript(_media.YOUTUBE_STREAM_JS,
+                                  lambda r: results.__setitem__(name, r or {}))
+        wait(app, 0.6)
+
+    player = ("<div id=movie_player></div><script>"
+              "document.getElementById('movie_player').getPlayerResponse = "
+              "function(){return {videoDetails:{videoId:'%s'},"
+              "streamingData:{hlsManifestUrl:'https://example.invalid/%s.m3u8'}};};"
+              "</script>")
+    ask("current", player % ("LIVE1", "live1"), "https://www.youtube.com/watch?v=LIVE1")
+    ask("stale", player % ("OLDVID", "old"), "https://www.youtube.com/watch?v=LIVE1")
+    ask("live path", player % ("ABCDEF", "abc"), "https://www.youtube.com/live/ABCDEF")
+    ask("none", "<p>nothing here</p>", "https://www.youtube.com/watch?v=LIVE1")
+
+    check("the stream for the video on screen is found",
+          results.get("current", {}).get("hls", "").endswith("live1.m3u8"))
+    check("a response for a different video is ignored",
+          results.get("stale", {}).get("hls") == "")
+    check("a /live/ address is matched too",
+          results.get("live path", {}).get("hls", "").endswith("abc.m3u8"))
+    check("a page without a stream gives nothing",
+          results.get("none", {}).get("hls") == "")
+    window.close()
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -745,7 +779,7 @@ def main() -> int:
                  test_closing_is_prompt, test_youtube_asks_for_hls_first,
                  test_released_views_are_dead, test_codec_engine_swap_is_safe,
                  test_engine_download_is_checked,
-                 test_engine_update_bookkeeping):
+                 test_engine_update_bookkeeping, test_stream_taken_from_the_page):
         print(f"\n{test.__name__}")
         try:
             test(app)

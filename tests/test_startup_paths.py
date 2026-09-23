@@ -330,6 +330,19 @@ check("engine files are replaced by rename, never written in place",
 check("a staged engine waits while another Merlin has the engine open",
       _ce.index("engine_in_use(qt_folder())") < _ce.index('version = staged.get("version"'))
 
+_play = browser_src2.split("    def play_stream(")[1].split("\n    def ")[0]
+# The yt-dlp call is written inside the callback, above the line that asks
+# the page, so text order says nothing: check the structure instead. The page
+# is asked, and yt-dlp is only the branch taken when it has no stream.
+_got = _play.split("def got(")[1].split("view.page().runJavaScript")[0]
+check("playing a stream asks the page before yt-dlp",
+      "runJavaScript(media.YOUTUBE_STREAM_JS, got)" in _play
+      and _got.index("if stream:") < _got.index("else:")
+      < _got.index("self._play_with_ytdlp(page)"))
+_detect = browser_src2.split("    def _check_live_stream(")[1].split("\n    def ")[0]
+check("a stream the engine cannot play opens in the player by itself",
+      "self.play_stream(page)" in _detect and "show_notice" not in _detect)
+
 # --- batch quoting hazards --------------------------------------------------
 # A PowerShell call with \" escapes inside a for /f broke install.bat twice:
 # cmd has no backslash escape, so the quotes ended the string early and the

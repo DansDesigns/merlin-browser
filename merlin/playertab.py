@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import sys
 
-from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, QThread, QTimer, QUrl, pyqtSignal
 from PyQt6.QtWidgets import (
     QHBoxLayout, QLabel, QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget,
 )
@@ -36,6 +36,160 @@ class VideoSurface(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
 
+class FrameView(QWidget):
+    """Video drawn by Merlin itself, one image at a time.
+
+    Not QVideoWidget. In Qt 6 that puts the picture in a separate native
+    window, wrapped in a QWindowContainer, and a native window always draws on
+    top of the ordinary widgets around it. So the video covered the tab strip
+    when it widened over the page, ignored the rounded page corners, and upset
+    the repainting of the strip beside it. This is an ordinary widget, painted
+    inside Merlin's own window, so it stacks like everything else.
+
+    It is handed finished images, never decoded frames. A frame can point into
+    the decoder's own buffers, which are freed when the player stops, and
+    painting one after that read freed memory. The playback worker turns each
+    frame into an image, which owns its memory, before it leaves that thread.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._image = None
+        # every pixel is painted, so Qt need not clear behind it first
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setMinimumSize(160, 90)
+
+    def show_image(self, image) -> None:
+        if image is not None and not image.isNull():
+            self._image = image
+            self.update()
+
+    def current_image(self):
+        return self._image
+
+    def clear(self) -> None:
+        """Forget the picture, when the player stops."""
+        self._image = None
+        self.update()
+
+    def paintEvent(self, event) -> None:                 # noqa: N802
+        from PyQt6.QtCore import QRect
+        from PyQt6.QtGui import QPainter
+
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), Qt.GlobalColor.black)
+        image = self._image
+        if image is not None:
+            size = image.size().scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio)
+            target = QRect((self.width() - size.width()) // 2,
+                           (self.height() - size.height()) // 2,
+                           size.width(), size.height())
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            painter.drawImage(target, image)
+        painter.end()
+
+
+# Workers told to stop but not yet finished. Kept here, not dropped: Qt ends
+# the whole program if a QThread is destroyed while it is still running, and
+# a stop can get stuck inside Qt Multimedia (see PlaybackWorker).
+_ABANDONED: set = set()
+
+
+class PlaybackWorker(QObject):
+    """Qt's media player, run on a thread of its own.
+
+    QMediaPlayer.stop() can get stuck, in Qt Multimedia's own streaming engine:
+    about one stop in thirty while a stream plays, in testing, with the old
+    QVideoWidget just as with this. On the interface thread that froze the
+    whole browser when a player tab was closed. Here it can only hold up this
+    worker, which is then left to finish in its own time.
+
+    The tab talks to it only through queued signals, and it answers the same
+    way, so nothing on the interface thread ever waits on the player.
+    """
+
+    image = pyqtSignal(object)            # QImage, safe to keep and paint
+    progress = pyqtSignal(int, int, bool)  # position ms, duration ms, seekable
+    playing = pyqtSignal(bool)
+    failed = pyqtSignal(str)
+
+    def __init__(self, url: str):
+        super().__init__()
+        self.url = url
+        # read from other threads; a plain flag is enough for a hint like this
+        self.want_frames = True
+        self._player = self._audio = self._sink = self._timer = None
+
+    def start(self) -> None:
+        from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
+
+        self._player = QMediaPlayer(self)
+        self._audio = QAudioOutput(self)
+        self._sink = QVideoSink(self)
+        self._player.setAudioOutput(self._audio)
+        self._player.setVideoSink(self._sink)
+        # direct: converted on whichever thread delivers the frame, while the
+        # frame is certainly still valid, and only the image is passed on
+        self._sink.videoFrameChanged.connect(
+            self._frame, Qt.ConnectionType.DirectConnection)
+        self._player.errorOccurred.connect(
+            lambda _code, text: self.failed.emit(text))
+        self._player.playbackStateChanged.connect(
+            lambda state: self.playing.emit(
+                state == QMediaPlayer.PlaybackState.PlayingState))
+        self._timer = QTimer(self)
+        self._timer.setInterval(250)
+        self._timer.timeout.connect(self._report)
+        self._timer.start()
+        self._player.setSource(QUrl(self.url))
+        self._player.play()
+
+    def _frame(self, frame) -> None:
+        if not self.want_frames or frame is None or not frame.isValid():
+            return
+        image = frame.toImage()
+        if not image.isNull():
+            self.image.emit(image)
+
+    def _report(self) -> None:
+        if self._player is not None:
+            self.progress.emit(self._player.position(), self._player.duration(),
+                               self._player.isSeekable())
+
+    def toggle(self) -> None:
+        from PyQt6.QtMultimedia import QMediaPlayer
+
+        if self._player is None:
+            return
+        if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self._player.pause()
+        else:
+            self._player.play()
+
+    def seek(self, per_mille: int) -> None:
+        if self._player is not None and self._player.isSeekable():
+            length = self._player.duration()
+            if length > 0:
+                self._player.setPosition(int(length * per_mille / 1000))
+
+    def shut_down(self) -> None:
+        """Silence first, then stop: a stop that sticks must not keep playing."""
+        self.want_frames = False
+        if self._timer is not None:
+            self._timer.stop()
+        if self._audio is not None:
+            self._audio.setMuted(True)
+        if self._sink is not None:
+            try:
+                self._sink.videoFrameChanged.disconnect()
+            except TypeError:
+                pass
+        if self._player is not None:
+            self._player.stop()
+            self._player.setSource(QUrl())
+        self.thread().quit()
+
+
 class PlayerTab(QWidget):
     """A tab that plays one media URL."""
 
@@ -49,8 +203,8 @@ class PlayerTab(QWidget):
         self.process = None
         self._vlc_instance = None
         self._vlc_player = None
-        self._qt_player = None
-        self._qt_audio = None
+        self._worker = None
+        self._worker_thread = None
         self._qt_video = None
         self.backend = "none"
         # force_builtin: set by the browser for streams the web engine cannot
@@ -175,56 +329,78 @@ class PlayerTab(QWidget):
         return True
 
     # ------------------------------------------------------------- controls
+    # the tab asks the worker, never calls into the player itself
+    _ask_toggle = pyqtSignal()
+    _ask_seek = pyqtSignal(int)
+    _ask_shut_down = pyqtSignal()
+
     def _start_builtin(self) -> bool:
-        """Play in Qt's multimedia module, inside this tab."""
+        """Play in Qt's multimedia module, on a worker thread, in this tab."""
         try:
-            from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
-            from PyQt6.QtMultimediaWidgets import QVideoWidget
+            from PyQt6.QtMultimedia import QMediaPlayer  # noqa: F401
+
+            video = FrameView(self)
         except Exception as exc:                         # noqa: BLE001
             self.info.setText(f"Built-in player unavailable: {exc}")
             return False
 
-        video = QVideoWidget(self)
-        video.setStyleSheet("background:#000;")
         layout = self.layout()
         index = layout.indexOf(self.surface)
         layout.insertWidget(index, video, 1)
         self.surface.hide()
 
-        player = QMediaPlayer(self)
-        audio = QAudioOutput(self)
-        player.setAudioOutput(audio)
-        player.setVideoOutput(video)
-        player.errorOccurred.connect(
-            lambda _code, text: self.info.setText(f"Could not play: {text}"))
-        player.playbackStateChanged.connect(self._builtin_state)
-        player.setSource(QUrl(self.url))
-        player.play()
+        # no parent: the thread must be able to outlive this tab
+        thread = QThread()
+        worker = PlaybackWorker(self.url)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.start)
+        worker.image.connect(video.show_image)
+        worker.progress.connect(self._builtin_progress)
+        worker.playing.connect(self._builtin_state)
+        worker.failed.connect(lambda text: self.info.setText(f"Could not play: {text}"))
+        self._ask_toggle.connect(worker.toggle)
+        self._ask_seek.connect(worker.seek)
+        self._ask_shut_down.connect(worker.shut_down)
+        thread.start()
 
-        self._qt_player, self._qt_audio, self._qt_video = player, audio, video
+        self._worker, self._worker_thread, self._qt_video = worker, thread, video
         self.backend = "builtin"
         self.btn_play.setEnabled(True)
         self.position.setEnabled(True)
         self.info.setText("Built-in player")
-        self._timer.start()
         self.titleChanged.emit(self.display_name())
         return True
 
-    def _builtin_state(self, state) -> None:
-        from PyQt6.QtMultimedia import QMediaPlayer
-
-        playing = state == QMediaPlayer.PlaybackState.PlayingState
+    def _builtin_state(self, playing: bool) -> None:
         self.btn_play.setText("\u23f8" if playing else "\u25b6")
 
-    def toggle_pause(self) -> None:
-        if self._qt_player is not None:
-            from PyQt6.QtMultimedia import QMediaPlayer
+    def _builtin_progress(self, position: int, duration: int, seekable: bool) -> None:
+        now, length = position // 1000, duration // 1000
+        if length > 0 and seekable:
+            self.position.setEnabled(True)
+            if not self.position.isSliderDown():
+                self.position.setValue(int(1000 * now / max(1, length)))
+            self.info.setText(f"{now // 60}:{now % 60:02d} / "
+                              f"{length // 60}:{length % 60:02d}")
+        else:
+            # a live stream has no end to seek towards
+            self.position.setEnabled(False)
+            self.info.setText(f"LIVE  {now // 60}:{now % 60:02d}")
 
-            if self._qt_player.playbackState() == \
-                    QMediaPlayer.PlaybackState.PlayingState:
-                self._qt_player.pause()
-            else:
-                self._qt_player.play()
+    def showEvent(self, event) -> None:                  # noqa: N802
+        super().showEvent(event)
+        if self._worker is not None:
+            self._worker.want_frames = True
+
+    def hideEvent(self, event) -> None:                  # noqa: N802
+        super().hideEvent(event)
+        if self._worker is not None:
+            # a player in a background tab keeps playing but draws nothing
+            self._worker.want_frames = False
+
+    def toggle_pause(self) -> None:
+        if self._worker is not None:
+            self._ask_toggle.emit()
             return
         if self._vlc_player is not None:
             self._vlc_player.pause()
@@ -233,12 +409,17 @@ class PlayerTab(QWidget):
 
     def stop(self) -> None:
         self._timer.stop()
-        if self._qt_player is not None:
-            try:
-                self._qt_player.stop()
-                self._qt_player.setSource(QUrl())
-            except Exception:                            # noqa: BLE001
-                pass
+        if self._worker is not None:
+            # Asked, not waited for: if Qt's stop sticks, only the worker
+            # waits. Kept alive until it finishes, however long that is.
+            worker, thread = self._worker, self._worker_thread
+            self._worker = self._worker_thread = None
+            worker.want_frames = False
+            if self._qt_video is not None:
+                self._qt_video.clear()
+            _ABANDONED.add((worker, thread))
+            thread.finished.connect(lambda pair=(worker, thread): _ABANDONED.discard(pair))
+            self._ask_shut_down.emit()
         if self._vlc_player is not None:
             try:
                 self._vlc_player.stop()
@@ -249,28 +430,13 @@ class PlayerTab(QWidget):
         self.closed.emit()
 
     def _seek(self, value: int) -> None:
-        if self._qt_player is not None:
-            length = self._qt_player.duration()
-            if length > 0 and self._qt_player.isSeekable():
-                self._qt_player.setPosition(int(length * value / 1000))
+        if self._worker is not None:
+            self._ask_seek.emit(value)
             return
         if self._vlc_player is not None:
             self._vlc_player.set_position(value / 1000.0)
 
     def _tick(self) -> None:
-        if self._qt_player is not None:
-            now = self._qt_player.position() // 1000
-            length = self._qt_player.duration() // 1000
-            if length > 0 and self._qt_player.isSeekable():
-                if not self.position.isSliderDown():
-                    self.position.setValue(int(1000 * now / max(1, length)))
-                self.info.setText(f"{now // 60}:{now % 60:02d} / "
-                                  f"{length // 60}:{length % 60:02d}")
-            else:
-                # a live stream has no end to seek towards
-                self.position.setEnabled(False)
-                self.info.setText(f"LIVE  {now // 60}:{now % 60:02d}")
-            return
         if self._vlc_player is None:
             return
         try:

@@ -162,6 +162,48 @@ def find_player(preferred: str = "") -> str:
 
 YTDLP_RELEASES = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/"
 
+# Run on a YouTube page: the address of its live stream, from YouTube's own
+# player. The page has already done everything YouTube demands of a client,
+# challenges included, so its player response carries an HLS address that
+# needs nothing more: audio and video together, in H.264, which Merlin's
+# built-in player decodes. No yt-dlp involved, so none of the trouble YouTube
+# makes for it.
+#
+# The response must belong to the video on screen. YouTube moves between
+# videos without loading a new page, and the one set at first load
+# (ytInitialPlayerResponse) goes stale, so the player's current one comes
+# first and anything for a different video is ignored.
+YOUTUBE_STREAM_JS = r"""
+(function () {
+  try {
+    var want = new URLSearchParams(location.search).get('v') || '';
+    if (!want) {
+      var live = location.pathname.match(/^\/live\/([\w-]{6,})/);
+      if (live) { want = live[1]; }
+    }
+    var found = [];
+    var player = document.getElementById('movie_player');
+    if (player && player.getPlayerResponse) {
+      try { found.push(player.getPlayerResponse()); } catch (e) {}
+    }
+    if (window.ytInitialPlayerResponse) { found.push(window.ytInitialPlayerResponse); }
+    for (var i = 0; i < found.length; i++) {
+      var r = found[i];
+      if (!r || !r.streamingData) { continue; }
+      var id = r.videoDetails && r.videoDetails.videoId;
+      if (want && id && id !== want) { continue; }
+      var hls = r.streamingData.hlsManifestUrl || '';
+      if (hls) {
+        return {hls: hls, title: (r.videoDetails && r.videoDetails.title) || ''};
+      }
+    }
+    return {hls: '', title: ''};
+  } catch (e) {
+    return {hls: '', title: '', error: String(e)};
+  }
+})()
+"""
+
 # Run on a YouTube page: is this a live stream, and can the engine play H.264?
 # Several signals, since YouTube is a single page application and the one set
 # on first load is not updated when you move between videos.
@@ -544,9 +586,13 @@ def resolve_stream(url: str, timeout: int = 60) -> tuple[bool, str]:
     own = os.path.join(ytdlp_folder(), _ytdlp_asset())
     if not _UPDATED_THIS_SESSION and os.path.abspath(path) == os.path.abspath(own):
         _UPDATED_THIS_SESSION = True
-        note("stream lookup: every way failed, updating yt-dlp and trying again")
+        # The nightly channel, not stable: YouTube's changes are usually met
+        # there days before a stable release. Only Merlin's own copy is moved.
+        note("stream lookup: every way failed, moving yt-dlp to its nightly "
+             "build and trying again")
         try:
-            updated = _run_helper(_ytdlp_argv(path) + ["-U"], timeout=180)
+            updated = _run_helper(_ytdlp_argv(path) + ["--update-to", "nightly"],
+                                  timeout=180)
             note("    " + (updated.stdout or updated.stderr).strip().splitlines()[-1]
                  if (updated.stdout or updated.stderr).strip() else "    (no output)")
         except Exception as exc:                  # noqa: BLE001

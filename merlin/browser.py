@@ -1427,12 +1427,13 @@ class BrowserWindow(QMainWindow):
             if view is not self.current() or view.url().toString() != page:
                 return
             self._offered_streams.add(page)
-            self._notice_page = page
             what = "live stream" if result.get("live") else "video"
-            self.notice_bar.show_notice(
+            # Straight into Merlin's player, without asking: the page cannot
+            # play this, so there is nothing to choose between.
+            self.status_label.setText(
                 f"This {what} uses H.264, which Merlin's engine was built "
-                "without. Merlin's player can try it.",
-                "Try Merlin's player")
+                "without, so it is opening in Merlin's player.")
+            self.play_stream(page)
 
         view.page().runJavaScript(media.YOUTUBE_LIVE_JS, got)
 
@@ -1445,6 +1446,34 @@ class BrowserWindow(QMainWindow):
         self._notice_page = ""
 
     def play_stream(self, page: str) -> None:
+        """Play the video on a page in Merlin's built-in player.
+
+        Asks the page first. On YouTube, the page's own player has already
+        done everything YouTube demands of a client, so for a live stream its
+        response holds an HLS address that plays as it is, and nothing needs
+        yt-dlp. Only when the page has no such address is yt-dlp asked.
+        """
+        view = self.current()
+        if (isinstance(view, WebView) and view.url().toString() == page
+                and self._is_youtube_video(view.url())):
+            def got(result):
+                stream = result.get("hls", "") if isinstance(result, dict) else ""
+                if stream:
+                    try:
+                        from . import crashlog
+
+                        crashlog.note("stream: taken from YouTube's own player")
+                    except Exception:                    # noqa: BLE001
+                        pass
+                    self._on_stream_resolved(page, True, stream)
+                else:
+                    self._play_with_ytdlp(page)
+
+            view.page().runJavaScript(media.YOUTUBE_STREAM_JS, got)
+            return
+        self._play_with_ytdlp(page)
+
+    def _play_with_ytdlp(self, page: str) -> None:
         """Find the stream on a page with yt-dlp, then play it here.
 
         Whatever is missing is fetched first, after one question: yt-dlp,
@@ -1509,7 +1538,7 @@ class BrowserWindow(QMainWindow):
             self.notice_bar.setVisible(False)
             QMessageBox.warning(self, "Could not fetch", message)
             return
-        self.play_stream(page)
+        self._play_with_ytdlp(page)
 
     def _on_stream_resolved(self, page: str, ok: bool, result: str) -> None:
         self.notice_bar.setVisible(False)
@@ -1518,7 +1547,7 @@ class BrowserWindow(QMainWindow):
             # nothing to find until Deno is there: fetch it and try again.
             # Only when it is really missing; a Deno that is present and still
             # fails, one too old on the PATH, would otherwise loop for ever.
-            self.play_stream(page)
+            self._play_with_ytdlp(page)
             return
         if not ok:
             self.status_label.setText(f"No stream found: {result}")

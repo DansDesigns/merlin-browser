@@ -6,6 +6,16 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  A live stream the engine cannot play opens in Merlin's own player by itself,
+  with no bar to click. Its address now comes from YouTube's own player in the
+  page, which has already met every demand YouTube makes of a client, so for a
+  live stream it holds an HLS address that plays as it is and yt-dlp is not
+  needed at all. Only a response for the video on screen is used: YouTube
+  changes videos without loading a new page, and the one from first load goes
+  stale. yt-dlp is asked only when the page has no stream, and when every way
+  of asking it fails, Merlin moves its own copy to yt-dlp's nightly build,
+  where YouTube fixes usually land first, and tries once more. This works the
+  same on Linux, where the same yt-dlp failure had stopped it entirely.
   Existing installs get the codec engine through an ordinary update, with no
   reinstall. After starting, Merlin checks whether its engine plays H.264; if
   not, it fetches the published build in the background, checks it against its
