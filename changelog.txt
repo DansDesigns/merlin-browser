@@ -6,6 +6,14 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  Merlin's player has controls in the manner of YouTube's: a thin red progress
+  bar that thickens under the pointer, full and red with a LIVE badge for a
+  live stream; play and pause, volume with a slider and mute, the time, close,
+  and fullscreen, over a gradient along the foot. They fade while a video plays
+  and the pointer rests, and return when it moves. The keys match: space or K
+  to pause, M to mute, F for fullscreen and Esc to leave it, the arrows to seek
+  and change the volume, and a double click for fullscreen. They are drawn by
+  Merlin, not taken from YouTube.
   Merlin's player now plays inside the page, laid over the page's own video,
   the same size, and following it as the page scrolls or resizes, instead of
   in a tab of its own. The chat and the rest of the page stay as they were,

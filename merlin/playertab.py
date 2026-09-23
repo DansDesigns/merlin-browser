@@ -166,6 +166,23 @@ class PlaybackWorker(QObject):
         else:
             self._player.play()
 
+    def set_volume(self, level: float) -> None:
+        if self._audio is not None:
+            self._audio.setVolume(max(0.0, min(1.0, level)))
+
+    def set_muted(self, muted: bool) -> None:
+        if self._audio is not None:
+            self._audio.setMuted(bool(muted))
+
+    def seek_by(self, milliseconds: int) -> None:
+        """Jump forward or back, where the stream allows it."""
+        if self._player is not None and self._player.isSeekable():
+            target = self._player.position() + milliseconds
+            length = self._player.duration()
+            if length > 0:
+                target = min(target, length)
+            self._player.setPosition(max(0, target))
+
     def seek(self, per_mille: int) -> None:
         if self._player is not None and self._player.isSeekable():
             length = self._player.duration()

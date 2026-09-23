@@ -795,6 +795,53 @@ def test_player_plays_in_the_page(app) -> None:
     window.close()
 
 
+def test_player_controls(app) -> None:
+    """The in-page player's controls behave as YouTube's do."""
+    from PyQt6.QtCore import QPoint as _P
+    from PyQt6.QtTest import QTest
+
+    from merlin.inplace import PlayerControls
+
+    controls = PlayerControls()
+    controls.resize(640, 360)
+    controls.show()
+    heard = []
+    for name in ("toggle", "fullscreen", "close_player"):
+        getattr(controls, name).connect(lambda n=name: heard.append(n))
+    controls.muted.connect(lambda m: heard.append(f"muted {m}"))
+    controls.seek_by.connect(lambda ms: heard.append(f"seek {ms}"))
+    controls.setFocus()
+    for key in (Qt.Key.Key_Space, Qt.Key.Key_K, Qt.Key.Key_M, Qt.Key.Key_F,
+                Qt.Key.Key_Left, Qt.Key.Key_Right):
+        QTest.keyClick(controls, key)
+    check("space and K pause, M mutes, F goes fullscreen, arrows seek",
+          heard == ["toggle", "toggle", "muted True", "fullscreen",
+                    "seek -5000", "seek 5000"], str(heard))
+
+    heard.clear()
+    row = controls.height() - PlayerControls.BAR // 2
+    QTest.mouseClick(controls, Qt.MouseButton.LeftButton, pos=_P(320, 150))
+    QTest.mouseClick(controls, Qt.MouseButton.LeftButton, pos=_P(30, row))
+    QTest.mouseClick(controls, Qt.MouseButton.LeftButton, pos=_P(640 - 74, row))
+    QTest.mouseClick(controls, Qt.MouseButton.LeftButton, pos=_P(640 - 30, row))
+    check("clicks on the picture, play, close and fullscreen do what they say",
+          heard == ["toggle", "toggle", "close_player", "fullscreen"], str(heard))
+
+    controls.set_progress(62000, 0, False)
+    check("a stream with no end counts as live", controls.live)
+    controls.set_progress(3000, 12000, True)
+    check("one with an end and seeking does not", not controls.live)
+
+    controls._hide.setInterval(200)
+    controls.set_playing(True)
+    wait(app, 0.5)
+    check("the controls fade while a video plays and the pointer rests",
+          not controls._shown)
+    controls.set_playing(False)
+    check("and come back when it pauses", controls._shown)
+    controls.close()
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -816,7 +863,7 @@ def main() -> int:
                  test_released_views_are_dead, test_codec_engine_swap_is_safe,
                  test_engine_download_is_checked,
                  test_engine_update_bookkeeping, test_stream_taken_from_the_page,
-                 test_player_plays_in_the_page):
+                 test_player_plays_in_the_page, test_player_controls):
         print(f"\n{test.__name__}")
         try:
             test(app)
