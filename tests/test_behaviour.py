@@ -759,6 +759,42 @@ def test_stream_taken_from_the_page(app) -> None:
     window.close()
 
 
+def test_player_plays_in_the_page(app) -> None:
+    """Merlin's player sits over the page's own video box, the same size."""
+    from merlin.inplace import InPagePlayer
+    from merlin.playertab import PlayerTab
+
+    window, _, _ = make_window(app, "t-inpage")
+    view = window.new_tab()
+    view.setHtml(
+        "<body style='margin:0'><div style='height:50px'></div>"
+        "<div id=movie_player style='margin-left:30px;width:480px;height:270px'>"
+        "</div></body>", QUrl("https://www.youtube.com/watch?v=IN"))
+    wait(app, 1.5)
+    sample = os.path.join(ROOT, "tests", "data", "h264-sample.mp4")
+    window._play_in_page(view, QUrl.fromLocalFile(sample).toString(),
+                         "https://www.youtube.com/watch?v=IN")
+    frames = []
+    player = window._inplace.get(view)
+    player._worker.image.connect(lambda _image: frames.append(1))
+    wait(app, 2.5)
+    zoom = view.zoomFactor()
+    expected = (round(30 * zoom), round(50 * zoom), round(480 * zoom), round(270 * zoom))
+    got = (player.x(), player.y(), player.width(), player.height())
+    check("the player sits exactly over the page's own video box",
+          got == expected, f"{got} for {expected}")
+    check("it plays there", len(frames) > 3, f"{len(frames)} frames")
+    check("and no separate player tab is opened",
+          not any(isinstance(window.tabs.widget(i), PlayerTab)
+                  for i in range(window.tabs.count())))
+
+    window._on_load_state(view, True)                    # a reload begins
+    wait(app, 0.3)
+    check("a reload stops it, so the page can be tried afresh",
+          view not in window._inplace)
+    window.close()
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -779,7 +815,8 @@ def main() -> int:
                  test_closing_is_prompt, test_youtube_asks_for_hls_first,
                  test_released_views_are_dead, test_codec_engine_swap_is_safe,
                  test_engine_download_is_checked,
-                 test_engine_update_bookkeeping, test_stream_taken_from_the_page):
+                 test_engine_update_bookkeeping, test_stream_taken_from_the_page,
+                 test_player_plays_in_the_page):
         print(f"\n{test.__name__}")
         try:
             test(app)

@@ -1,5 +1,5 @@
 # Merlin Browser
-![version](https://img.shields.io/badge/version-1.6.5-6f8ff0)
+![version](https://img.shields.io/badge/version-1.6.6-6f8ff0)
 
 ### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6 Requires a reinstall as there has been a fundamental change to the folder structure. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
 
@@ -123,9 +123,10 @@ publishes the build.
 #### Until a build is published
 
 If nothing is published yet for the engine version installed, the standard
-engine is kept, and a live stream it cannot play opens in Merlin's own player
-by itself. Qt's multimedia module ships its own FFmpeg, separate from the web
-engine's, and that one decodes H.264.
+engine is kept, and a live stream it cannot play is played by Merlin's own
+player instead, by itself, laid over the page's own video at the same size so
+the rest of the page stays as it was. Qt's multimedia module ships its own
+FFmpeg, separate from the web engine's, and that one decodes H.264.
 
 The stream's address comes from YouTube's own player first. The page, running
 in Merlin, has already done everything YouTube asks of a client, so for a live
@@ -258,6 +259,7 @@ merlin/
   adblock.py     filter parser, matcher and request interceptor
   media.py       codec probing and media player policy
   playertab.py   the media player tab
+  inplace.py     Merlin's player laid over a page's own video
   webapps.py     installing pages as standalone apps
   gestures.py    two-finger swipe navigation
   swipeui.py     the swipe progress arrow

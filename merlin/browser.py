@@ -410,6 +410,8 @@ class BrowserWindow(QMainWindow):
         self.notice_bar.dismissed.connect(self._notice_dismissed)
         self._notice_page = ""
         self._offered_streams: set[str] = set()
+        # Merlin's player laid over a page's own video, by view
+        self._inplace: dict = {}
         self._stream_resolved.connect(self._on_stream_resolved)
         self.engine_staged.connect(lambda: self.status_label.setText(
             "The engine that plays YouTube live is ready. It takes effect the "
@@ -951,6 +953,7 @@ class BrowserWindow(QMainWindow):
                 self._closed_tabs.append(url)
         self.tabs.removeTab(index)
         if isinstance(view, WebView):
+            self._stop_in_page(view)
             # Stop the load before the view goes: destroying a view that is
             # still fetching a page is a way to take the engine down with it.
             #
@@ -1557,15 +1560,69 @@ class BrowserWindow(QMainWindow):
                 self, "Stream", "yt-dlp could not find a stream on that page."
                 f"\n\n{result}{where}")
             return
-        # Stop the page's own player: it cannot decode the stream anyway, and
-        # leaving it running doubles the network traffic.
         view = self.current()
         if isinstance(view, WebView) and view.url().toString() == page:
-            view.page().runJavaScript(
-                "document.querySelectorAll('video').forEach(v => v.pause())")
+            # Over the page's own player, the same size, rather than in a tab
+            # of its own: the page stays as it was, and an app window, which
+            # has no tab strip, is not upset by a tab appearing in it.
+            self._play_in_page(view, result, page)
+            return
         self.open_in_player(result, title=page, builtin=True)
 
+    def _play_in_page(self, view, stream: str, page: str) -> None:
+        from . import crashlog
+        from .inplace import InPagePlayer
+
+        self._stop_in_page(view)
+        player = InPagePlayer(view, stream, page, note=crashlog.note)
+        player.closed.connect(lambda v=view: self._inplace.pop(v, None))
+        self._inplace[view] = player
+        self._check_stream_reachable(view, stream)
+
+    def _stop_in_page(self, view) -> None:
+        player = self._inplace.pop(view, None)
+        if player is not None:
+            try:
+                player.stop()
+            except RuntimeError:
+                pass                                     # already gone
+
+    def _check_stream_reachable(self, view, stream: str) -> None:
+        """Note in the log whether the stream answers outside the page.
+
+        Not needed to play; it is there so that when a stream will not play,
+        merlin-log.txt says whether YouTube refused its address outright or
+        the player had trouble with what it was sent.
+        """
+        import threading
+        import urllib.error
+        import urllib.request
+
+        from . import crashlog
+
+        try:
+            agent = view.page().profile().httpUserAgent()
+        except RuntimeError:
+            return
+
+        def check():
+            request = urllib.request.Request(stream, headers={"User-Agent": agent})
+            try:
+                with urllib.request.urlopen(request, timeout=15) as response:
+                    first = response.read(64).decode("utf-8", "replace").splitlines()
+                    crashlog.note(f"stream address answers: HTTP {response.status}, "
+                                  f"begins {first[0][:40] if first else '(empty)'!r}")
+            except urllib.error.HTTPError as exc:
+                crashlog.note(f"stream address refused: HTTP {exc.code}")
+            except Exception as exc:                     # noqa: BLE001
+                crashlog.note(f"stream address unreachable: {exc}")
+
+        threading.Thread(target=check, daemon=True).start()
+
     def _on_url(self, view: WebView, url: QUrl) -> None:
+        player = self._inplace.get(view)
+        if player is not None and url.toString() != player.page:
+            self._stop_in_page(view)
         if view is self.current() and self._notice_page and \
                 url.toString() != self._notice_page:
             self._notice_dismissed()
@@ -1638,6 +1695,17 @@ class BrowserWindow(QMainWindow):
 
     def _on_load_state(self, view: WebView, loading: bool, ok: bool = True) -> None:
         view._loading = loading
+        if not loading and ok:
+            # Also look once a page has loaded, not only when the address
+            # changes: a reload keeps the same address, and it is exactly when
+            # the page should be tried again.
+            self._schedule_live_check(view)
+        if loading:
+            # A reload is a fresh start: the page may play this time, and if
+            # it cannot, Merlin's player should be tried again rather than
+            # skipped because it was tried before.
+            self._offered_streams.discard(view.url().toString())
+            self._stop_in_page(view)
         if not loading and self._retry_without_upgrade(view, ok):
             return
         if view is self.current():
@@ -2335,6 +2403,7 @@ class BrowserWindow(QMainWindow):
         for index in range(self.tabs.count() - 1, -1, -1):
             view = self.tabs.widget(index)
             if isinstance(view, WebView):
+                self._stop_in_page(view)
                 try:
                     view.stop()
                 except Exception:                        # noqa: BLE001

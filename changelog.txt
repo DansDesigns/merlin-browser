@@ -6,6 +6,17 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  Merlin's player now plays inside the page, laid over the page's own video,
+  the same size, and following it as the page scrolls or resizes, instead of
+  in a tab of its own. The chat and the rest of the page stay as they were,
+  and an app window, which has no tab strip, is no longer upset by a player
+  tab appearing in it. A small bar along its foot pauses it or closes it.
+  Fixed: reloading a page did not try again. The check for an unplayable
+  stream only ran when the address changed, which a reload does not do, and a
+  page tried once was never tried again. Both are fixed.
+  When a stream will not play, merlin-log.txt now says whether its address
+  answered outside the page, and what the player's own error was, so a failure
+  can be told apart from a refusal.
   A live stream the engine cannot play opens in Merlin's own player by itself,
   with no bar to click. Its address now comes from YouTube's own player in the
   page, which has already met every demand YouTube makes of a client, so for a

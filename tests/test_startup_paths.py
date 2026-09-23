@@ -343,6 +343,17 @@ _detect = browser_src2.split("    def _check_live_stream(")[1].split("\n    def 
 check("a stream the engine cannot play opens in the player by itself",
       "self.play_stream(page)" in _detect and "show_notice" not in _detect)
 
+_inplace_src = open(os.path.join(root, "merlin", "inplace.py"), encoding="utf-8").read()
+check("the in-page player's worker is cut loose before it stops",
+      _inplace_src.index("signal.disconnect()") < _inplace_src.index("self._ask_shut_down.emit()"))
+_resolved = browser_src2.split("    def _on_stream_resolved(")[1].split("\n    def ")[0]
+check("a found stream plays over its page rather than in a tab",
+      "_play_in_page(view, result, page)" in _resolved)
+_loadstate = browser_src2.split("    def _on_load_state(")[1].split("\n    def ")[0]
+check("a reload looks for an unplayable stream again",
+      "_schedule_live_check(view)" in _loadstate
+      and "_offered_streams.discard" in _loadstate)
+
 # --- batch quoting hazards --------------------------------------------------
 # A PowerShell call with \" escapes inside a for /f broke install.bat twice:
 # cmd has no backslash escape, so the quotes ended the string early and the
