@@ -298,6 +298,15 @@ def build_chromium_flags(settings: cfg.Settings, args=None) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # A probe child, started to check a newly swapped engine plays H.264. It
+    # answers and leaves: no window, no single-instance handover, no log.
+    if len(argv) >= 2 and argv[0] == "--probe-codecs":
+        from . import codecengine
+
+        codecengine.probe_here(argv[1])
+        return 0
+
     # before anything else, so a crash anywhere after this is written down
     if not os.environ.get("MERLIN_CRASH_LOG"):
         from . import crashlog
@@ -307,7 +316,6 @@ def main(argv: list[str] | None = None) -> int:
     import time
 
     started = time.perf_counter()
-    argv = list(sys.argv[1:] if argv is None else argv)
     args = parse_args(argv)
 
     def mark(label: str) -> None:
@@ -370,6 +378,21 @@ def main(argv: list[str] | None = None) -> int:
                   f":{privacy.TOR_PORTS[1]}.\n\n"
                   + privacy.install_hint(), file=sys.stderr)
             return 3
+
+    # A Qt WebEngine with H.264 and AAC, staged by an earlier run, goes in
+    # here: the last moment before the engine is loaded, after which Windows
+    # would not let it be replaced. It is checked in a child process and kept
+    # only if it plays H.264; otherwise the original is put back.
+    try:
+        from . import codecengine, crashlog as _log
+
+        outcome = codecengine.apply_staged(say=_log.note)
+        if outcome:
+            _log.note(f"codec engine: {outcome}")
+    except Exception as exc:                             # noqa: BLE001
+        from . import crashlog as _log
+
+        _log.note(f"codec engine: applying failed, left as it was: {exc}")
 
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = build_chromium_flags(settings, args)
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
@@ -572,7 +595,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # refresh filter lists shortly after start-up, never blocking the UI
     QTimer.singleShot(4000, filter_loader.refresh_if_stale)
-    QTimer.singleShot(1200, window.probe_codecs)
+    QTimer.singleShot(
+        1200, lambda: window.probe_codecs(
+            then=lambda found: _maybe_stage_engine(window, found)))
     if settings.get("check_updates_on_start"):
         QTimer.singleShot(6000, lambda: window.updater.check(quiet=True))
     window.status_label.setText("Loading filter lists...")
@@ -582,10 +607,86 @@ def main(argv: list[str] | None = None) -> int:
 
     app.aboutToQuit.connect(lambda: _shut_down(app, profile))
     code = app.exec()
+    _leave(code, settings, history)
+    return code
+
+
+def _maybe_stage_engine(window, found) -> None:
+    """If this engine lacks H.264, fetch one that has it, for the next start.
+
+    Runs after the start-up codec check, so an ordinary start costs nothing
+    more: most of the time the engine already has the codecs, the build was
+    already fetched, or nothing is published for this version and that was
+    checked less than a day ago. The download runs off the UI thread.
+    """
+    import threading
+
+    from PyQt6.QtWebEngineCore import qWebEngineVersion
+
+    from . import codecengine, crashlog
+
+    codecs = dict((found or {}).get("codecs", []))
+    if codecs.get("H.264 / AVC", "no") != "no" and codecs.get("AAC", "no") != "no":
+        return
+    version = qWebEngineVersion()
+    if not codecengine.should_stage(version):
+        return
+
+    def work():
+        try:
+            outcome = codecengine.stage(version, say=crashlog.note)
+        except Exception as exc:                         # noqa: BLE001
+            crashlog.note(f"codec engine: staging failed: {exc}")
+            return
+        if outcome == "staged":
+            window.engine_staged.emit()
+
+    threading.Thread(target=work, daemon=True).start()
+
+
+def _leave(code: int, settings, history) -> None:
+    """End the process directly, once everything is saved.
+
+    By this point the windows have closed, the session is written, the pages
+    and the profile are released. What remains is Python's own interpreter
+    teardown, which destroys the leftover Qt objects in no fixed order, and on
+    Windows that was crashing: merlin-log.txt showed an access violation right
+    after "process exiting", the same one it had recorded nine times over
+    two days. Windows then holds the process while it writes a crash report,
+    which is why closing seemed slow.
+
+    Nothing still needs that teardown, so it is skipped. Settings are saved
+    and the history database closed first, and the engine gets a moment to
+    finish writing cookies before the process ends.
+    """
+    import time
+
+    from PyQt6.QtCore import QCoreApplication
+
     from . import crashlog
 
+    try:
+        settings.save()
+    except Exception as exc:                             # noqa: BLE001
+        crashlog.note(f"shutdown: saving settings failed: {exc}")
+    try:
+        history.conn.close()
+    except Exception:                                    # noqa: BLE001
+        pass
+
+    # a short grace for the engine's own writes, such as cookies
+    deadline = time.monotonic() + 0.3
+    while time.monotonic() < deadline:
+        QCoreApplication.processEvents()
+        time.sleep(0.02)
+
     crashlog.note("shutdown: finished, process exiting")
-    return code
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:                                # noqa: BLE001
+            pass
+    os._exit(code)
 
 
 def _shut_down(app, profile) -> None:

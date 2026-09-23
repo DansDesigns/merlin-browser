@@ -63,6 +63,9 @@ if exist "%BUILDDIR%" rmdir /s /q "%BUILDDIR%"
 if exist "%SRC%\dist\MerlinSetup.exe" del /f /q "%SRC%\dist\MerlinSetup.exe"
 
 echo.
+rem Everything install.bat reads from its own folder has to be carried here,
+rem since MerlinSetup.exe is that folder once unpacked. A test checks the two
+rem lists agree: tools\ went missing once, and with it the codec engine step.
 echo   Building. Two or three minutes.
 echo.
 %PY% -m PyInstaller --noconfirm --onefile --windowed --name MerlinSetup ^
@@ -74,6 +77,11 @@ echo.
   --add-data "%SRC%\version.txt;." ^
   --add-data "%SRC%\requirements.txt;." ^
   --add-data "%SRC%\merlin;merlin" ^
+  --add-data "%SRC%\tools;tools" ^
+  --add-data "%SRC%\uninstall-gui.py;." ^
+  --add-data "%SRC%\uninstall-gui.bat;." ^
+  --add-data "%SRC%\changelog.txt;." ^
+  --add-data "%SRC%\README.md;." ^
   --distpath "%SRC%\dist" --workpath "%BUILDDIR%" --specpath "%BUILDDIR%" ^
   "%SRC%\install-gui.py"
 if errorlevel 1 goto :fail

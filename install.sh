@@ -269,6 +269,30 @@ if [[ "$MODE" == "system" ]]; then
   esac
 fi
 
+# Qt WebEngine with H.264 and AAC, done automatically, so YouTube live plays in
+# the page. The pip engine is built without them; this fetches the matching
+# build published on the Merlin repository, checks its SHA-256, and swaps it in
+# only if it really plays H.264 and AAC. A distribution engine cannot be swapped,
+# its files belong to the package manager, so there it is only checked. Never
+# fatal: with nothing published, the standard engine stays.
+if [[ "$MODE" == "venv" ]]; then
+  say "      Qt WebEngine with H.264 and AAC, for YouTube live"
+  # The exit code is caught rather than left to set -e, which would stop the
+  # whole install on anything but 0, including 2, the ordinary "nothing
+  # published for this version yet".
+  codec_rc=0
+  "$VPY" "$SRC/tools/use-codec-engine.py" --auto "" \
+      "$LIB/engine-cache" || codec_rc=$?
+  case $codec_rc in
+    0) say "      Done: YouTube live plays in the page." ;;
+    2) say "      Standard engine kept for now." ;;
+    *) say "      The engine with the codecs did not pass, so the standard one stays." ;;
+  esac
+else
+  "$VPY" "$SRC/tools/use-codec-engine.py" --check 2>/dev/null \
+      | sed 's/^/      /' || true
+fi
+
 # python-vlc is only useful if libvlc is on the system already
 if command -v vlc >/dev/null 2>&1 || [[ -e /usr/lib/x86_64-linux-gnu/libvlc.so.5 ]]; then
   if ask "      libVLC found. Add the python-vlc bindings to the venv (optional)?"; then

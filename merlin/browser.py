@@ -219,6 +219,8 @@ class BrowserWindow(QMainWindow):
     # Results from worker threads. Emitting a signal from another thread
     # queues it onto this window's thread, so the slots can touch widgets.
     _stream_resolved = pyqtSignal(str, bool, str)    # page, ok, stream or why
+    # a Qt WebEngine with H.264 and AAC has been fetched, for the next start
+    engine_staged = pyqtSignal()
     _tools_fetched = pyqtSignal(str, bool, str)      # page, ok, message
 
     def __init__(self, app: QApplication, settings: cfg.Settings,
@@ -409,6 +411,9 @@ class BrowserWindow(QMainWindow):
         self._notice_page = ""
         self._offered_streams: set[str] = set()
         self._stream_resolved.connect(self._on_stream_resolved)
+        self.engine_staged.connect(lambda: self.status_label.setText(
+            "The engine that plays YouTube live is ready. It takes effect the "
+            "next time Merlin starts."))
         self._tools_fetched.connect(self._on_tools_fetched)
 
         layout.addWidget(self.notice_bar)
@@ -1425,9 +1430,9 @@ class BrowserWindow(QMainWindow):
             self._notice_page = page
             what = "live stream" if result.get("live") else "video"
             self.notice_bar.show_notice(
-                f"This {what} uses H.264, which the page's video engine was "
-                "built without. Merlin's player can play it.",
-                "Play in Merlin's player")
+                f"This {what} uses H.264, which Merlin's engine was built "
+                "without. Merlin's player can try it.",
+                "Try Merlin's player")
 
         view.page().runJavaScript(media.YOUTUBE_LIVE_JS, got)
 
@@ -1661,8 +1666,19 @@ class BrowserWindow(QMainWindow):
         out of the timer callback, which ends the process. That is the crash
         after closing a tab and switching between two that were still loading.
         """
-        if view is None:
+        if view is None or getattr(self, "_shutting_down", False):
             return False
+        # Ask sip whether the C++ object still exists. Finding the view in the
+        # tab list is not enough: the list holds the Python wrapper, which
+        # outlives the object it wraps, so a view released during shutdown was
+        # still "found" and a deferred load then touched freed memory.
+        try:
+            from PyQt6 import sip
+
+            if sip.isdeleted(view):
+                return False
+        except ImportError:
+            pass
         try:
             return self.tabs.indexOf(view) >= 0
         except RuntimeError:
@@ -2284,6 +2300,8 @@ class BrowserWindow(QMainWindow):
         it waits on them at exit. Left to the interpreter, those are destroyed
         in no particular order, which is one way a close can hang for seconds.
         """
+        # from here on nothing deferred may start work in this window
+        self._shutting_down = True
         released = 0
         for index in range(self.tabs.count() - 1, -1, -1):
             view = self.tabs.widget(index)

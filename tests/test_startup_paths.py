@@ -268,6 +268,68 @@ check("shutdown is bounded by a watchdog",
       "watchdog = threading.Timer(6.0, give_up)" in app_src
       and "app.aboutToQuit.connect" in app_src)
 
+check("a clean shutdown skips interpreter teardown, after saving",
+      "def _leave(" in app_src and "os._exit(code)" in app_src
+      and "settings.save()" in app_src.split("def _leave(")[1][:2000])
+check("view checks ask sip whether the object still exists",
+      "sip.isdeleted(view)" in browser_src2)
+check("the installer puts in a codec engine on every install",
+      "use-codec-engine.py" in bat_src)
+
+# The codec step is never fatal: set -e must not see its exit code, and the
+# batch file must not leave its error level for a later check to misread.
+sh_src = open(os.path.join(root, "install.sh"), encoding="utf-8").read()
+check("the codec step can never stop the Linux install",
+      "|| codec_rc=$?" in sh_src)
+_codec_block = bat_src.split("use-codec-engine.py\" --auto")[1][:900]
+check("the codec step leaves no error level behind on Windows",
+      "ver >nul" in _codec_block)
+check("both installers fetch the codec engine automatically",
+      "use-codec-engine.py\" --auto" in bat_src
+      and "use-codec-engine.py\" --auto" in sh_src)
+
+# MerlinSetup.exe is install.bat's own folder once unpacked, so every file the
+# installer reads from %SRC% has to be bundled into it. When tools\ was left
+# out, the codec engine step silently never ran for anyone using the setup.
+_setup_src = open(os.path.join(root, "tools", "build-installer.bat"),
+                  encoding="utf-8").read()
+_bundled = _re.findall(r'--add-data "%SRC%\\([^;"]+);', _setup_src)
+_read = sorted(set(_re.findall(r'%SRC%\\([A-Za-z0-9_.\-\\]+)', bat_src)))
+_uncarried = [p for p in _read
+              if not any(p == b or p.startswith(b + "\\") for b in _bundled)]
+check("MerlinSetup.exe carries every file install.bat reads",
+      not _uncarried, ", ".join(_uncarried))
+
+# The engine must match the Qt actually running (qVersion), not the version
+# PyQt6 was compiled against (QT_VERSION_STR): in PyQt6 6.11 those differ.
+_wf = open(os.path.join(root, ".github", "workflows", "build-webengine-codecs.yml"),
+           encoding="utf-8").read()
+check("the engine workflow builds the running Qt, not the compiled-against one",
+      "qVersion()" in _wf and "QT_VERSION_STR" not in _wf)
+check("the workflow checks H.264 plays before it publishes",
+      _wf.index("use-codec-engine.py \"$env:GITHUB_WORKSPACE\\engine\"")
+      < _wf.index("--package"))
+check("the workflow asks for the proprietary codecs",
+      "-DQT_FEATURE_webengine_proprietary_codecs=ON" in _wf)
+check("the workflow keeps WebRTC, PDF and the spellchecker",
+      not any(f"webengine_{f}=OFF" in _wf
+              for f in ("webrtc", "printing_and_pdf", "spellchecker", "extensions")))
+
+# Merlin applies a staged engine at start-up. That only works before the
+# engine is loaded: afterwards Windows will not let it be replaced.
+_main = app_src.split("def main(")[1]
+check("a staged engine is applied before the engine is first imported",
+      _main.index("codecengine.apply_staged") < _main.index("from PyQt6.QtWebEngineCore"))
+check("the probe child is answered before the log and single instance",
+      _main.index('"--probe-codecs"') < _main.index("crashlog.enable()")
+      and _main.index('"--probe-codecs"') < _main.index("single.hand_off"))
+_ce = open(os.path.join(root, "merlin", "codecengine.py"), encoding="utf-8").read()
+check("engine files are replaced by rename, never written in place",
+      "os.replace(fresh, destination)" in _ce
+      and "_replace_file(os.path.join(prefix" in _ce)
+check("a staged engine waits while another Merlin has the engine open",
+      _ce.index("engine_in_use(qt_folder())") < _ce.index('version = staged.get("version"'))
+
 # --- batch quoting hazards --------------------------------------------------
 # A PowerShell call with \" escapes inside a for /f broke install.bat twice:
 # cmd has no backslash escape, so the quotes ended the string early and the

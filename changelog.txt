@@ -6,6 +6,55 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  Existing installs get the codec engine through an ordinary update, with no
+  reinstall. After starting, Merlin checks whether its engine plays H.264; if
+  not, it fetches the published build in the background, checks it against its
+  SHA-256, and tells you it takes effect next time. At that next start it goes
+  in before the engine loads, is checked in a separate process, and is kept
+  only if it plays H.264 and AAC; otherwise the original goes back. A version
+  that fails is not tried again, and "nothing published yet" is rechecked at
+  most once a day, so an ordinary start costs nothing extra. Files are swapped
+  by rename, so a web app window open at the time keeps working, and on Windows
+  the swap waits for a start where no other Merlin has the engine open.
+  The download checks and the rollback are now in merlin/codecengine.py, one
+  implementation for the installers, the workflow and Merlin itself.
+  tools/build-webengine-codecs.bat is gone: the GitHub workflow does the build.
+  The codec engine is built by GitHub Actions rather than on anyone's own
+  machine. The workflow builds the Qt WebEngine version pip installs for
+  Merlin, checks on Windows that it really plays H.264 and AAC, and publishes
+  it where the installers fetch it. It checks weekly and builds only for a new
+  version. The steps that make Qt WebEngine build on GitHub's runners follow
+  danxdigitalsolution-stack/web-engine, whose public workflow found them.
+  Fixed: the local build script would have built against the Qt version PyQt6
+  was compiled with rather than the one it runs on. In PyQt6 6.11 those are
+  6.11.0 and 6.11.2, and the engine has to match the running one exactly.
+  The installers set up Qt WebEngine with H.264 and AAC on their own. After
+  installing PyQt6 they fetch the matching build published on this repository,
+  check it against its SHA-256, swap it in and keep it only if it really plays
+  H.264 and AAC. Nothing to do by hand, and never a reason for an install to
+  fail. The build script packages its result as that release asset.
+  Fixed: every Linux install into a virtualenv would have stopped at that
+  step, because set -e treated its "nothing published yet" answer as an error.
+  Fixed: MerlinSetup.exe did not carry the tools folder, the graphical
+  uninstaller or the changelog, so installs from it had no codec step and no
+  graphical uninstaller. A test now checks it carries everything install.bat
+  reads.
+  YouTube live can play in Merlin's own engine, as it does in Brave. Brave is
+  Chromium built with H.264 and AAC compiled in; the PyQt6 wheels are built
+  without them. tools\build-webengine-codecs.bat builds the matching Qt
+  WebEngine with -webengine-proprietary-codecs, and tools\use-codec-engine.py
+  swaps it in, keeping it only if it really plays H.264 and AAC and putting
+  the original back otherwise. The installer re-applies it after a reinstall.
+  On Linux, --system-qt already gives an engine with the codecs.
+  Fixed: Merlin crashed as it exited on Windows. The shutdown itself finished
+  cleanly, then Python's own teardown destroyed the leftover Qt objects in no
+  fixed order and hit an access violation. merlin-log.txt showed it nine times
+  over two days, and Windows holding the process to record each crash is very
+  probably why closing seemed slow. Merlin now saves everything and ends the
+  process directly once shutdown is done.
+  Fixed: a restored tab could start loading during shutdown, on a page already
+  released. Checks for whether a tab still exists now ask whether the object
+  itself does, not just whether the tab list still holds it.
   Fixed: YouTube live still failed with "Requested format is not available"
   once Deno was in place. YouTube's ordinary web client now gets only SABR
   formats, which yt-dlp cannot download, and yt-dlp's own guide gives the way

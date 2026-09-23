@@ -237,6 +237,30 @@ echo        Checking the engine imports
 "%VPY%" -c "import PyQt6.QtWebEngineWidgets; from PyQt6.QtCore import QT_VERSION_STR; print('        Qt ' + QT_VERSION_STR + ' ready')"
 if errorlevel 1 goto :pipfail
 
+rem Qt WebEngine with H.264 and AAC, done automatically. The engine from the
+rem wheel is built without them, which is why YouTube live will not play. This
+rem fetches the matching build published on the Merlin repository, checks it
+rem against its published SHA-256, and swaps it in only if it really plays H.264
+rem and AAC, putting the original back otherwise. A local build named with
+rem MERLIN_WEBENGINE_CODECS is used first. The builds themselves are made by
+rem .github\workflows\build-webengine-codecs.yml. It runs on every install, because a fresh virtualenv brings
+rem back the standard engine. Never fatal: with nothing published for this
+rem version, the standard engine stays and YouTube live offers Merlin's player.
+call :bar
+echo.
+echo        Qt WebEngine with H.264 and AAC, for YouTube live
+"%VPY%" "%SRC%\tools\use-codec-engine.py" --auto "" "%TARGET%\engine-cache"
+if errorlevel 2 (
+  echo        Standard engine kept for now.
+) else if errorlevel 1 (
+  echo        [^^!] The engine with the codecs did not pass, so the standard one stays.
+) else (
+  echo        Done: YouTube live plays in the page.
+)
+rem Leave no error level behind: the codec step is never a failure of the
+rem install, and a later "if errorlevel 1" must not read its 1 or 2 as one.
+ver >nul
+
 goto :depsdone
 
 :venvfail

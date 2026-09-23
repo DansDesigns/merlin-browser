@@ -1253,6 +1253,7 @@ class SettingsDialog(QDialog):
         status.setWordWrap(True)
         status.setStyleSheet("color:#9a9ba1; font-size:12px;")
         layout.addWidget(status)
+
         layout.addStretch(1)
         return page
 

@@ -1,5 +1,5 @@
 # Merlin Browser
-![version](https://img.shields.io/badge/version-1.6.1-6f8ff0)
+![version](https://img.shields.io/badge/version-1.6.4-6f8ff0)
 
 ### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6 Requires a reinstall as there has been a fundamental change to the folder structure. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
 
@@ -51,7 +51,10 @@ Chromium through Qt WebEngine.
 
 **Media**
 
-- Plays whatever the engine supports, and hands the rest to mpv or VLC
+- Plays H.264 and AAC in the page, YouTube live included, through a codec
+  engine the installer and updater put in place on their own
+- Plays whatever else the engine supports, and hands the rest to Merlin's own
+  player, mpv or VLC
 - Three playback modes: player embedded in a tab, player in its own window, or
   in-process libVLC
 - `--codecs` reports what your build can decode
@@ -74,26 +77,60 @@ Chromium through Qt WebEngine.
 - Python 3.9 or newer
 - PyQt6 and PyQt6-WebEngine
 - Optional: mpv or VLC for media the engine cannot decode. Merlin's own player
-  covers most of it with nothing installed, and yt-dlp is fetched on first use
+  covers most of it with nothing installed
 
 ### YouTube live and other H.264 streams
 
-The web engine in the pip wheels is built without H.264 and AAC, which are
-patent-encumbered. Ordinary YouTube videos still play, because YouTube serves
-them as VP9, but most live streams are only offered in H.264, so they fail.
+Ordinary YouTube videos play in any Qt WebEngine because YouTube serves them as
+VP9. Most live streams are only offered in H.264 with AAC audio, and the engine
+in the PyQt6 wheels is built without those: H.264 and AAC are patented, so Qt
+and Chromium leave them out by default.
 
-Qt's multimedia module ships its own FFmpeg, separate from the web engine's,
-and that one does decode H.264. When Merlin sees a live stream the page cannot
-play, a bar above the page offers to play it in Merlin's player instead.
-yt-dlp finds the stream on the page. For YouTube it also needs a JavaScript
-runtime: since late 2025 YouTube only gives its video formats to a client that
-can solve a JavaScript challenge, and without one yt-dlp sees nothing but
-thumbnails. Merlin uses Deno, which yt-dlp recommends and which runs the
-challenge with no file or network access. If either is missing, Merlin asks
-once and fetches the official builds from GitHub (yt-dlp about 3 MB, Deno
-about 40 MB) into its own tools folder, where they can be kept up to date. It is deliberately not built into Merlin.exe:
-YouTube changes often and yt-dlp changes to match, so a frozen copy would go
-stale. Ctrl+Shift+P does the same for any page.
+Brave plays them because it is Chromium built with the codecs compiled in, and
+Merlin does the same. Nothing is asked of the user:
+
+- **New installs**: after installing PyQt6, the installer fetches a build of
+  the same Qt WebEngine version with H.264 and AAC, published on this
+  repository as a release tagged `engine-<version>`. It checks the download
+  against its published SHA-256 before unpacking it, swaps it in, starts it,
+  and keeps it only if it really plays H.264 and AAC; otherwise the original
+  goes straight back. A failure here never stops an install.
+- **Existing installs**: after starting, Merlin checks whether its engine
+  plays H.264. If not, it fetches the published build in the background and
+  puts it in at the next start, before the engine loads, with the same checks
+  and rollback.
+- **Linux with the distribution's engine**: distribution builds already have
+  the codecs, so there is nothing to fetch.
+
+About Merlin shows "licensed codecs on" once the engine has them.
+
+#### Where the builds come from
+
+GitHub builds them. `.github/workflows/build-webengine-codecs.yml` runs on
+GitHub's own Windows machines, so nobody compiles Chromium on their computer.
+It builds exactly the Qt and Qt WebEngine versions pip installs for Merlin,
+checks the result plays H.264 and AAC, and only then publishes it. It checks
+once a week and builds only when PyQt6 has moved to a version with nothing
+published yet; it can also be started from the Actions tab. The steps that make
+Qt WebEngine build on GitHub's runners follow
+[danxdigitalsolution-stack/web-engine](https://github.com/danxdigitalsolution-stack/web-engine),
+whose public workflow found them first.
+
+Publishing binaries with H.264 and AAC in them carries patent licensing
+obligations, which is why Qt does not do it. That is a decision for whoever
+publishes the build.
+
+#### Until a build is published
+
+If nothing is published yet for the engine version installed, the standard
+engine is kept, and on a live stream a bar above the page offers Merlin's own
+player instead. Qt's multimedia module ships its own FFmpeg, separate from the
+web engine's, and that one decodes H.264. yt-dlp finds the stream on the page,
+and for YouTube it needs a JavaScript runtime, Deno, to solve YouTube's
+challenge. If either is missing, Merlin asks once and fetches the official
+builds from GitHub (yt-dlp about 3 MB, Deno about 40 MB) into its own tools
+folder. YouTube works hard against yt-dlp, so treat this as a fallback rather
+than the fix. Ctrl+Shift+P does the same for any page.
 
 # Installation
 
@@ -118,7 +155,7 @@ Two modes are available:
 | Mode | Engine | H.264 and AAC |
 |---|---|---|
 | `--system-qt` | your distribution's Qt WebEngine | yes |
-| `--venv-only` | PyQt6 from pip | no |
+| `--venv-only` | PyQt6 from pip | yes, once a codec build is published |
 
 `--system-qt` is the default when a system PyQt6 is present, because
 distribution builds enable the licensed codecs. Add `--yes` to skip the prompts.
@@ -144,8 +181,9 @@ Per-user, no administrator rights. It builds a virtualenv in
 `%LOCALAPPDATA%\Programs\Merlin`, installs PyQt6 into it, builds `Merlin.exe`
 with Merlin's icon, and adds a Start Menu entry.
 
-pip wheels do not include H.264, AAC or HEVC, and there is no distribution
-package on Windows, so install a player for those formats:
+pip wheels do not include H.264 or AAC; the installer fetches the codec engine
+described above to add them. HEVC is not included either way, so for that
+install a player:
 
 ```
 winget install mpv.net
@@ -199,6 +237,8 @@ merlin-browser [URL ...]
 | History, filter lists | `~/.local/share/merlin` | `%LOCALAPPDATA%\Merlin\data` |
 | Cache | `~/.cache/merlin` | `%LOCALAPPDATA%\Merlin\cache` |
 | Log, `merlin-log.txt` | `~/.local/state/merlin` | `Documents\Merlin` |
+| yt-dlp and Deno | `~/.local/share/merlin/tools` | `%LOCALAPPDATA%\Merlin\tools` |
+| Codec engine updates | `~/.local/share/merlin/engine` | `%LOCALAPPDATA%\Merlin\engine` |
 
 Settings are a single `settings.json`; every option in the dialog is a key in
 that file.
@@ -231,9 +271,15 @@ merlin/
   dictation.py   local speech to text for the search box
   single.py      one window, so links reuse the browser already open
   updater.py     version check and in-place update
+  codecengine.py fetching, checking and swapping in the codec engine
+  crashlog.py    merlin-log.txt, and the stack if Merlin is ever killed
+  stdlib_anchor.py  standard modules Merlin.exe carries for future updates
 tests/           start-up path checks, and behaviour tests that run the
                  real window against the real engine
-tools/           the logo generator and the installer build script
+tools/           the logo generator, the installer build script, the codec
+                 engine tool the installers use, and the stdlib anchor generator
+.github/workflows/
+                 builds and publishes the codec engine on GitHub
 changelog.txt    what changed in each release
 ```
 
@@ -246,6 +292,7 @@ changelog.txt    what changed in each release
 - **[mpv](https://mpv.io/)**, **[VLC](https://www.videolan.org/)** and **[FFmpeg](https://ffmpeg.org/)** — optional media playback
 - **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** — fetched on first use, finds the stream on a page for the player
 - **[Deno](https://deno.com/)** — fetched on first use, the JavaScript runtime yt-dlp needs for YouTube
+- **[GitHub Actions](https://github.com/features/actions)** — builds the Qt WebEngine with H.264 and AAC that the installers fetch
 
 The filter syntax follows the format established by
 [Adblock Plus](https://adblockplus.org/filter-cheatsheet) and extended by
@@ -279,6 +326,10 @@ beside it when they are present. An update replaces those files and takes
 effect the next time Merlin starts; if they are missing or damaged the built-in
 copy is used, so a failed update cannot stop Merlin running. The executable
 only needs rebuilding when a dependency changes, which the changelog will say.
+
+The codec engine arrives the same way, with no reinstall: it is fetched while
+Merlin runs and put in place at the next start. On Windows it waits for a start
+when no other Merlin window, a web app for instance, has the engine open.
 
 ## Licence
 

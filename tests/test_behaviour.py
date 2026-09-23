@@ -531,6 +531,200 @@ def test_youtube_asks_for_hls_first(app) -> None:
         _media.ytdlp_path, _media.deno_path, _media._ytdlp_argv = saved
 
 
+def test_released_views_are_dead(app) -> None:
+    """A page released at shutdown is not mistaken for a live one."""
+    from PyQt6.QtCore import QCoreApplication, QEvent
+
+    window, _, _ = make_window(app, "t-released")
+    window.new_tab(page("a"))
+    for url in ("https://example.org/two", "https://example.net/three"):
+        window.new_tab(url, background=True, defer=True)
+    wait(app, 1.0)
+    view = window.tabs.widget(2)
+    check("a restored tab counts as alive before shutdown",
+          window.view_is_alive(view))
+    window.tabs.setCurrentIndex(2)       # queues its load for the next turn
+    window.release_pages()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    check("once released it no longer counts as alive",
+          not window.view_is_alive(view))
+    errors = []
+    saved = sys.excepthook
+    sys.excepthook = lambda *a: errors.append(a[1])
+    try:
+        wait(app, 0.4)                   # let the queued load run
+    finally:
+        sys.excepthook = saved
+    check("the queued load finds nothing to do, and raises nothing",
+          not errors, str(errors[:1]))
+
+
+def test_codec_engine_swap_is_safe(app) -> None:
+    """A Qt WebEngine that lacks H.264 is refused and nothing is left changed."""
+    import importlib.util
+    import shutil as _shutil
+
+    spec = importlib.util.spec_from_file_location(
+        "use_codec_engine", os.path.join(ROOT, "tools", "use-codec-engine.py"))
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+
+    check("the engine in use is recognised as lacking H.264",
+          not tool.has_codecs({"h264": "", "aac": "", "mse_h264": False}))
+    check("an engine that plays both would be accepted",
+          tool.has_codecs({"h264": "probably", "aac": "probably", "mse_h264": True}))
+
+    scratch = tempfile.mkdtemp(prefix="codec-prefix-")
+    os.makedirs(os.path.join(scratch, "lib", "cmake", "Qt6WebEngineCore"))
+    with open(os.path.join(scratch, "lib", "cmake", "Qt6WebEngineCore",
+                           "Qt6WebEngineCoreConfigVersion.cmake"), "w") as handle:
+        handle.write('set(PACKAGE_VERSION "6.9.9")')
+    check("a build's version is read from its CMake files",
+          tool.prefix_version(scratch) == "6.9.9")
+    files = tool.engine_files(scratch, installed=False)
+    check("a folder without the engine library still reserves its place",
+          len(files) >= 2 and "WebEngineCore" in files[0])
+    _shutil.rmtree(scratch, ignore_errors=True)
+
+
+def test_engine_download_is_checked(app) -> None:
+    """A published engine is used only if it matches its published checksum."""
+    import hashlib
+    import http.server
+    import importlib.util
+    import io
+    import tarfile
+    import threading
+    import zipfile
+
+    spec = importlib.util.spec_from_file_location(
+        "use_codec_engine", os.path.join(ROOT, "tools", "use-codec-engine.py"))
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+
+    www = tempfile.mkdtemp(prefix="engine-releases-")
+    version = "6.99.9"
+    name = tool.asset_name(version)
+
+    def publish(folder, members, tamper=False):
+        release = os.path.join(www, folder, f"engine-{version}")
+        os.makedirs(release, exist_ok=True)
+        path = os.path.join(release, name)
+        if name.endswith(".zip"):
+            with zipfile.ZipFile(path, "w") as bundle:
+                for member, data in members:
+                    bundle.writestr(member, data)
+        else:
+            with tarfile.open(path, "w:gz") as bundle:
+                for member, data in members:
+                    info = tarfile.TarInfo(member)
+                    info.size = len(data)
+                    bundle.addfile(info, io.BytesIO(data))
+        digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
+        with open(path + ".sha256", "w") as out:
+            out.write(f"{digest}  {name}\n")
+        if tamper:
+            with open(path, "ab") as out:
+                out.write(b"altered after publishing")
+
+    publish("good", [("resources/icudtl.dat", b"x" * 64)])
+    publish("tampered", [("resources/icudtl.dat", b"x" * 64)], tamper=True)
+    publish("hostile", [("../../escaped.txt", b"owned")])
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=www, **k)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    saved = os.environ.get("MERLIN_ENGINE_URL")
+    try:
+        os.environ["MERLIN_ENGINE_URL"] = base + "/good"
+        prefix, _ = tool.fetch_published(version, tempfile.mkdtemp())
+        check("a published build that matches its checksum is unpacked",
+              bool(prefix) and os.path.isfile(
+                  os.path.join(prefix, "resources", "icudtl.dat")))
+
+        os.environ["MERLIN_ENGINE_URL"] = base + "/tampered"
+        cache = tempfile.mkdtemp()
+        prefix, why = tool.fetch_published(version, cache)
+        check("a download that does not match its checksum is thrown away",
+              not prefix and "checksum" in why
+              and not os.path.exists(os.path.join(cache, name)), why)
+
+        os.environ["MERLIN_ENGINE_URL"] = base + "/hostile"
+        prefix, why = tool.fetch_published(version, tempfile.mkdtemp())
+        check("an archive that writes outside its folder is refused",
+              not prefix and "unsafe" in why, why)
+
+        os.environ["MERLIN_ENGINE_URL"] = base + "/nothing"
+        prefix, why = tool.fetch_published(version, tempfile.mkdtemp())
+        check("with nothing published it says so, without failing",
+              not prefix and "published" in why, why)
+    finally:
+        server.shutdown()
+        if saved is None:
+            os.environ.pop("MERLIN_ENGINE_URL", None)
+        else:
+            os.environ["MERLIN_ENGINE_URL"] = saved
+
+
+def test_engine_update_bookkeeping(app) -> None:
+    """Staging is asked for only when it can help, and failures are not retried."""
+    import json as _json
+    import time as _time
+
+    from merlin import codecengine as ce
+
+    saved = {k: os.environ.get(k) for k in ("XDG_DATA_HOME", "LOCALAPPDATA")}
+    scratch = tempfile.mkdtemp(prefix="engine-state-")
+    os.environ["XDG_DATA_HOME"] = scratch
+    os.environ["LOCALAPPDATA"] = scratch
+    real_can = ce.can_replace_engine
+    ce.can_replace_engine = lambda: True
+    try:
+        check("a new engine version is worth looking for", ce.should_stage("6.99.1"))
+
+        ce._write_state({"none_published": {"version": "6.99.1", "at": _time.time()}})
+        check("nothing published is not asked again the same day",
+              not ce.should_stage("6.99.1"))
+        ce._write_state({"none_published": {"version": "6.99.1",
+                                            "at": _time.time() - 90000}})
+        check("but is asked again the next day", ce.should_stage("6.99.1"))
+
+        ce._write_state({"failed": ["6.99.1"]})
+        check("a version that failed is not tried again",
+              not ce.should_stage("6.99.1"))
+        check("while a newer one still is", ce.should_stage("6.99.2"))
+
+        ce._write_state({"staged": {"version": "6.99.2", "prefix": scratch}})
+        real_in_use = ce.engine_in_use
+        ce.engine_in_use = lambda target: True
+        try:
+            outcome = ce.apply_staged(say=lambda _t: None)
+        finally:
+            ce.engine_in_use = real_in_use
+        state = _json.load(open(ce._state_file()))
+        check("with the engine held by another Merlin, the update waits",
+              outcome == "" and state.get("staged", {}).get("version") == "6.99.2"
+              and "6.99.2" not in state.get("failed", []))
+
+        ce._write_state({})
+        check("with nothing staged, a start does nothing",
+              ce.apply_staged(say=lambda _t: None) == "")
+    finally:
+        ce.can_replace_engine = real_can
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -548,7 +742,10 @@ def main() -> int:
                  test_builtin_player_decodes_h264,
                  test_youtube_needs_a_runtime,
                  test_slot_errors_are_not_fatal, test_notice_bar_is_readable,
-                 test_closing_is_prompt, test_youtube_asks_for_hls_first):
+                 test_closing_is_prompt, test_youtube_asks_for_hls_first,
+                 test_released_views_are_dead, test_codec_engine_swap_is_safe,
+                 test_engine_download_is_checked,
+                 test_engine_update_bookkeeping):
         print(f"\n{test.__name__}")
         try:
             test(app)
