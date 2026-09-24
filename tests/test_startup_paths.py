@@ -354,7 +354,7 @@ check("the in-page player's worker is cut loose before it stops",
       _inplace_src.index("signal.disconnect()") < _inplace_src.index("self._ask_shut_down.emit()"))
 _resolved = browser_src2.split("    def _on_stream_resolved(")[1].split("\n    def ")[0]
 check("a found stream plays over its page rather than in a tab",
-      "_play_in_page(view, result, page)" in _resolved)
+      "_play_in_page(view, result, page, source)" in _resolved)
 _loadstate = browser_src2.split("    def _on_load_state(")[1].split("\n    def ")[0]
 check("a reload looks for an unplayable stream again",
       "_schedule_live_check(view)" in _loadstate

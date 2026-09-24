@@ -6,6 +6,17 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  Merlin's player notices a stream that never starts. YouTube can hand out a
+  stream's playlist and refuse the video in it, and the player then waited
+  quietly for ever: a black picture and a Play button that did nothing. Now,
+  given no picture, or an error from the player, it moves on at once: from the
+  page's own address to yt-dlp's, which comes from a different kind of client,
+  and if that gives no picture either, to the bar with Try again.
+  Fixed: an error on the player's controls was wiped by the next tick of its
+  clock, so a stream that failed at once still read "LIVE". It stays until a
+  picture arrives.
+  merlin-log.txt follows a stream down from its playlist to a first piece of
+  video and records where YouTube stopped answering.
   Live streams that Merlin's player plays start sooner and fail less often.
   YouTube's own player often receives a stream's address a few seconds after
   the page is ready; Merlin asked once and, finding nothing, fell back to

@@ -984,6 +984,69 @@ def test_stream_failure_is_not_a_box(app) -> None:
         window.close()
 
 
+def test_stalled_stream_recovers(app) -> None:
+    """A stream that gives no picture moves to yt-dlp, then to the bar."""
+    import http.server
+    import threading
+
+    from merlin import media as _media
+    from merlin.inplace import PlayerControls
+
+    # the trace finds where a stream is refused
+    folder = tempfile.mkdtemp(prefix="trace-")
+    with open(os.path.join(folder, "top.m3u8"), "w") as handle:
+        handle.write("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nlevel.m3u8\n")
+    with open(os.path.join(folder, "level.m3u8"), "w") as handle:
+        handle.write("#EXTM3U\n#EXTINF:2,\nseg.ts\n")
+
+    class Refusing(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def do_GET(self):
+            if self.path.endswith(".ts"):
+                self.send_error(403)
+                return
+            super().do_GET()
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Refusing)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        lines = _media.trace_stream(f"http://127.0.0.1:{server.server_address[1]}/top.m3u8")
+        check("the log shows the stream refused at its first segment",
+              lines[-1] == "first segment: refused, HTTP 403", " ; ".join(lines))
+    finally:
+        server.shutdown()
+
+    # an error stays on the controls until a picture arrives
+    controls = PlayerControls()
+    controls.say("Merlin's player could not play this: refused")
+    controls.set_progress(1000, 0, False)
+    check("an error is not wiped by the next tick of the clock",
+          "could not play" in controls.message)
+    controls.picture_arrived()
+    check("and clears once a picture arrives", controls.message == "")
+
+    # a stall on the page's address tries yt-dlp; on yt-dlp's, the bar
+    window, _, _ = make_window(app, "t-stall")
+    page_url = "https://www.youtube.com/watch?v=STALL"
+    view = window.new_tab()
+    view.setHtml("<p>x</p>", QUrl(page_url))
+    wait(app, 1.0)
+    tried = []
+    window._play_with_ytdlp = lambda page: tried.append(page)
+    window._on_stalled(view, page_url, "page")
+    wait(app, 2.0)
+    check("a stall on the page's address tries yt-dlp's instead", tried == [page_url])
+    window._on_stalled(view, page_url, "yt-dlp")
+    check("a stall on yt-dlp's too ends in the bar, with Try again",
+          window.notice_bar.isVisible() and window.notice_bar.action.text() == "Try again")
+    window.close()
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -1009,7 +1072,8 @@ def main() -> int:
                  test_filter_options_read_for_what_they_mean,
                  test_blocked_list_and_app_links,
                  test_page_fullscreen_restores_the_window,
-                 test_stream_lookup_is_quick, test_stream_failure_is_not_a_box):
+                 test_stream_lookup_is_quick, test_stream_failure_is_not_a_box,
+                 test_stalled_stream_recovers):
         print(f"\n{test.__name__}")
         try:
             test(app)

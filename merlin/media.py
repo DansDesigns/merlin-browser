@@ -528,6 +528,70 @@ def _telling_lines(text: str) -> list:
     return keep
 
 
+def trace_stream(stream: str, agent: str = "", timeout: int = 15) -> list:
+    """Follow an HLS stream from its playlist down to a first segment.
+
+    Returns one line per step, for the log: the playlist, the first quality
+    level it lists, and that level's first piece of video. A stream can answer
+    at the top and still be refused further down, and a player fed such a
+    stream waits for a picture that never comes. This says where it stopped.
+    """
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    headers = {"User-Agent": agent} if agent else {}
+    lines = []
+
+    def fetch(url, limit):
+        request = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, response.read(limit)
+
+    def first_entry(text, base):
+        for line in text.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                return urllib.parse.urljoin(base, line)
+        return ""
+
+    url = stream
+    for step in ("playlist", "quality level", "first segment"):
+        try:
+            status, body = fetch(url, 4096 if step == "first segment" else 1 << 20)
+        except urllib.error.HTTPError as exc:
+            lines.append(f"{step}: refused, HTTP {exc.code}")
+            return lines
+        except Exception as exc:                          # noqa: BLE001
+            lines.append(f"{step}: unreachable, {exc}")
+            return lines
+        lines.append(f"{step}: HTTP {status}, {len(body)} bytes")
+        if step == "first segment":
+            return lines
+        text = body.decode("utf-8", "replace")
+        if not text.lstrip().startswith("#EXTM3U"):
+            lines.append(f"{step}: not a playlist, begins {text[:30]!r}")
+            return lines
+        following = first_entry(text, url)
+        if not following:
+            lines.append(f"{step}: lists nothing to fetch")
+            return lines
+        # a media playlist lists segments, not levels: skip to the segment
+        if step == "playlist" and "#EXT-X-STREAM-INF" not in text:
+            lines.append("quality level: none, the playlist lists segments directly")
+            url = following
+            try:
+                status, body = fetch(url, 4096)
+                lines.append(f"first segment: HTTP {status}, {len(body)} bytes")
+            except urllib.error.HTTPError as exc:
+                lines.append(f"first segment: refused, HTTP {exc.code}")
+            except Exception as exc:                      # noqa: BLE001
+                lines.append(f"first segment: unreachable, {exc}")
+            return lines
+        url = following
+    return lines
+
+
 def _try_at_once(base: list, url: str, attempts, timeout: int, note) -> tuple:
     """Ask yt-dlp every way at the same time; the first answer wins.
 

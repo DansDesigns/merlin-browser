@@ -70,6 +70,7 @@ class PlayerControls(QWidget):
         self.seekable = False
         self.full = False
         self.message = "Connecting..."
+        self.sticky = False
         self._shown = True
         self._hover = ""
         self._dragging_volume = False
@@ -85,6 +86,15 @@ class PlayerControls(QWidget):
 
     def set_progress(self, position: int, duration: int, seekable: bool) -> None:
         self.position, self.duration, self.seekable = position, duration, seekable
+        # The clock ticks whether or not anything plays, and wiped an error
+        # the moment it was shown: a stream that failed at once read "LIVE".
+        # A message that matters stays until the picture arrives.
+        if not self.sticky:
+            self.message = ""
+        self.update()
+
+    def picture_arrived(self) -> None:
+        self.sticky = False
         self.message = ""
         self.update()
 
@@ -96,8 +106,9 @@ class PlayerControls(QWidget):
             self._reveal(hold=True)
         self.update()
 
-    def say(self, text: str) -> None:
+    def say(self, text: str, sticky: bool = True) -> None:
         self.message = text
+        self.sticky = sticky
         self._reveal(hold=True)
 
     def _reveal(self, hold: bool = False) -> None:
@@ -370,7 +381,11 @@ class PlayerControls(QWidget):
 class InPagePlayer(QWidget):
     """Merlin's player over the page's own video area."""
 
+    STALL_MS = 12000
+
     closed = pyqtSignal()
+    # no picture arrived in time: the stream was accepted but is not playing
+    stalled = pyqtSignal()
     _ask_toggle = pyqtSignal()
     _ask_shut_down = pyqtSignal()
 
@@ -412,6 +427,7 @@ class InPagePlayer(QWidget):
         self._ask_toggle.connect(self._worker.toggle)
         self._ask_shut_down.connect(self._worker.shut_down)
         self._had_picture = False
+        self._gave_up = False
 
         self.hide()
         self._place_timer = QTimer(self)
@@ -421,6 +437,16 @@ class InPagePlayer(QWidget):
         self._ask_where()
         self._thread.start()
         self._note("in-page player: starting")
+
+        # A stream YouTube accepts at the top but refuses further down gives
+        # the player nothing to show, and it waits quietly for ever: a black
+        # picture and a Play button that does nothing. Given no picture in
+        # this long, it says so, and the window tries another way.
+        self._stall = QTimer(self)
+        self._stall.setSingleShot(True)
+        self._stall.setInterval(self.STALL_MS)
+        self._stall.timeout.connect(self._no_picture)
+        self._stall.start()
 
     # ------------------------------------------------------------ placement
     def _ask_where(self) -> None:
@@ -458,9 +484,26 @@ class InPagePlayer(QWidget):
     def _playing(self, playing: bool) -> None:
         self.controls.set_playing(playing)
 
+    def _no_picture(self) -> None:
+        if self._stopped or self._had_picture:
+            return
+        self._note("in-page player: no picture after "
+                   f"{self.STALL_MS // 1000}s, the stream is not playing")
+        self.controls.say("This stream isn't sending a picture...")
+        self._give_up()
+
+    def _give_up(self) -> None:
+        """Tell the window once, whichever of failure or stall came first."""
+        if self._gave_up or self._stopped:
+            return
+        self._gave_up = True
+        self.stalled.emit()
+
     def _first_picture(self, _image) -> None:
         if not self._had_picture:
+            self._stall.stop()
             self._had_picture = True
+            self.controls.picture_arrived()
             self._note("in-page player: playing")
             self._worker.image.disconnect(self._first_picture)
 
@@ -470,6 +513,10 @@ class InPagePlayer(QWidget):
     def _failed(self, text: str) -> None:
         self.controls.say(f"Merlin's player could not play this: {text}")
         self._note(f"in-page player: could not play: {text}")
+        if not self._had_picture:
+            # it has said it cannot: no need to wait out the stall timer
+            self._stall.stop()
+            self._give_up()
 
     # ------------------------------------------------------------ layout
     def resizeEvent(self, event) -> None:                    # noqa: N802
@@ -559,6 +606,7 @@ class InPagePlayer(QWidget):
             return
         self._stopped = True
         self._place_timer.stop()
+        self._stall.stop()
         worker, thread = self._worker, self._thread
         worker.want_frames = False
         # The worker reports once more as it stops, "not playing" at least,

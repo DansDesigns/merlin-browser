@@ -458,6 +458,8 @@ class BrowserWindow(QMainWindow):
         self._offered_streams: set[str] = set()
         # Merlin's player laid over a page's own video, by view
         self._inplace: dict = {}
+        # where a found stream came from, by page: "page" or "yt-dlp"
+        self._stream_source: dict = {}
         self._stream_resolved.connect(self._on_stream_resolved)
         self.engine_staged.connect(lambda: self.status_label.setText(
             "The engine that plays YouTube live is ready. It takes effect the "
@@ -1594,6 +1596,7 @@ class BrowserWindow(QMainWindow):
                     crashlog.note("stream: taken from YouTube's own player")
                 except Exception:                        # noqa: BLE001
                     pass
+                self._stream_source[page] = "page"
                 self._on_stream_resolved(page, True, stream)
             elif tries_left > 1:
                 QTimer.singleShot(
@@ -1695,24 +1698,54 @@ class BrowserWindow(QMainWindow):
             self.notice_bar.show_notice(
                 "Merlin couldn't get this stream from YouTube this time.", "Try again")
             return
+        source = self._stream_source.pop(page, "yt-dlp")
         view = self.current()
         if isinstance(view, WebView) and view.url().toString() == page:
             # Over the page's own player, the same size, rather than in a tab
             # of its own: the page stays as it was, and an app window, which
             # has no tab strip, is not upset by a tab appearing in it.
-            self._play_in_page(view, result, page)
+            self._play_in_page(view, result, page, source)
             return
         self.open_in_player(result, title=page, builtin=True)
 
-    def _play_in_page(self, view, stream: str, page: str) -> None:
+    def _play_in_page(self, view, stream: str, page: str, source: str = "yt-dlp") -> None:
         from . import crashlog
         from .inplace import InPagePlayer
 
         self._stop_in_page(view)
+        crashlog.note(f"stream: playing the address from {source}")
         player = InPagePlayer(view, stream, page, note=crashlog.note)
         player.closed.connect(lambda v=view: self._inplace.pop(v, None))
+        player.stalled.connect(lambda v=view, p=page, src=source: self._on_stalled(v, p, src))
         self._inplace[view] = player
         self._check_stream_reachable(view, stream)
+
+    def _on_stalled(self, view, page: str, source: str) -> None:
+        """A stream was found but gives no picture: try the other way, once.
+
+        The page's own address and yt-dlp's come from different kinds of
+        client, and YouTube can refuse one while serving the other. So a stall
+        on the page's address moves to yt-dlp; a stall on yt-dlp's is the end
+        of the road, and the bar says so, with Try again.
+        """
+        from . import crashlog
+
+        if not self.view_is_alive(view) or view.url().toString() != page:
+            return
+        self._stop_in_page(view)
+        if source == "page":
+            crashlog.note("stream: the page's address gave no picture, trying yt-dlp")
+            # A moment for the stopped player to finish shutting down before
+            # the next one starts; the lookup that follows takes longer anyway.
+            self._notice_page = page
+            self.notice_bar.busy("Connecting to stream.....")
+            QTimer.singleShot(1500, lambda: self._play_with_ytdlp(page))
+            return
+        crashlog.note("stream: yt-dlp's address gave no picture either")
+        self.status_label.setText("The stream didn't start. Details are in merlin-log.txt")
+        self._notice_page = page
+        self.notice_bar.show_notice(
+            "YouTube isn't sending this stream to Merlin's player.", "Try again")
 
     def _stop_in_page(self, view) -> None:
         player = self._inplace.pop(view, None)
@@ -1730,8 +1763,6 @@ class BrowserWindow(QMainWindow):
         the player had trouble with what it was sent.
         """
         import threading
-        import urllib.error
-        import urllib.request
 
         from . import crashlog
 
@@ -1741,16 +1772,10 @@ class BrowserWindow(QMainWindow):
             return
 
         def check():
-            request = urllib.request.Request(stream, headers={"User-Agent": agent})
-            try:
-                with urllib.request.urlopen(request, timeout=15) as response:
-                    first = response.read(64).decode("utf-8", "replace").splitlines()
-                    crashlog.note(f"stream address answers: HTTP {response.status}, "
-                                  f"begins {first[0][:40] if first else '(empty)'!r}")
-            except urllib.error.HTTPError as exc:
-                crashlog.note(f"stream address refused: HTTP {exc.code}")
-            except Exception as exc:                     # noqa: BLE001
-                crashlog.note(f"stream address unreachable: {exc}")
+            # Down to a first piece of video, not just the playlist: YouTube
+            # can hand out the playlist and refuse the video in it.
+            for line in media.trace_stream(stream, agent):
+                crashlog.note(f"stream check, {line}")
 
         threading.Thread(target=check, daemon=True).start()
 
