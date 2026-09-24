@@ -31,7 +31,7 @@ sys.path.insert(0, ROOT)
 
 from PyQt6.QtCore import QPoint, QPointF, Qt, QTimer, QUrl   # noqa: E402
 from PyQt6.QtGui import QWheelEvent                          # noqa: E402
-from PyQt6.QtWidgets import QApplication                     # noqa: E402
+from PyQt6.QtWidgets import QMessageBox, QApplication                     # noqa: E402
 from PyQt6 import QtWebEngineWidgets                         # noqa: E402,F401
 from PyQt6.QtWebEngineCore import QWebEngineProfile          # noqa: E402
 
@@ -910,6 +910,80 @@ def test_page_fullscreen_restores_the_window(app) -> None:
     window.close()
 
 
+def test_stream_lookup_is_quick(app) -> None:
+    """yt-dlp is asked every way at once, the page more than once."""
+    import stat
+    import time as _time
+
+    from merlin import media as _media
+
+    folder = tempfile.mkdtemp(prefix="slow-ytdlp-")
+    fake = os.path.join(folder, "yt-dlp")
+    with open(fake, "w") as handle:
+        handle.write(
+            "#!/usr/bin/env python3\n"
+            "import sys, time\n"
+            "a = ' '.join(sys.argv[1:])\n"
+            "if 'player_client' not in a:\n"
+            "    time.sleep(1); print('https://example.invalid/s.m3u8'); sys.exit(0)\n"
+            "time.sleep(5); sys.exit(1)\n")
+    os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
+    saved = (_media.ytdlp_path, _media.deno_path, _media._ytdlp_argv)
+    _media.ytdlp_path = lambda: fake
+    _media.deno_path = lambda: "/bin/true"
+    _media._ytdlp_argv = lambda p: [p]
+    try:
+        began = _time.monotonic()
+        ok, _found = _media.resolve_stream("https://www.youtube.com/watch?v=q")
+        took = _time.monotonic() - began
+        check("the way that works answers without waiting for the ones that fail",
+              ok and took < 3.5, f"{took:.1f}s")
+    finally:
+        _media.ytdlp_path, _media.deno_path, _media._ytdlp_argv = saved
+
+    window, _, _ = make_window(app, "t-late")
+    page_url = "https://www.youtube.com/watch?v=LATE"
+    original = BrowserWindow.__dict__["_is_youtube_video"]
+    BrowserWindow._is_youtube_video = staticmethod(lambda url: True)
+    asked, played = [], []
+    window._play_with_ytdlp = lambda page: asked.append(page)
+    window._on_stream_resolved = lambda page, ok, result: played.append(result)
+    try:
+        view = window.new_tab()
+        view.setHtml(
+            "<div id=movie_player></div><script>setTimeout(function(){"
+            "document.getElementById('movie_player').getPlayerResponse=function(){"
+            "return {videoDetails:{videoId:'LATE'},"
+            "streamingData:{hlsManifestUrl:'https://example.invalid/late.m3u8'}};};"
+            "}, 2500);</script>", QUrl(page_url))
+        wait(app, 1.0)
+        window.play_stream(page_url)
+        wait(app, 6.0)
+        check("an address that reaches the page a little late is still used",
+              played == ["https://example.invalid/late.m3u8"] and not asked,
+              f"played {played}, yt-dlp {asked}")
+    finally:
+        BrowserWindow._is_youtube_video = original
+        window.close()
+
+
+def test_stream_failure_is_not_a_box(app) -> None:
+    """No stream: the bar says so and offers to try again; nothing modal."""
+    window, _, _ = make_window(app, "t-nobox")
+    boxes = []
+    saved = QMessageBox.information
+    QMessageBox.information = lambda *a, **k: boxes.append(a)
+    try:
+        window._on_stream_resolved("https://www.youtube.com/watch?v=n", False, "refused")
+        check("a stream that cannot be found is reported in the bar",
+              window.notice_bar.isVisible()
+              and window.notice_bar.action.text() == "Try again")
+        check("without a box that stops everything", not boxes)
+    finally:
+        QMessageBox.information = saved
+        window.close()
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -934,7 +1008,8 @@ def main() -> int:
                  test_player_plays_in_the_page, test_player_controls,
                  test_filter_options_read_for_what_they_mean,
                  test_blocked_list_and_app_links,
-                 test_page_fullscreen_restores_the_window):
+                 test_page_fullscreen_restores_the_window,
+                 test_stream_lookup_is_quick, test_stream_failure_is_not_a_box):
         print(f"\n{test.__name__}")
         try:
             test(app)

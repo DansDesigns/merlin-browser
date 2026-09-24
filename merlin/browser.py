@@ -1567,22 +1567,42 @@ class BrowserWindow(QMainWindow):
         view = self.current()
         if (isinstance(view, WebView) and view.url().toString() == page
                 and self._is_youtube_video(view.url())):
-            def got(result):
-                stream = result.get("hls", "") if isinstance(result, dict) else ""
-                if stream:
-                    try:
-                        from . import crashlog
-
-                        crashlog.note("stream: taken from YouTube's own player")
-                    except Exception:                    # noqa: BLE001
-                        pass
-                    self._on_stream_resolved(page, True, stream)
-                else:
-                    self._play_with_ytdlp(page)
-
-            view.page().runJavaScript(media.YOUTUBE_STREAM_JS, got)
+            self._notice_page = page
+            self.notice_bar.busy("Connecting to stream.....")
+            self._ask_page_for_stream(view, page, tries_left=self.PAGE_STREAM_TRIES)
             return
         self._play_with_ytdlp(page)
+
+    # YouTube's player often receives the stream's address a few seconds
+    # after the page is ready, so the page is asked more than once before
+    # falling back to yt-dlp, which is far slower. Asked only once, a page
+    # that would have played soon fell into the slow route, which is why a
+    # refresh sometimes "fixed" it.
+    PAGE_STREAM_TRIES = 6
+    PAGE_STREAM_INTERVAL_MS = 1500
+
+    def _ask_page_for_stream(self, view, page: str, tries_left: int) -> None:
+        if not self.view_is_alive(view) or view.url().toString() != page:
+            return                                   # the page has moved on
+
+        def got(result):
+            stream = result.get("hls", "") if isinstance(result, dict) else ""
+            if stream:
+                try:
+                    from . import crashlog
+
+                    crashlog.note("stream: taken from YouTube's own player")
+                except Exception:                        # noqa: BLE001
+                    pass
+                self._on_stream_resolved(page, True, stream)
+            elif tries_left > 1:
+                QTimer.singleShot(
+                    self.PAGE_STREAM_INTERVAL_MS,
+                    lambda: self._ask_page_for_stream(view, page, tries_left - 1))
+            else:
+                self._play_with_ytdlp(page)
+
+        view.page().runJavaScript(media.YOUTUBE_STREAM_JS, got)
 
     def _play_with_ytdlp(self, page: str) -> None:
         """Find the stream on a page with yt-dlp, then play it here.
@@ -1661,12 +1681,19 @@ class BrowserWindow(QMainWindow):
             self._play_with_ytdlp(page)
             return
         if not ok:
-            self.status_label.setText(f"No stream found: {result}")
-            log = os.environ.get("MERLIN_CRASH_LOG", "")
-            where = (f"\n\nEverything yt-dlp said is in:\n{log}" if log else "")
-            QMessageBox.information(
-                self, "Stream", "yt-dlp could not find a stream on that page."
-                f"\n\n{result}{where}")
+            # In the bar above the page, with a way to try again, rather than
+            # a box that stops everything. The details are in the log, not in
+            # three long lines across the status bar.
+            try:
+                from . import crashlog
+
+                crashlog.note(f"stream: none found for {page}: {result}")
+            except Exception:                            # noqa: BLE001
+                pass
+            self.status_label.setText("No stream found. Details are in merlin-log.txt")
+            self._notice_page = page
+            self.notice_bar.show_notice(
+                "Merlin couldn't get this stream from YouTube this time.", "Try again")
             return
         view = self.current()
         if isinstance(view, WebView) and view.url().toString() == page:

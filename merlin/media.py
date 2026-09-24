@@ -375,7 +375,7 @@ def has_ytdlp() -> bool:
 _HELPERS: set = set()
 
 
-def _run_helper(argv: list, timeout: int) -> subprocess.CompletedProcess:
+def _run_helper(argv: list, timeout: int, record: list = None) -> subprocess.CompletedProcess:
     """Run yt-dlp or Deno, and remember it until it finishes.
 
     A lookup still running when Merlin closes would otherwise carry on for
@@ -385,6 +385,8 @@ def _run_helper(argv: list, timeout: int) -> subprocess.CompletedProcess:
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             stdin=subprocess.DEVNULL, text=True, **_hidden())
     _HELPERS.add(proc)
+    if record is not None:
+        record.append(proc)          # so a caller can stop it early
     try:
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -526,6 +528,63 @@ def _telling_lines(text: str) -> list:
     return keep
 
 
+def _try_at_once(base: list, url: str, attempts, timeout: int, note) -> tuple:
+    """Ask yt-dlp every way at the same time; the first answer wins.
+
+    One after another, three ways of asking could take minutes when the
+    first two failed slowly. At the same time, the wait is only as long as
+    the quickest way that works, and the rest are stopped once one has.
+    Returns (stream or "", reasons in the order tried, runtime missing).
+    """
+    import concurrent.futures
+
+    procs: list = []
+
+    def attempt(label, extra):
+        try:
+            done = _run_helper(base + extra + [url], timeout=timeout, record=procs)
+        except subprocess.TimeoutExpired:
+            return label, "", ["timed out"]
+        except Exception as exc:                  # noqa: BLE001
+            return label, "", [str(exc)]
+        found = [line.strip() for line in done.stdout.splitlines()
+                 if line.strip().startswith(("http://", "https://"))]
+        if done.returncode == 0 and found:
+            return label, found[0], []
+        return label, "", _telling_lines(done.stderr or done.stdout or "")
+
+    results = {}
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(attempts))
+    try:
+        futures = [pool.submit(attempt, label, extra) for label, extra in attempts]
+        for future in concurrent.futures.as_completed(futures):
+            label, stream, telling = future.result()
+            results[label] = telling
+            if stream:
+                note(f"stream lookup, {label}: found a stream")
+                for proc in procs:                # the others are not needed now
+                    if proc.poll() is None:
+                        try:
+                            proc.kill()
+                        except OSError:
+                            pass
+                return stream, [], False
+            note(f"stream lookup, {label}: nothing usable")
+            for line in telling:
+                note(f"    {line}")
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+    reasons, missing = [], False
+    for label, _extra in attempts:
+        telling = results.get(label, [])
+        joined = " ".join(telling)
+        if "JavaScript runtime" in joined or "challenge solving failed" in joined:
+            missing = True
+        reasons.append(f"{label}: {telling[-1] if telling else 'no stream found'}")
+    return "", reasons, missing
+
+
 def resolve_stream(url: str, timeout: int = 60) -> tuple[bool, str]:
     """The direct address of the stream on a page, or why there is none.
 
@@ -554,30 +613,12 @@ def resolve_stream(url: str, timeout: int = 60) -> tuple[bool, str]:
             return None
 
     attempts = YOUTUBE_ATTEMPTS if _is_youtube(url) else OTHER_ATTEMPTS
-    reasons = []
-    for label, extra in attempts:
-        try:
-            done = _run_helper(base + extra + [url], timeout=timeout)
-        except subprocess.TimeoutExpired:
-            note(f"stream lookup, {label}: timed out")
-            reasons.append(f"{label}: timed out")
-            continue
-        except Exception as exc:                  # noqa: BLE001
-            return False, str(exc)
-        found = [line.strip() for line in done.stdout.splitlines()
-                 if line.strip().startswith(("http://", "https://"))]
-        if done.returncode == 0 and found:
-            note(f"stream lookup, {label}: found a stream")
-            return True, found[0]
-        telling = _telling_lines(done.stderr or done.stdout or "")
-        note(f"stream lookup, {label}: nothing usable")
-        for line in telling:
-            note(f"    {line}")
-        joined = " ".join(telling)
-        if "JavaScript runtime" in joined or "challenge solving failed" in joined:
-            if not deno:
-                return False, JS_RUNTIME_MISSING
-        reasons.append(f"{label}: {telling[-1] if telling else 'no stream found'}")
+    found_stream, reasons, runtime_missing = _try_at_once(
+        base, url, attempts, timeout, note)
+    if found_stream:
+        return True, found_stream
+    if runtime_missing and not deno:
+        return False, JS_RUNTIME_MISSING
 
     # YouTube changes often and yt-dlp follows it, so a failure is often just
     # an out of date yt-dlp. Merlin's own copy can update itself: do that once

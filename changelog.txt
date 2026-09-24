@@ -6,6 +6,19 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  Live streams that Merlin's player plays start sooner and fail less often.
+  YouTube's own player often receives a stream's address a few seconds after
+  the page is ready; Merlin asked once and, finding nothing, fell back to
+  yt-dlp, which is far slower. It now asks the page for several seconds
+  first. That is also why a refresh sometimes seemed to fix it.
+  When yt-dlp is needed, it is asked every way at the same time and the first
+  answer is used, rather than one way after another. A lookup that took
+  minutes when the first ways failed slowly now takes as long as the quickest
+  way that works; the others are stopped once it has.
+  A stream that cannot be found is reported in the bar above the page, with
+  Try again, instead of a box that stops everything, and the status bar gives
+  one short line rather than three long ones. The details are in
+  merlin-log.txt.
   Fixed: back and forward stayed greyed out on YouTube and similar sites.
   They move between pages by rewriting the address in place; the engine kept
   each move in its history, but Merlin only refreshed the buttons when a page
