@@ -43,6 +43,29 @@ from .brand import (
 
 
 # --------------------------------------------------------------------- page
+class _LinkCatcher(QWebEnginePage):
+    """A page that is never shown: it hands its first address to the browser.
+
+    What an app window gives a link that asks for a new tab or window. It
+    loads nothing: the first navigation is caught, passed to an ordinary
+    Merlin window, and the stand-in goes away.
+    """
+
+    def __init__(self, profile, window, holder):
+        super().__init__(profile, holder)
+        self._window = window
+        self._holder = holder
+        self._done = False
+
+    def acceptNavigationRequest(self, url, nav_type, is_main_frame):  # noqa: N802
+        if not self._done and is_main_frame and url.scheme() in ("http", "https"):
+            self._done = True
+            QTimer.singleShot(0, lambda u=url.toString(): self._window.open_in_browser(u))
+            # the hidden view goes, and this page with it
+            QTimer.singleShot(0, self._holder.deleteLater)
+        return False
+
+
 class WebPage(QWebEnginePage):
     def __init__(self, profile: QWebEngineProfile, window: "BrowserWindow", parent=None):
         super().__init__(profile, parent)
@@ -56,6 +79,16 @@ class WebPage(QWebEnginePage):
 
     # cosmetic filtering is applied per navigation, before the load starts
     def acceptNavigationRequest(self, url: QUrl, nav_type, is_main_frame):  # noqa: N802
+        # An app window keeps to its own site. A link to anywhere else opens in
+        # a new tab of an ordinary Merlin window, as an installed app should,
+        # rather than turning the app window into a browser.
+        window = self.window_ref
+        if (getattr(window, "app_mode", False) and is_main_frame
+                and nav_type == QWebEnginePage.NavigationType.NavigationTypeLinkClicked
+                and url.scheme() in ("http", "https")
+                and not window.in_app_site(url)):
+            QTimer.singleShot(0, lambda u=url.toString(): window.open_in_browser(u))
+            return False
         if url.scheme() == APP_SCHEME and url.host() == "addtile":
             QTimer.singleShot(0, self.window_ref.add_start_tile)
             return False
@@ -180,6 +213,17 @@ class WebView(QWebEngineView):
         menu.exec(event.globalPos())
 
     def createWindow(self, window_type):  # noqa: N802
+        # In an app window there is nowhere for a new tab to go: it has no
+        # tab strip. The page is given a stand-in that only learns where it
+        # was going and passes that on to an ordinary Merlin window.
+        if getattr(self.window_ref, "app_mode", False):
+            # a view is what Qt wants back from a view's createWindow; handed
+            # a bare page it quietly opened nothing
+            catcher = QWebEngineView(self.window_ref)
+            catcher.hide()
+            page = _LinkCatcher(self.page().profile(), self.window_ref, catcher)
+            catcher.setPage(page)
+            return catcher
         # focus_url is skipped for these: the page is about to supply an
         # address, and focusing an empty bar suppressed it
         if window_type == QWebEnginePage.WebWindowType.WebBrowserBackgroundTab:
@@ -244,6 +288,8 @@ class BrowserWindow(QMainWindow):
         self._web_fullscreen = False
         self._cosmetic_cache: dict[str, str] = {}
         self._blocked_session = 0
+        # what was blocked, by the site it was blocked on, newest last
+        self._blocked_by_host: dict[str, list[str]] = {}
         self._codec_probe: dict = {}
         self.updater = Updater(self.settings, self)
         self.updater.available.connect(self._on_update_available)
@@ -498,6 +544,11 @@ class BrowserWindow(QMainWindow):
                 lambda checked, k=key: self.settings.set(k, checked))
             menu.addAction(action)
         menu.addSeparator()
+        # What was blocked on this page, so a site that looks broken can be
+        # checked against the blocker instead of guessed at.
+        self.blocked_menu = QMenu("Blocked on this page", menu)
+        menu.addMenu(self.blocked_menu)
+        menu.addSeparator()
         update = QAction("Update filter lists", self)
         update.triggered.connect(lambda: self.filter_loader.refresh_async())
         menu.addAction(update)
@@ -509,6 +560,30 @@ class BrowserWindow(QMainWindow):
         self.act_shields_site.setChecked(self.settings.shields_enabled_for(host))
         self.act_shields_site.setText(
             f"Shields up for {host}" if host else "Shields up for this site")
+        self._fill_blocked_menu(host)
+
+    def blocked_on(self, host: str) -> list:
+        """Everything blocked while pages on this site were open."""
+        return list(self._blocked_by_host.get(host, []))
+
+    def _fill_blocked_menu(self, host: str) -> None:
+        menu = self.blocked_menu
+        menu.clear()
+        blocked = self.blocked_on(host)
+        menu.setTitle(f"Blocked on this page ({len(blocked)})")
+        if not blocked:
+            empty = menu.addAction("Nothing has been blocked here")
+            empty.setEnabled(False)
+            return
+        copy = menu.addAction("Copy the whole list")
+        copy.triggered.connect(lambda: QApplication.clipboard().setText(
+            f"Blocked on {host}:\n" + "\n".join(blocked)))
+        menu.addSeparator()
+        for url in blocked[-40:][::-1]:
+            shown = url.split("://", 1)[-1]
+            item = menu.addAction(shown if len(shown) <= 90 else shown[:87] + "...")
+            item.setToolTip(url)
+            item.setEnabled(False)
 
     def _main_menu(self) -> QMenu:
         menu = QMenu(self)
@@ -760,6 +835,39 @@ class BrowserWindow(QMainWindow):
 
         # straight after reload, before the spacer
         self.toolbar.insertWidget(self._spacer_action, self.btn_decorations)
+
+    def in_app_site(self, url: QUrl) -> bool:
+        """Whether a link stays inside this app window's own site."""
+        from .adblock import _registrable
+
+        home = getattr(self, "app_site", "")
+        host = (url.host() or "").lower()
+        if not home:
+            return not host
+        return host == home or _registrable(host) == home
+
+    def open_in_browser(self, url: str) -> None:
+        """Open a link in a new tab of an ordinary Merlin window.
+
+        An app window is a process of its own, so the link is passed to the
+        Merlin already running, the way a second launch passes its links on.
+        If none is running, one is started with it.
+        """
+        import subprocess
+
+        from . import single, webapps
+
+        if single.hand_off([url], getattr(self, "instance_profile", "merlin")):
+            self.status_label.setText("Opened in Merlin")
+            return
+        extra = ({"creationflags": 0x00000008 | 0x00000200} if os.name == "nt"
+                 else {"start_new_session": True})
+        try:
+            subprocess.Popen(webapps.launcher_command() + [url],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, close_fds=True, **extra)
+        except OSError as exc:
+            self.status_label.setText(f"Could not open Merlin: {exc}")
 
     def apply_decorations(self, hide: bool) -> None:
         """Add or remove the system title bar without losing the session."""
@@ -1527,7 +1635,7 @@ class BrowserWindow(QMainWindow):
             return
 
         self.notice_bar.setVisible(True)
-        self.notice_bar.busy("Finding the stream...")
+        self.notice_bar.busy("Connecting to stream.....")
 
         def resolve():
             ok, result = media.resolve_stream(page)
@@ -1620,6 +1728,12 @@ class BrowserWindow(QMainWindow):
         threading.Thread(target=check, daemon=True).start()
 
     def _on_url(self, view: WebView, url: QUrl) -> None:
+        # Back and forward follow every change of address, not only finished
+        # loads. Sites like YouTube move between pages by rewriting the
+        # address in place; the engine records each move in its history, but
+        # no load finishes, so the buttons stayed greyed out.
+        if view is self.current():
+            self._update_nav_actions()
         player = self._inplace.get(view)
         if player is not None and url.toString() != player.page:
             self._stop_in_page(view)
@@ -1789,6 +1903,9 @@ class BrowserWindow(QMainWindow):
 
     def _on_blocked(self, host: str, url: str) -> None:
         self._blocked_session += 1
+        kept = self._blocked_by_host.setdefault(host, [])
+        kept.append(url)
+        del kept[:-300]                      # enough to diagnose, never unbounded
         view = self.current()
         if view and view.url().host() == host:
             self._update_shield_badge()
@@ -1921,14 +2038,24 @@ class BrowserWindow(QMainWindow):
             self.showFullScreen()
 
     def set_web_fullscreen(self, on: bool) -> None:
+        """A page's own fullscreen, YouTube's button for instance.
+
+        Coming out restores what was there before, rather than a fixed idea of
+        it. The tab strip came back unconditionally, even in an app window,
+        which has none; and the window came back un-maximised, because it was
+        always shown normal.
+        """
+        if on and not getattr(self, "_web_fullscreen", False):
+            self._before_web_fullscreen = self.windowState()
         self._web_fullscreen = on
         self.toolbar.setVisible(not on)
-        self.tabs.set_bar_visible(not on)
+        self.tabs.set_bar_visible(not on and not self.app_mode)
         self.status.setVisible(not on)
         if on:
             self.showFullScreen()
         else:
-            self.showNormal()
+            previous = getattr(self, "_before_web_fullscreen", Qt.WindowState.WindowNoState)
+            self.setWindowState(previous & ~Qt.WindowState.WindowFullScreen)
 
     def show_find(self) -> None:
         self.find_bar.setVisible(True)

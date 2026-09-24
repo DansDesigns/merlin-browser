@@ -135,8 +135,8 @@ jobs:
         run: |
           # the PyPI release of aqtinstall predates Qt 6.11's folder layout
           python -m pip install -U "git+https://github.com/miurahr/aqtinstall.git@master"
-          aqt install-qt windows desktop $env:QT_VERSION win64_msvc2022_64 --outputdir "$env:GITHUB_WORKSPACE\Qt"
-          $qtDir = Join-Path "$env:GITHUB_WORKSPACE\Qt\$env:QT_VERSION" "msvc2022_64"
+          aqt install-qt windows desktop $env:QT_VERSION win64_msvc2022_64 --outputdir "C:\Qt"
+          $qtDir = Join-Path "C:\Qt\$env:QT_VERSION" "msvc2022_64"
           if (-not (Test-Path $qtDir)) { throw "Qt was not installed where expected: $qtDir" }
           "QT_DIR=$qtDir" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
@@ -144,6 +144,12 @@ jobs:
         if: steps.published.outputs.skip != 'true'
         shell: bash
         run: |
+          # On C:, with the build. The checkout lives on D:, and Chromium's gn
+          # works out relative paths between source and build, which Windows
+          # cannot do across drives: the first run failed with "path is on
+          # mount 'D:', start on mount 'C:'". Short, too: Chromium trips over
+          # Windows' path length limit.
+          mkdir -p /c/s && cd /c/s
           # code.qt.io sometimes drops the large Chromium submodule part way
           for attempt in 1 2 3 4 5; do
             rm -rf qtwebengine
@@ -156,6 +162,9 @@ jobs:
           done
           exit 1
 
+      # Qt, the source, the build and its output all live on C:. Chromium's
+      # build tools relate these paths to one another, and Windows has no
+      # relative path from one drive to another.
       - name: Configure and build, with the codecs
         if: steps.published.outputs.skip != 'true'
         shell: cmd
@@ -168,12 +177,12 @@ jobs:
           rem Only what Merlin does not use is switched off. WebRTC (video
           rem calls), PDF and printing, the spellchecker and extensions, which
           rem the PDF viewer is built on, all stay.
-          cmake "%GITHUB_WORKSPACE%\qtwebengine" -G Ninja -DCMAKE_BUILD_TYPE=Release ^
+          cmake "C:\s\qtwebengine" -G Ninja -DCMAKE_BUILD_TYPE=Release ^
             -DCMAKE_PREFIX_PATH="%QT_DIR%" ^
             -DQT_FEATURE_webengine_proprietary_codecs=ON ^
             -DQT_FEATURE_qtpdf_build=OFF ^
             -DQT_FEATURE_webengine_kerberos=OFF ^
-            -DCMAKE_INSTALL_PREFIX="%GITHUB_WORKSPACE%\engine"
+            -DCMAKE_INSTALL_PREFIX="C:\engine"
           if errorlevel 1 exit /b 1
           rem four jobs: more runs the runner out of memory
           cmake --build . --parallel 4
@@ -187,14 +196,14 @@ jobs:
           # The same check the installers make: swap it into this runner's
           # PyQt6, start it, and ask. Nothing is published unless it passes.
           $env:QT_QPA_PLATFORM = "offscreen"
-          python tools\use-codec-engine.py "$env:GITHUB_WORKSPACE\engine"
+          python tools\use-codec-engine.py "C:\engine"
           if ($LASTEXITCODE -ne 0) { throw "The build does not play H.264 and AAC" }
 
       - name: Package and publish
         if: steps.published.outputs.skip != 'true'
         shell: pwsh
         run: |
-          python tools\use-codec-engine.py --package "$env:GITHUB_WORKSPACE\engine" "$env:GITHUB_WORKSPACE\dist"
+          python tools\use-codec-engine.py --package "C:\engine" "$env:GITHUB_WORKSPACE\dist"
           if ($LASTEXITCODE -ne 0) { throw "Packaging failed" }
           $asset = "$env:GITHUB_WORKSPACE\dist\qtwebengine-$env:WEB_VERSION-codecs-windows-x64.zip"
           gh release view "engine-$env:WEB_VERSION" --repo "$env:GITHUB_REPOSITORY" *> $null

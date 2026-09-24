@@ -164,11 +164,12 @@ class Rule:
     __slots__ = (
         "_regex", "pattern", "is_raw_regex", "exception", "types",
         "excluded_types", "third_party", "domains", "excluded_domains",
-        "token", "host", "raw",
+        "token", "host", "raw", "hiding",
     )
 
     def __init__(self, raw: str):
         self.raw = raw
+        self.hiding = None           # "all" or "generic" for $elemhide/$generichide
         self.exception = False
         self.types: set[str] = set()
         self.excluded_types: set[str] = set()
@@ -226,6 +227,15 @@ class Rule:
         return bool(self.regex.search(url))
 
 
+def _rule_host(pattern: str) -> str:
+    """The site a ||site^ pattern names, or "" if it names something else."""
+    if pattern.startswith("||"):
+        middle = pattern[2:].split("^")[0].split("/")[0]
+        if middle and "*" not in middle:
+            return middle.lower()
+    return ""
+
+
 def _host_in(host: str, domains: Iterable[str]) -> bool:
     host = (host or "").lower()
     for d in domains:
@@ -279,15 +289,33 @@ def parse_filter(line: str) -> Rule | None:
                     (rule.excluded_types if negate else rule.types).add(name)
                 elif name in ("xhr", "fetch"):
                     (rule.excluded_types if negate else rule.types).add("xmlhttprequest")
-                elif name in ("popup", "elemhide", "generichide", "genericblock",
-                              "csp", "redirect", "important", "match-case",
-                              "badfilter", "removeparam", "empty", "mp4",
-                              "inline-script", "inline-font", "all", "webrtc",
-                              "cname", "denyallow", "method", "to", "from",
-                              "header", "strict1p", "strict3p", "ipaddress"):
-                    if name == "badfilter":
-                        return None       # not supported; drop the rule
+                elif name in ("elemhide", "ehide", "generichide", "ghide"):
+                    # Not a network rule at all: "on this site, hide nothing"
+                    # or "apply no general hiding rules". EasyList uses it for
+                    # 181 sites, YouTube among them, whose own interface the
+                    # general rules break. Read as a plain exception it both
+                    # left the hiding in place and let every request from the
+                    # site through.
+                    if not rule.exception:
+                        return None
+                    rule.hiding = "all" if name in ("elemhide", "ehide") else "generic"
+                elif name in ("important", "match-case", "all",
+                              "redirect", "redirect-rule", "empty", "mp4"):
+                    # blocking is a fair stand-in for these, or they only
+                    # change priority or how the pattern is matched
                     continue
+                elif name in ("popup", "genericblock", "csp", "removeparam",
+                              "inline-script", "inline-font", "webrtc", "badfilter",
+                              "cname", "denyallow", "method", "to", "from",
+                              "header", "strict1p", "strict3p", "ipaddress",
+                              "permissions", "urltransform", "replace"):
+                    # These change what a rule means, or narrow what it
+                    # applies to, in ways this blocker cannot carry out.
+                    # Ignoring the option applied the rule far more widely
+                    # than its author meant: a $popup rule blocked ordinary
+                    # requests, a $csp rule with no pattern blocked every
+                    # request on its sites. The rule is dropped instead.
+                    return None
                 else:
                     continue
 
@@ -323,11 +351,20 @@ class FilterEngine:
         self.cosmetic_generic: list[str] = []
         self.cosmetic_specific: dict[str, list[str]] = defaultdict(list)
         self.cosmetic_exceptions: dict[str, set[str]] = defaultdict(set)
+        # sites where EasyList says to hide nothing, or no general rules
+        self.hide_nothing: set[str] = set()
+        self.hide_no_generic: set[str] = set()
         self.rule_count = 0
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------- loading
     def add_rule(self, rule: Rule) -> None:
+        if rule.hiding:
+            host = rule.host or _rule_host(rule.pattern)
+            if host:
+                (self.hide_nothing if rule.hiding == "all"
+                 else self.hide_no_generic).add(host)
+            return
         if rule.host:
             hosts = self.allow_hosts if rule.exception else self.block_hosts
             hosts[rule.host].append(rule)
@@ -447,6 +484,10 @@ class FilterEngine:
 
     def cosmetic_css(self, host: str, include_generic: bool = True) -> str:
         host = (host or "").lower()
+        if _host_in(host, self.hide_nothing):
+            return ""
+        if _host_in(host, self.hide_no_generic):
+            include_generic = False
         selectors: list[str] = []
         excluded: set[str] = set()
         parts = host.split(".")
@@ -733,8 +774,21 @@ def _is_local(url: QUrl) -> bool:
 
 
 def _registrable(host: str) -> str:
-    """Cheap eTLD+1 approximation (no PSL dependency)."""
-    parts = (host or "").lower().split(".")
+    """Cheap eTLD+1 approximation (no PSL dependency).
+
+    An IP address is its own site. Splitting it on its dots like a name made
+    127.0.0.1 and 10.0.0.1 both "0.1", the same site, which a device on the
+    local network is not.
+    """
+    host = (host or "").lower().strip("[]")
+    try:
+        import ipaddress
+
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+    parts = host.split(".")
     if len(parts) < 3:
         return ".".join(parts)
     two = ".".join(parts[-2:])

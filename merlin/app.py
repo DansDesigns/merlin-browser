@@ -544,7 +544,15 @@ def main(argv: list[str] | None = None) -> int:
     opened = False
     if args.zoom and args.zoom > 0:
         window.window_zoom = max(0.25, min(5.0, args.zoom))
+    # which Merlin a link should be handed to, from an app window
+    window.instance_profile = args.profile
     if args.app:
+        from PyQt6.QtCore import QUrl
+
+        from .adblock import _registrable
+
+        # links within this site stay in the app; anything else goes to Merlin
+        window.app_site = _registrable((QUrl(args.app).host() or "").lower())
         window.apply_app_mode()
         window.new_tab(args.app)
         opened = True

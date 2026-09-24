@@ -480,24 +480,78 @@ class InPagePlayer(QWidget):
     def toggle_fullscreen(self) -> None:
         """Fill the screen, or go back into the page.
 
-        The player leaves the page for a window of its own while fullscreen,
-        then goes back into the page and is placed over its video again.
+        Merlin's own window goes fullscreen and the player covers it, rather
+        than the player leaving for a window of its own. A separate window
+        could open behind Merlin, and closing it handed focus elsewhere, which
+        could leave Merlin minimised. With one window neither can happen, and
+        the window returns to exactly the state it was in before.
         """
+        top = self.view.window()
         if not self._full_screen:
             self._full_screen = True
             self._place_timer.stop()
-            self.setParent(None)
-            self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
-            self.showFullScreen()
-        else:
-            self._full_screen = False
-            self.setParent(self.view)
+            self._window_state = top.windowState()
+            self.setParent(top)
+            self.setGeometry(top.rect())
             self.show()
-            self._place_timer.start()
-            self._ask_where()
-        self.controls.full = self._full_screen
+            self.raise_()
+            top.installEventFilter(self)
+            top.showFullScreen()
+            self._corners(top, visible=False)
+            self.controls.full = True
+            self.controls.setFocus()
+            self.controls.update()
+        else:
+            self._leave_fullscreen(restore=True)
+
+    def _leave_fullscreen(self, restore: bool) -> None:
+        """Back into the page, and the window back as it was."""
+        if not self._full_screen:
+            return
+        self._full_screen = False
+        top = self.window() if self.parent() is not self.view else self.view.window()
+        top.removeEventFilter(self)
+        self.setParent(self.view)
+        self.show()
+        if restore or top.isFullScreen():
+            top.setWindowState(self._window_state)
+        elif self._window_state & Qt.WindowState.WindowMaximized:
+            # fullscreen was ended elsewhere, Merlin's Esc or F11, which
+            # leaves the window normal; it was maximised before, so it is again
+            top.setWindowState(self._window_state)
+        top.raise_()
+        top.activateWindow()
+        self._corners(top, visible=True)
+        self.controls.full = False
         self.controls.setFocus()
         self.controls.update()
+        self._place_timer.start()
+        self._ask_where()
+
+    @staticmethod
+    def _corners(top, visible: bool) -> None:
+        """The rounded corner overlay would draw over a fullscreen picture."""
+        overlay = getattr(getattr(top, "tabs", None), "_overlay", None)
+        if overlay is not None:
+            try:
+                overlay.setVisible(visible)
+            except RuntimeError:
+                pass
+
+    def eventFilter(self, watched, event) -> bool:           # noqa: N802
+        """While fullscreen, keep covering the window as it resizes."""
+        from PyQt6.QtCore import QEvent
+
+        if self._full_screen and event.type() == QEvent.Type.Resize:
+            self.setGeometry(watched.rect())
+            self.raise_()
+        elif (self._full_screen and event.type() == QEvent.Type.WindowStateChange
+              and not watched.isFullScreen()):
+            # Fullscreen ended some other way: Merlin's own Esc shortcut, F11,
+            # or the system. The player follows the window back, rather than
+            # staying stretched over it.
+            QTimer.singleShot(0, lambda: self._leave_fullscreen(restore=False))
+        return False
 
     def stop(self) -> None:
         """Stop playing and step aside, leaving the page as it was."""
@@ -519,8 +573,8 @@ class InPagePlayer(QWidget):
                 pass
         self.picture.clear()
         if self._full_screen:
-            self._full_screen = False
-            self.setParent(self.view)
+            # leave the window as it was before fullscreen, not stuck in it
+            self.toggle_fullscreen()
         # asked, not waited for: if Qt's stop sticks, only the worker waits
         _ABANDONED.add((worker, thread))
         thread.finished.connect(lambda pair=(worker, thread): _ABANDONED.discard(pair))

@@ -842,6 +842,74 @@ def test_player_controls(app) -> None:
     controls.close()
 
 
+def test_filter_options_read_for_what_they_mean(app) -> None:
+    """generichide exempts a site from general hiding; unsupported options
+    that change a rule's meaning drop the rule rather than widen it."""
+    from merlin.adblock import FilterEngine, _registrable
+
+    engine = FilterEngine()
+    engine.load_text("\n".join([
+        "##.generic-ad",
+        "example.org##.site-ad",
+        "@@||www.example.org^$generichide",
+        "||popups.example^$popup",
+        "$csp=script-src 'self',domain=csp.example",
+        "||ads.example^",
+        "||www.example.org/ads/",
+    ]))
+    css = engine.cosmetic_css("www.example.org")
+    check("a generichide site gets its own hiding rules but no general ones",
+          ".site-ad" in css and ".generic-ad" not in css, css[:80])
+    # read as a plain exception, generichide allowed every request to the
+    # site, so a rule blocking part of it never fired
+    check("and generichide does not let every request to the site through",
+          engine.should_block("https://www.example.org/ads/banner.js", "script", False,
+                              "www.example.org"))
+    check("a popup rule no longer blocks ordinary requests",
+          not engine.should_block("https://popups.example/a.js", "script", True, "site.example"))
+    check("a csp rule no longer blocks every request on its site",
+          not engine.should_block("https://csp.example/app.js", "script", False, "csp.example"))
+    check("ordinary blocking still works",
+          engine.should_block("https://ads.example/a.js", "script", True, "site.example"))
+    check("IP addresses are sites of their own",
+          _registrable("127.0.0.1") == "127.0.0.1" and _registrable("10.0.0.1") != _registrable("127.0.0.1"))
+
+
+def test_blocked_list_and_app_links(app) -> None:
+    """The shield menu lists what was blocked; app windows keep to their site."""
+    window, _, _ = make_window(app, "t-blocked")
+    view = window.new_tab()
+    view.setHtml("<p>x</p>", QUrl("https://news.example.com/story"))
+    wait(app, 1.0)
+    window._on_blocked("news.example.com", "https://ads.example/one.js")
+    window._on_blocked("news.example.com", "https://track.example/pixel.gif")
+    window._sync_shields_menu()
+    check("the shield menu counts what was blocked on this page",
+          window.blocked_menu.title() == "Blocked on this page (2)", window.blocked_menu.title())
+    window.app_site = "example.com"
+    check("an app window keeps links within its own site",
+          window.in_app_site(QUrl("https://www.example.com/next"))
+          and not window.in_app_site(QUrl("https://elsewhere.org/")))
+    window.close()
+
+
+def test_page_fullscreen_restores_the_window(app) -> None:
+    """Leaving a page's own fullscreen restores the window as it was."""
+    window, _, _ = make_window(app, "t-webfull")
+    window.new_tab(page("a"))
+    window.apply_app_mode()
+    window.showMaximized()
+    wait(app, 0.5)
+    window.set_web_fullscreen(True)
+    wait(app, 0.5)
+    window.set_web_fullscreen(False)
+    wait(app, 0.5)
+    check("an app window gets no tab strip back after a page's fullscreen",
+          not window.tabs._bar_visible)
+    check("and a maximised window comes back maximised", window.isMaximized())
+    window.close()
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -863,7 +931,10 @@ def main() -> int:
                  test_released_views_are_dead, test_codec_engine_swap_is_safe,
                  test_engine_download_is_checked,
                  test_engine_update_bookkeeping, test_stream_taken_from_the_page,
-                 test_player_plays_in_the_page, test_player_controls):
+                 test_player_plays_in_the_page, test_player_controls,
+                 test_filter_options_read_for_what_they_mean,
+                 test_blocked_list_and_app_links,
+                 test_page_fullscreen_restores_the_window):
         print(f"\n{test.__name__}")
         try:
             test(app)

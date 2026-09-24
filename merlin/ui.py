@@ -407,6 +407,7 @@ class NoticeBar(QWidget):
         self.action = QPushButton("", self)
         self.action.clicked.connect(self.accepted.emit)
         close_button = QPushButton("\u2715", self)
+        self.close_button = close_button
         close_button.setFixedSize(30, 28)
         # its own padding: the dark theme's button padding is wider than this
         # button, which left no room for the cross and it disappeared
@@ -439,7 +440,15 @@ class NoticeBar(QWidget):
             f" border-bottom: 1px solid {border}; }}"
             f"#NoticeBar QLabel {{ color: {text}; background: transparent; }}")
 
+    def _buttons(self, shown: bool) -> None:
+        self.action.setVisible(shown)
+        self.close_button.setVisible(shown)
+        self.text.setAlignment(
+            (Qt.AlignmentFlag.AlignLeft if shown else Qt.AlignmentFlag.AlignHCenter)
+            | Qt.AlignmentFlag.AlignVCenter)
+
     def show_notice(self, message: str, action: str) -> None:
+        self._buttons(True)
         self._apply_colours()
         self.text.setText(message)
         self.action.setText(action)
@@ -447,8 +456,11 @@ class NoticeBar(QWidget):
         self.setVisible(True)
 
     def busy(self, message: str) -> None:
+        """Just a message, centred, while something happens: nothing to press."""
+        self._apply_colours()
+        self._buttons(False)
         self.text.setText(message)
-        self.action.setEnabled(False)
+        self.setVisible(True)
 
 
 class FindBar(QWidget):
@@ -466,6 +478,7 @@ class FindBar(QWidget):
         prev_button = QPushButton("\u2191", self)
         next_button = QPushButton("\u2193", self)
         close_button = QPushButton("\u2715", self)
+        self.close_button = close_button
         for button in (prev_button, next_button, close_button):
             button.setFixedWidth(34)
         layout.addWidget(self.field, 1)

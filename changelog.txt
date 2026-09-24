@@ -6,6 +6,41 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  Fixed: back and forward stayed greyed out on YouTube and similar sites.
+  They move between pages by rewriting the address in place; the engine kept
+  each move in its history, but Merlin only refreshed the buttons when a page
+  finished loading, which never happened. They now follow every change of
+  address.
+  Fullscreen in Merlin's player now uses Merlin's own window, which goes
+  fullscreen with the player covering it. The player used to leave for a
+  window of its own, which could open behind Merlin, and closing it could
+  leave Merlin minimised. However fullscreen ends, Esc, F11 or the system,
+  the window comes back as it was, maximised if it was maximised.
+  Fixed: coming out of a page's own fullscreen, YouTube's button for one,
+  turned the tab strip back on even in an app window, and left a maximised
+  window un-maximised.
+  Web app windows keep to their own site. A link to another site, or one that
+  asks for a new tab or window, opens in a new tab of an ordinary Merlin
+  window, starting one if none is open.
+  While Merlin looks for a stream, the bar above the page says "Connecting to
+  stream....." and nothing else.
+  The shield menu lists what was blocked on the page, with a button to copy
+  the list, so a page that looks broken can be checked against the blocker.
+  Content blocker: $generichide and $elemhide now mean what they say, "no
+  general hiding on this site" and "no hiding here". EasyList uses them for
+  169 sites, YouTube among them, whose own pages the general rules break.
+  They were read as plain exceptions instead, which kept the hiding and let
+  every request to the site through: on YouTube, 4,033 hiding rules applied
+  where 33 should. About 3,100 rules whose options Merlin cannot carry out,
+  $popup, $csp, $removeparam and others, are now left out rather than applied
+  far more widely than meant; a $csp rule, for one, blocked every request on
+  its site. Ads and trackers are blocked as before.
+  IP addresses count as sites of their own. 127.0.0.1 and 10.0.0.1 were both
+  taken as the site "0.1", the same one.
+  The codec engine workflow keeps Qt, the source, the build and its output
+  on one drive. Its first run on GitHub failed because Chromium's build
+  relates those paths to one another, and Windows has no relative path from
+  one drive to another.
   Merlin's player has controls in the manner of YouTube's: a thin red progress
   bar that thickens under the pointer, full and red with a LIVE badge for a
   live stream; play and pause, volume with a slider and mute, the time, close,

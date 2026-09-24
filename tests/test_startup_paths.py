@@ -307,8 +307,15 @@ _wf = open(os.path.join(root, ".github", "workflows", "build-webengine-codecs.ym
 check("the engine workflow builds the running Qt, not the compiled-against one",
       "qVersion()" in _wf and "QT_VERSION_STR" not in _wf)
 check("the workflow checks H.264 plays before it publishes",
-      _wf.index("use-codec-engine.py \"$env:GITHUB_WORKSPACE\\engine\"")
+      _wf.index("use-codec-engine.py \"C:\\engine\"")
       < _wf.index("--package"))
+# Chromium's gn relates source and build paths, and Windows has no relative
+# path between drives: the first real run failed on exactly that.
+_cfg = [l for l in _wf.splitlines() if l.strip().startswith(("cmake \"", "-DCMAKE_INSTALL_PREFIX", "mkdir C:", "mkdir -p /c/"))]
+check("the workflow keeps source, build and output on one drive",
+      'cmake "C:\\s\\qtwebengine"' in _wf and "mkdir C:\\b" in _wf
+      and "mkdir -p /c/s" in _wf and '-DCMAKE_INSTALL_PREFIX="C:\\engine"' in _wf
+      and '--outputdir "C:\\Qt"' in _wf, str(_cfg))
 check("the workflow asks for the proprietary codecs",
       "-DQT_FEATURE_webengine_proprietary_codecs=ON" in _wf)
 check("the workflow keeps WebRTC, PDF and the spellchecker",

@@ -32,7 +32,8 @@ Chromium through Qt WebEngine.
 - Element hiding through cosmetic filters
 - HTTPS upgrade, third-party cookie blocking, `DNT` and `Sec-GPC` headers, and a
   WebRTC local-IP-leak switch
-- Per-site controls behind the shield button, with a live blocked count
+- Per-site controls behind the shield button, with a live blocked count and
+  a list of what was blocked on the page
 - GPU fingerprinting protection: one generic WebGL vendor and renderer for
   every user, emptied WebGPU adapter descriptors, and a WebGL extension list
   that varies per site so a hash of it cannot follow you around
@@ -69,7 +70,7 @@ Chromium through Qt WebEngine.
 **Web apps**
 
 - Install any page as a standalone app with its own shortcut, icon and frameless
-  window
+  window. Links to other sites open in an ordinary Merlin window
 - Settings, Web apps lists the ones you have installed, and removes them
 
 ## Requirements
