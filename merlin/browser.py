@@ -1660,8 +1660,10 @@ class BrowserWindow(QMainWindow):
         self.notice_bar.setVisible(True)
         self.notice_bar.busy("Connecting to stream.....")
 
+        cookies = media.cookies_snapshot()       # taken here, on the UI thread
+
         def resolve():
-            ok, result = media.resolve_stream(page)
+            ok, result = media.resolve_stream(page, cookies=cookies)
             self._stream_resolved.emit(page, ok, result)
 
         threading.Thread(target=resolve, daemon=True).start()
@@ -1773,7 +1775,9 @@ class BrowserWindow(QMainWindow):
 
         def check():
             # Down to a first piece of video, not just the playlist: YouTube
-            # can hand out the playlist and refuse the video in it.
+            # can hand out the playlist and refuse the video in it. (Without
+            # cookies, as a browser would: the stream lives on googlevideo.com,
+            # which is never sent YouTube's.)
             for line in media.trace_stream(stream, agent):
                 crashlog.note(f"stream check, {line}")
 

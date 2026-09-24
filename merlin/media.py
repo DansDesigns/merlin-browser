@@ -528,7 +528,91 @@ def _telling_lines(text: str) -> list:
     return keep
 
 
-def trace_stream(stream: str, agent: str = "", timeout: int = 15) -> list:
+# ------------------------------------------------------- YouTube cookies
+#
+# YouTube refuses yt-dlp far less often when it arrives with the browsing
+# session the page already has: "The page needs to be reloaded" is its check
+# for a client it does not trust. This keeps Merlin's own YouTube and Google
+# cookies, as the engine reports them, so a lookup can present them. Handing
+# browser cookies to yt-dlp is the remedy its own --cookies-from-browser
+# option provides; only these two sites' cookies are kept, in memory, and the
+# file yt-dlp reads them from is deleted as soon as it finishes.
+
+_COOKIE_SITES = ("youtube.com", "google.com")
+_COOKIES: dict = {}
+
+
+def _cookie_site(domain: str) -> bool:
+    domain = (domain or "").lower().lstrip(".")
+    return any(domain == site or domain.endswith("." + site) for site in _COOKIE_SITES)
+
+
+def _cookie_row(cookie) -> dict:
+    """A cookie's values, copied out while the cookie is still there."""
+    expiry = cookie.expirationDate()
+    return {
+        "domain": cookie.domain(),
+        "path": cookie.path() or "/",
+        "secure": cookie.isSecure(),
+        "expiry": int(expiry.toSecsSinceEpoch()) if expiry.isValid() else 0,
+        "name": bytes(cookie.name()).decode("utf-8", "replace"),
+        "value": bytes(cookie.value()).decode("utf-8", "replace"),
+    }
+
+
+def watch_cookies(store) -> None:
+    """Follow a profile's cookie store, keeping the YouTube and Google ones.
+
+    The cookie the engine passes to cookieAdded is only lent for that call.
+    Keeping the object itself and reading it later read freed memory and
+    crashed, so its values are copied out at once.
+    """
+    def added(cookie):
+        if _cookie_site(cookie.domain()):
+            row = _cookie_row(cookie)
+            _COOKIES[(row["name"], row["domain"], row["path"])] = row
+
+    def removed(cookie):
+        name = bytes(cookie.name()).decode("utf-8", "replace")
+        _COOKIES.pop((name, cookie.domain(), cookie.path() or "/"), None)
+
+    store.cookieAdded.connect(added)
+    store.cookieRemoved.connect(removed)
+    store.loadAllCookies()
+
+
+def cookies_snapshot() -> list:
+    """The kept cookies as plain values, safe to hand to another thread."""
+    return [dict(row) for row in list(_COOKIES.values())]
+
+
+def netscape_cookies(rows: list) -> str:
+    """The cookie file format yt-dlp's --cookies reads."""
+    lines = ["# Netscape HTTP Cookie File"]
+    for row in rows:
+        domain = row["domain"]
+        lines.append("\t".join([
+            domain, "TRUE" if domain.startswith(".") else "FALSE", row["path"],
+            "TRUE" if row["secure"] else "FALSE", str(row["expiry"]),
+            row["name"], row["value"]]))
+    return "\n".join(lines) + "\n"
+
+
+def cookie_header(rows: list, url: str) -> str:
+    """A Cookie header of the rows that apply to url."""
+    import urllib.parse
+
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    pairs = []
+    for row in rows:
+        domain = row["domain"].lower().lstrip(".")
+        if host == domain or host.endswith("." + domain):
+            pairs.append(f"{row['name']}={row['value']}")
+    return "; ".join(pairs)
+
+
+def trace_stream(stream: str, agent: str = "", timeout: int = 15,
+                 cookies: list = None) -> list:
     """Follow an HLS stream from its playlist down to a first segment.
 
     Returns one line per step, for the log: the playlist, the first quality
@@ -544,7 +628,12 @@ def trace_stream(stream: str, agent: str = "", timeout: int = 15) -> list:
     lines = []
 
     def fetch(url, limit):
-        request = urllib.request.Request(url, headers=headers)
+        sent = dict(headers)
+        if cookies:
+            jar = cookie_header(cookies, url)
+            if jar:
+                sent["Cookie"] = jar
+        request = urllib.request.Request(url, headers=sent)
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status, response.read(limit)
 
@@ -649,7 +738,7 @@ def _try_at_once(base: list, url: str, attempts, timeout: int, note) -> tuple:
     return "", reasons, missing
 
 
-def resolve_stream(url: str, timeout: int = 60) -> tuple[bool, str]:
+def resolve_stream(url: str, timeout: int = 60, cookies: list = None) -> tuple[bool, str]:
     """The direct address of the stream on a page, or why there is none.
 
     Tries each way of asking in turn and returns the first address found.
@@ -661,11 +750,41 @@ def resolve_stream(url: str, timeout: int = 60) -> tuple[bool, str]:
     if not path:
         return False, "yt-dlp is not installed"
     base = _ytdlp_argv(path) + ["--get-url", "--no-playlist"]
+    cookie_file = ""
+    if cookies:
+        cookie_file = _write_cookie_file(cookies)
+        if cookie_file:
+            base += ["--cookies", cookie_file]
+    try:
+        return _resolve(url, timeout, path, base)
+    finally:
+        if cookie_file:
+            try:
+                os.remove(cookie_file)
+            except OSError:
+                pass
+
+
+def _write_cookie_file(rows: list) -> str:
+    """A private, temporary cookie file for one yt-dlp lookup."""
+    import tempfile
+
+    try:
+        handle, name = tempfile.mkstemp(prefix="merlin-yt-", suffix=".txt")
+        with os.fdopen(handle, "w", encoding="utf-8") as out:
+            out.write(netscape_cookies(rows))
+        os.chmod(name, 0o600)
+        return name
+    except OSError:
+        return ""
+
+
+def _resolve(url: str, timeout: int, path: str, base: list) -> tuple[bool, str]:
     deno = deno_path()
     if deno:
         # named explicitly rather than left to be found: on Linux yt-dlp only
         # looks on the PATH, and Merlin's copy lives in its own folder
-        base += ["--js-runtimes", f"deno:{deno}"]
+        base = base + ["--js-runtimes", f"deno:{deno}"]      # a new list: _resolve may run twice
     elif _needs_js_runtime(url):
         return False, JS_RUNTIME_MISSING
 
@@ -679,6 +798,15 @@ def resolve_stream(url: str, timeout: int = 60) -> tuple[bool, str]:
     attempts = YOUTUBE_ATTEMPTS if _is_youtube(url) else OTHER_ATTEMPTS
     found_stream, reasons, runtime_missing = _try_at_once(
         base, url, attempts, timeout, note)
+    if not found_stream and not runtime_missing and _is_youtube(url):
+        # YouTube's refusals come and go: merlin-log.txt shows the same
+        # stream refused, then found moments later. One more round, shortly.
+        import time
+
+        time.sleep(2)
+        note("stream lookup: refused, asking once more")
+        found_stream, reasons, runtime_missing = _try_at_once(
+            base, url, attempts, timeout, note)
     if found_stream:
         return True, found_stream
     if runtime_missing and not deno:
@@ -703,7 +831,9 @@ def resolve_stream(url: str, timeout: int = 60) -> tuple[bool, str]:
         except Exception as exc:                  # noqa: BLE001
             note(f"    update failed: {exc}")
         else:
-            return resolve_stream(url, timeout)
+            # the same command, cookies included: the file is only deleted
+            # once the outer call returns
+            return _resolve(url, timeout, path, base)
 
     return False, "\n".join(r[:220] for r in reasons) or "no stream found"
 

@@ -6,6 +6,14 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  yt-dlp is given Merlin's own YouTube and Google cookies when it looks for a
+  stream. merlin-log.txt showed YouTube refusing it as "a page that needs to
+  be reloaded", its check for a client it does not trust, and the same stream
+  then found moments later. With the page's session it looks like the page;
+  handing browser cookies to yt-dlp is what its own --cookies-from-browser
+  option exists for. Only those two sites' cookies are kept, in memory, and
+  the file yt-dlp reads them from is deleted as soon as it finishes. A refused
+  lookup is also tried once more, shortly after.
   Merlin's player notices a stream that never starts. YouTube can hand out a
   stream's playlist and refuse the video in it, and the player then waited
   quietly for ever: a black picture and a Play button that did nothing. Now,

@@ -1047,6 +1047,60 @@ def test_stalled_stream_recovers(app) -> None:
     window.close()
 
 
+def test_youtube_cookies_for_ytdlp(app) -> None:
+    """YouTube's cookies are kept safely and handed to yt-dlp, then deleted."""
+    import glob
+    import stat
+
+    from PyQt6.QtCore import QByteArray
+    from PyQt6.QtNetwork import QNetworkCookie
+
+    from merlin import media as _media
+
+    window, _, _ = make_window(app, "t-cookies")
+    profile = window.profile
+    window.new_tab(page("a"))
+    wait(app, 1.0)
+    _media._COOKIES.clear()
+    _media.watch_cookies(profile.cookieStore())
+    for domain, name in ((".youtube.com", "VISITOR_INFO1_LIVE"), (".example.org", "other")):
+        cookie = QNetworkCookie(QByteArray(name.encode()), QByteArray(b"v"))
+        cookie.setDomain(domain)
+        cookie.setPath("/")
+        profile.cookieStore().setCookie(cookie, QUrl(f"https://{domain.lstrip('.')}/"))
+    wait(app, 1.5)
+    # reading them later read freed memory and crashed Merlin; copied now
+    rows = _media.cookies_snapshot()
+    check("YouTube's cookies are kept, and read safely later",
+          [r["name"] for r in rows] == ["VISITOR_INFO1_LIVE"], str(rows))
+
+    folder = tempfile.mkdtemp(prefix="cookie-ytdlp-")
+    fake = os.path.join(folder, "yt-dlp")
+    with open(fake, "w") as handle:
+        handle.write(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "a = sys.argv[1:]\n"
+            "text = open(a[a.index('--cookies') + 1]).read() if '--cookies' in a else ''\n"
+            "if 'VISITOR_INFO1_LIVE' in text:\n"
+            "    print('https://example.invalid/c.m3u8'); sys.exit(0)\n"
+            "sys.stderr.write('ERROR: The page needs to be reloaded.\\n'); sys.exit(1)\n")
+    os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
+    saved = (_media.ytdlp_path, _media.deno_path, _media._ytdlp_argv)
+    _media.ytdlp_path = lambda: fake
+    _media.deno_path = lambda: "/bin/true"
+    _media._ytdlp_argv = lambda p: [p]
+    before = set(glob.glob(os.path.join(tempfile.gettempdir(), "merlin-yt-*")))
+    try:
+        ok, _found = _media.resolve_stream("https://www.youtube.com/watch?v=k", cookies=rows)
+        check("yt-dlp is given the page's YouTube cookies", ok)
+        left = set(glob.glob(os.path.join(tempfile.gettempdir(), "merlin-yt-*"))) - before
+        check("and the cookie file is deleted afterwards", not left, str(left))
+    finally:
+        _media.ytdlp_path, _media.deno_path, _media._ytdlp_argv = saved
+    window.close()
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -1073,7 +1127,7 @@ def main() -> int:
                  test_blocked_list_and_app_links,
                  test_page_fullscreen_restores_the_window,
                  test_stream_lookup_is_quick, test_stream_failure_is_not_a_box,
-                 test_stalled_stream_recovers):
+                 test_stalled_stream_recovers, test_youtube_cookies_for_ytdlp):
         print(f"\n{test.__name__}")
         try:
             test(app)

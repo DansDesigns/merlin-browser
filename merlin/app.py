@@ -613,6 +613,13 @@ def main(argv: list[str] | None = None) -> int:
         lambda count: window.status_label.setText(f"{count:,} filter rules loaded"))
     filter_loader.status.connect(window.status_label.setText)
 
+    # YouTube's cookies, kept for yt-dlp; see media.watch_cookies
+    try:
+        from . import media as _media
+
+        _media.watch_cookies(profile.cookieStore())
+    except Exception:                                    # noqa: BLE001
+        pass
     app.aboutToQuit.connect(lambda: _shut_down(app, profile))
     code = app.exec()
     _leave(code, settings, history)
