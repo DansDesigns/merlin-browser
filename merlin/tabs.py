@@ -1151,9 +1151,17 @@ class TabContainer(QWidget):
 
     def eventFilter(self, watched, event):               # noqa: N802
         """A touch or click on the page stops the strip holding itself open."""
-        if watched is self.stack and event.type() in (
+        # While a window closes, Qt still sends events through this filter as
+        # the stack is destroyed, after Python has already let go of this
+        # object's attributes; reading them then raised, at random.
+        stack = getattr(self, "stack", None)
+        if stack is None:
+            return False
+        if watched is stack and event.type() in (
                 QEvent.Type.TouchBegin, QEvent.Type.MouseButtonPress):
-            self.v_strip.release_touch()
+            strip = getattr(self, "v_strip", None)
+            if strip is not None:
+                strip.release_touch()
         return super().eventFilter(watched, event)
 
     def _strip_reorder(self, index: int, steps: int) -> None:

@@ -589,6 +589,9 @@ class InPagePlayer(QWidget):
         """While fullscreen, keep covering the window as it resizes."""
         from PyQt6.QtCore import QEvent
 
+        # events can still arrive while the window is being destroyed
+        if not getattr(self, "_full_screen", False):
+            return False
         if self._full_screen and event.type() == QEvent.Type.Resize:
             self.setGeometry(watched.rect())
             self.raise_()

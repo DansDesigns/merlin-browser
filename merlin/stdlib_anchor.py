@@ -49,6 +49,7 @@ if __name__ == "__merlin_never_runs__":
     import colorsys  # noqa: F401
     import compileall  # noqa: F401
     import concurrent  # noqa: F401
+    import concurrent.futures  # noqa: F401
     import configparser  # noqa: F401
     import contextlib  # noqa: F401
     import contextvars  # noqa: F401
@@ -87,6 +88,7 @@ if __name__ == "__merlin_never_runs__":
     import heapq  # noqa: F401
     import hmac  # noqa: F401
     import html  # noqa: F401
+    import html.parser  # noqa: F401
     import http  # noqa: F401
     import imaplib  # noqa: F401
     import imghdr  # noqa: F401
@@ -191,6 +193,9 @@ if __name__ == "__merlin_never_runs__":
     import unicodedata  # noqa: F401
     import unittest  # noqa: F401
     import urllib  # noqa: F401
+    import urllib.error  # noqa: F401
+    import urllib.parse  # noqa: F401
+    import urllib.request  # noqa: F401
     import uu  # noqa: F401
     import uuid  # noqa: F401
     import warnings  # noqa: F401

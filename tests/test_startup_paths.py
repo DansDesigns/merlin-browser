@@ -238,26 +238,28 @@ check("the runtime retry cannot loop",
 import ast as _ast
 _anchor_src = open(os.path.join(root, "merlin", "stdlib_anchor.py"),
                    encoding="utf-8").read()
-_anchored = {n.names[0].name.split(".")[0]
-             for n in _ast.walk(_ast.parse(_anchor_src))
-             if isinstance(n, _ast.Import)}
+# Full dotted names, and every subfolder: importing a package does not bring
+# its submodules (html does not bring html.parser, which MerlinEngine needs),
+# and merlin/engine/ is a folder of its own. Comparing only top-level names
+# in the top folder had missed both.
+_anchored = {a.name for n in _ast.walk(_ast.parse(_anchor_src))
+             if isinstance(n, _ast.Import) for a in n.names}
 _used = set()
-for _name in os.listdir(os.path.join(root, "merlin")):
-    if not _name.endswith(".py") or _name == "stdlib_anchor.py":
-        continue
-    _tree = _ast.parse(open(os.path.join(root, "merlin", _name),
-                            encoding="utf-8").read())
-    for _node in _ast.walk(_tree):
-        if isinstance(_node, _ast.Import):
-            _mods = [a.name for a in _node.names]
-        elif isinstance(_node, _ast.ImportFrom) and _node.module and _node.level == 0:
-            _mods = [_node.module]
-        else:
+for _base, _dirs, _files in os.walk(os.path.join(root, "merlin")):
+    for _name in _files:
+        if not _name.endswith(".py") or _name == "stdlib_anchor.py":
             continue
-        for _m in _mods:
-            _top = _m.split(".")[0]
-            if _top in sys.stdlib_module_names:
-                _used.add(_top)
+        _tree = _ast.parse(open(os.path.join(_base, _name), encoding="utf-8").read())
+        for _node in _ast.walk(_tree):
+            if isinstance(_node, _ast.Import):
+                _mods = [a.name for a in _node.names]
+            elif isinstance(_node, _ast.ImportFrom) and _node.module and _node.level == 0:
+                _mods = [_node.module]
+            else:
+                continue
+            for _m in _mods:
+                if _m.split(".")[0] in sys.stdlib_module_names and _m != "os.path":
+                    _used.add(_m)
 _missing = sorted(_used - _anchored)
 check("every standard module the package uses is carried in Merlin.exe",
       not _missing, ", ".join(_missing))
@@ -376,6 +378,18 @@ _loadstate = browser_src2.split("    def _on_load_state(")[1].split("\n    def "
 check("a reload looks for an unplayable stream again",
       "_schedule_live_check(view)" in _loadstate
       and "_offered_streams.discard" in _loadstate)
+
+# Qt sends events through an event filter while its window is destroyed, after
+# Python has let go of the filter's attributes. The tab container's filter
+# raised there at random and stopped the test suite; each filter guards it.
+def _filter_body(path):
+    text = open(os.path.join(root, "merlin", path), encoding="utf-8").read()
+    return text.split("def eventFilter(")[1][:700]
+check("event filters stand aside while their object is destroyed",
+      'getattr(self, "stack", None)' in _filter_body("tabs.py")
+      and "except (AttributeError, RuntimeError)" in _filter_body("gestures.py")
+      and 'getattr(self, "_full_screen", False)' in _filter_body("inplace.py")
+      and 'getattr(self, "url_bar", None)' in _filter_body("browser.py"))
 
 # --- batch quoting hazards --------------------------------------------------
 # A PowerShell call with \" escapes inside a for /f broke install.bat twice:

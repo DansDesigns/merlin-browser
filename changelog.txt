@@ -6,6 +6,25 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  MerlinEngine begins: Merlin's own web engine, in merlin/engine/, built
+  alongside Chromium rather than in place of it. Nothing in the browser uses
+  it yet; try it with  python -m merlin.engine <address or file>.
+  It parses HTML into a document tree, styles it with the CSS cascade
+  (selectors with combinators, specificity, !important, inheritance, the
+  default stylesheet, px, em, rem and percentages), lays it out in normal
+  flow (block boxes with margins that collapse, padding, borders, widths and
+  auto centring; text broken into lines by measuring the real fonts; lists,
+  preformatted text, links), and paints it with Qt. Its view loads over the
+  network, follows links and #fragments, goes back and forward, zooms and
+  scrolls, with the same signals Merlin's window already listens to. Pure
+  Python on PyQt6: no Chromium, no Rust, nothing new to install. A test
+  guards that it never imports Chromium: python tests/test_engine.py.
+  Not yet: JavaScript, images, forms, cookies, tables, floats, flexbox and
+  grid, and the content blocker.
+  The standard-library anchor now names the submodules the package uses,
+  such as html.parser and urllib.request, and its check reads every folder
+  and compares full names. Importing html does not bring html.parser, and
+  the check had compared only top-level names in the top folder.
   The codec engine build now runs in parts. Its second run on GitHub compiled
   for the full six hours GitHub allows a job and was stopped there, unfinished.
   Each part now compiles for a fixed time, saves the source and build folders,

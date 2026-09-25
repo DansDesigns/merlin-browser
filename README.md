@@ -1,5 +1,5 @@
 # Merlin Browser
-![version](https://img.shields.io/badge/version-1.6.93-6f8ff0)
+![version](https://img.shields.io/badge/version-1.6.1-6f8ff0)
 
 ### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6 Requires a reinstall as there has been a fundamental change to the folder structure. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
 
@@ -141,7 +141,25 @@ works hard against yt-dlp, so when every way of asking fails, Merlin moves its
 own copy to yt-dlp's nightly build, where YouTube fixes usually land first, and
 tries once more. Ctrl+Shift+P plays any page in the player the same way.
 
-# Installation
+### MerlinEngine
+
+Merlin is beginning its own web engine, MerlinEngine, in `merlin/engine/`:
+pure Python on Qt's painting, with no Chromium and no Rust. It is built
+alongside Chromium, not in place of it, and nothing in the browser uses it yet.
+Try it on its own:
+
+```bash
+python -m merlin.engine https://example.com
+python -m merlin.engine page.html
+```
+
+It renders ordinary documents: text, headings, paragraphs, lists, links,
+colours, fonts, margins, padding, borders and centring, with the CSS cascade
+and line breaking by real font measurement. JavaScript, images, forms, tables
+and modern layout are still to come, so sites that depend on them will not
+work in it yet.
+
+
 
 Download from the [Releases](https://github.com/DansDesigns/merlin-browser/releases) page or build from source by cloning this repo then running:
 
@@ -281,6 +299,8 @@ merlin/
   dictation.py   local speech to text for the search box
   single.py      one window, so links reuse the browser already open
   updater.py     version check and in-place update
+  engine/        MerlinEngine, Merlin's own web engine: html, css, layout,
+                 paint and view, each its own module
   codecengine.py fetching, checking and swapping in the codec engine
   crashlog.py    merlin-log.txt, and the stack if Merlin is ever killed
   stdlib_anchor.py  standard modules Merlin.exe carries for future updates

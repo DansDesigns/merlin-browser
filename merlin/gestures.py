@@ -185,7 +185,12 @@ class SwipeNavigator(QObject):
 
     # ------------------------------------------------------------------
     def eventFilter(self, obj, event):                    # noqa: N802
-        if not self._enabled():
+        # a window being destroyed still sends events through here, after
+        # Python has let go of this object's attributes
+        try:
+            if not self._enabled():
+                return False
+        except (AttributeError, RuntimeError):
             return False
         kind = event.type()
 
