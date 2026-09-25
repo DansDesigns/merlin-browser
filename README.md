@@ -1,5 +1,5 @@
 # Merlin Browser
-![version](https://img.shields.io/badge/version-1.6.92-6f8ff0)
+![version](https://img.shields.io/badge/version-1.6.93-6f8ff0)
 
 ### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6 Requires a reinstall as there has been a fundamental change to the folder structure. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
 
@@ -110,7 +110,10 @@ About Merlin shows "licensed codecs on" once the engine has them.
 GitHub builds them. `.github/workflows/build-webengine-codecs.yml` runs on
 GitHub's own Windows machines, so nobody compiles Chromium on their computer.
 It builds exactly the Qt and Qt WebEngine versions pip installs for Merlin,
-checks the result plays H.264 and AAC, and only then publishes it. It checks
+checks the result plays H.264 and AAC, and only then publishes it. GitHub
+stops a job after six hours and the build takes longer, so it runs in parts:
+each compiles for a while and saves its progress, and the next carries on
+(`.github/actions/codec-build-part`). It checks
 once a week and builds only when PyQt6 has moved to a version with nothing
 published yet; it can also be started from the Actions tab. The steps that make
 Qt WebEngine build on GitHub's runners follow

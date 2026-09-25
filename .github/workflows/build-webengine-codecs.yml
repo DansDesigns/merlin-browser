@@ -3,10 +3,16 @@ name: Qt WebEngine with H.264 and AAC
 # Builds the codec-enabled Qt WebEngine that Merlin's installers fetch, on
 # GitHub's own machines, so nobody compiles Chromium on their own computer.
 #
+# GitHub stops any one job after six hours, and the second run was stopped
+# there, still compiling. So the build is split into parts: each compiles for
+# a fixed time, saves the source and build folders, and the next part carries
+# on where it stopped (.github/actions/codec-build-part). The part that
+# finishes hands the engine on; the parts after it exit in a minute.
+#
 # It builds exactly the Qt and Qt WebEngine versions pip installs for Merlin
 # right now, checks the result really plays H.264 and AAC on Windows, and only
 # then publishes it as a release tagged engine-<version>. Installers of that
-# version fetch it from there automatically.
+# version, and Merlin's own updater, fetch it from there automatically.
 #
 # Runs by itself once a week and does nothing unless PyQt6 has moved to a
 # version with no published engine yet. Can also be started by hand from the
@@ -36,171 +42,167 @@ permissions:
   contents: write
 
 jobs:
-  windows:
+  plan:
     # windows-latest is windows-2025, whose image claims Windows SDK 26100
-    # but falls back to an ancient one (actions/runner-images#13310). Qt
-    # WebEngine 6.11 needs 26100, so: windows-2022 and install it explicitly.
+    # but falls back to an ancient one (actions/runner-images#13310); every
+    # job here uses windows-2022, and the same image throughout.
     runs-on: windows-2022
-    timeout-minutes: 360
+    outputs:
+      qt: ${{ steps.versions.outputs.qt }}
+      web: ${{ steps.versions.outputs.web }}
+      skip: ${{ steps.published.outputs.skip }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
     steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.12.10"
 
       - name: Which versions Merlin gets from pip today
+        id: versions
         shell: pwsh
         run: |
-          python -m pip install --upgrade pip
-          # html5lib is needed by the build itself: without it, configure
-          # quietly turns the whole of Qt WebEngine off rather than failing
-          python -m pip install PyQt6 PyQt6-WebEngine html5lib
+          python -m pip install PyQt6 PyQt6-WebEngine
           # the running versions, not what PyQt6 was compiled against: the
           # engine is tied to its exact Qt through private interfaces
           $qt  = python -c "from PyQt6.QtCore import qVersion; print(qVersion())"
           $web = python -c "from PyQt6.QtWebEngineCore import qWebEngineVersion; print(qWebEngineVersion())"
           Write-Host "Qt $qt, Qt WebEngine $web"
-          "QT_VERSION=$qt"   | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "WEB_VERSION=$web" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "qt=$qt"   | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "web=$web" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Already published?
         id: published
         shell: pwsh
         run: |
-          gh release view "engine-$env:WEB_VERSION" --repo "$env:GITHUB_REPOSITORY" *> $null
+          gh release view "engine-${{ steps.versions.outputs.web }}" --repo "$env:GITHUB_REPOSITORY" *> $null
           $exists = ($LASTEXITCODE -eq 0)
           $force = "${{ github.event.inputs.force }}" -eq "true"
           if ($exists -and -not $force) {
-            Write-Host "engine-$env:WEB_VERSION is already published. Nothing to do."
+            Write-Host "engine-${{ steps.versions.outputs.web }} is already published. Nothing to do."
             "skip=true" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
           } else {
             "skip=false" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
           }
           $global:LASTEXITCODE = 0
 
-      - name: Free disk space
-        if: steps.published.outputs.skip != 'true'
-        shell: pwsh
-        run: |
-          # Chromium needs far more room than a runner has spare by default
-          foreach ($path in "C:\Android", "C:\hostedtoolcache\windows\go",
-                            "C:\Program Files\dotnet\sdk", "C:\Strawberry\c") {
-            if (Test-Path $path) { Remove-Item $path -Recurse -Force -ErrorAction SilentlyContinue }
-          }
-          Get-PSDrive C, D -ErrorAction SilentlyContinue | Format-Table Name, Free
-
-      - name: Build tools
-        if: steps.published.outputs.skip != 'true'
-        run: |
-          # choco's own flex and bison packages are broken on Windows;
-          # winflexbison3 provides working ones under other names
-          choco install ninja gperf winflexbison3 nasm strawberryperl nodejs-lts -y
-
-      - name: flex and bison under the names configure looks for
-        if: steps.published.outputs.skip != 'true'
-        shell: pwsh
-        run: |
-          $dir = "C:\ProgramData\chocolatey\lib\winflexbison3\tools"
-          if (-not (Test-Path $dir)) {
-            $dir = (Get-ChildItem "C:\ProgramData\chocolatey\lib\winflexbison3" -Recurse -Filter "win_flex.exe" |
-                    Select-Object -First 1).DirectoryName
-          }
-          if (-not $dir) { throw "winflexbison3 was not found" }
-          Copy-Item (Join-Path $dir "win_flex.exe")  (Join-Path $dir "flex.exe")  -Force
-          Copy-Item (Join-Path $dir "win_bison.exe") (Join-Path $dir "bison.exe") -Force
-          $dir | Out-File $env:GITHUB_PATH -Append -Encoding utf8
-
-      - name: Windows SDK 26100
-        if: steps.published.outputs.skip != 'true'
-        uses: ChristopheLav/windows-sdk-install@v1
+  part1:
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
+    runs-on: windows-2022
+    timeout-minutes: 355
+    outputs:
+      done: ${{ steps.part.outputs.done }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: part
+        uses: ./.github/actions/codec-build-part
         with:
-          version-sdk: "26100"
-          features: "OptionId.DesktopCPPx64,OptionId.DesktopCPPx86"
+          part: "1"
+          previous-done: "false"
+          qt-version: ${{ needs.plan.outputs.qt }}
+          web-version: ${{ needs.plan.outputs.web }}
 
-      - name: CMake 3.29
-        if: steps.published.outputs.skip != 'true'
-        # CMake 4.1 wrongly reports valid Qt files as "File exists" during
-        # cmake --install; 3.29 does not
-        uses: lukka/get-cmake@latest
+  part2:
+    needs: [plan, part1]
+    if: ${{ !cancelled() && needs.plan.outputs.skip != 'true' && needs.part1.result == 'success' }}
+    runs-on: windows-2022
+    timeout-minutes: 355
+    outputs:
+      done: ${{ steps.part.outputs.done }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: part
+        uses: ./.github/actions/codec-build-part
         with:
-          cmakeVersion: "3.29.6"
+          part: "2"
+          previous-done: ${{ needs.part1.outputs.done }}
+          qt-version: ${{ needs.plan.outputs.qt }}
+          web-version: ${{ needs.plan.outputs.web }}
 
-      - name: Qt ${{ env.QT_VERSION }} for MSVC 2022
-        if: steps.published.outputs.skip != 'true'
-        shell: pwsh
-        run: |
-          # the PyPI release of aqtinstall predates Qt 6.11's folder layout
-          python -m pip install -U "git+https://github.com/miurahr/aqtinstall.git@master"
-          aqt install-qt windows desktop $env:QT_VERSION win64_msvc2022_64 --outputdir "C:\Qt"
-          $qtDir = Join-Path "C:\Qt\$env:QT_VERSION" "msvc2022_64"
-          if (-not (Test-Path $qtDir)) { throw "Qt was not installed where expected: $qtDir" }
-          "QT_DIR=$qtDir" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+  part3:
+    needs: [plan, part2]
+    if: ${{ !cancelled() && needs.plan.outputs.skip != 'true' && needs.part2.result == 'success' }}
+    runs-on: windows-2022
+    timeout-minutes: 355
+    outputs:
+      done: ${{ steps.part.outputs.done }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: part
+        uses: ./.github/actions/codec-build-part
+        with:
+          part: "3"
+          previous-done: ${{ needs.part2.outputs.done }}
+          qt-version: ${{ needs.plan.outputs.qt }}
+          web-version: ${{ needs.plan.outputs.web }}
 
-      - name: Qt WebEngine ${{ env.WEB_VERSION }} source
-        if: steps.published.outputs.skip != 'true'
-        shell: bash
-        run: |
-          # On C:, with the build. The checkout lives on D:, and Chromium's gn
-          # works out relative paths between source and build, which Windows
-          # cannot do across drives: the first run failed with "path is on
-          # mount 'D:', start on mount 'C:'". Short, too: Chromium trips over
-          # Windows' path length limit.
-          mkdir -p /c/s && cd /c/s
-          # code.qt.io sometimes drops the large Chromium submodule part way
-          for attempt in 1 2 3 4 5; do
-            rm -rf qtwebengine
-            if git clone https://code.qt.io/qt/qtwebengine.git --branch "v${WEB_VERSION}" \
-                 --recursive --depth 1 --shallow-submodules; then
-              exit 0
-            fi
-            echo "Clone attempt $attempt failed, waiting before retrying"
-            sleep 30
-          done
-          exit 1
+  part4:
+    needs: [plan, part3]
+    if: ${{ !cancelled() && needs.plan.outputs.skip != 'true' && needs.part3.result == 'success' }}
+    runs-on: windows-2022
+    timeout-minutes: 355
+    outputs:
+      done: ${{ steps.part.outputs.done }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: part
+        uses: ./.github/actions/codec-build-part
+        with:
+          part: "4"
+          previous-done: ${{ needs.part3.outputs.done }}
+          qt-version: ${{ needs.plan.outputs.qt }}
+          web-version: ${{ needs.plan.outputs.web }}
 
-      # Qt, the source, the build and its output all live on C:. Chromium's
-      # build tools relate these paths to one another, and Windows has no
-      # relative path from one drive to another.
-      - name: Configure and build, with the codecs
-        if: steps.published.outputs.skip != 'true'
-        shell: cmd
-        run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" 10.0.26100.0
-          rem a short build path, since Chromium trips over Windows' path limit
-          mkdir C:\b
-          cd /d C:\b
-          set "PATH=%QT_DIR%\bin;%PATH%"
-          rem Only what Merlin does not use is switched off. WebRTC (video
-          rem calls), PDF and printing, the spellchecker and extensions, which
-          rem the PDF viewer is built on, all stay.
-          cmake "C:\s\qtwebengine" -G Ninja -DCMAKE_BUILD_TYPE=Release ^
-            -DCMAKE_PREFIX_PATH="%QT_DIR%" ^
-            -DQT_FEATURE_webengine_proprietary_codecs=ON ^
-            -DQT_FEATURE_qtpdf_build=OFF ^
-            -DQT_FEATURE_webengine_kerberos=OFF ^
-            -DCMAKE_INSTALL_PREFIX="C:\engine"
-          if errorlevel 1 exit /b 1
-          rem four jobs: more runs the runner out of memory
-          cmake --build . --parallel 4
-          if errorlevel 1 exit /b 1
-          cmake --install .
+  part5:
+    needs: [plan, part4]
+    if: ${{ !cancelled() && needs.plan.outputs.skip != 'true' && needs.part4.result == 'success' }}
+    runs-on: windows-2022
+    timeout-minutes: 355
+    outputs:
+      done: ${{ steps.part.outputs.done }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: part
+        uses: ./.github/actions/codec-build-part
+        with:
+          part: "5"
+          previous-done: ${{ needs.part4.outputs.done }}
+          qt-version: ${{ needs.plan.outputs.qt }}
+          web-version: ${{ needs.plan.outputs.web }}
+
+  publish:
+    needs: [plan, part5]
+    if: ${{ !cancelled() && needs.plan.outputs.skip != 'true' && needs.part5.outputs.done == 'true' }}
+    runs-on: windows-2022
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      WEB_VERSION: ${{ needs.plan.outputs.web }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+
+      - name: The built engine
+        uses: actions/download-artifact@v4
+        with:
+          name: codec-engine
+          path: C:\engine
 
       - name: Check it really plays H.264 and AAC
-        if: steps.published.outputs.skip != 'true'
         shell: pwsh
         run: |
-          # The same check the installers make: swap it into this runner's
-          # PyQt6, start it, and ask. Nothing is published unless it passes.
+          # The same check the installers make: swap it into a PyQt6 of the
+          # same versions, start it, and ask. Nothing is published unless it
+          # passes.
+          python -m pip install "PyQt6-Qt6==${{ needs.plan.outputs.qt }}" "PyQt6-WebEngine-Qt6==${{ needs.plan.outputs.web }}" PyQt6 PyQt6-WebEngine
           $env:QT_QPA_PLATFORM = "offscreen"
           python tools\use-codec-engine.py "C:\engine"
           if ($LASTEXITCODE -ne 0) { throw "The build does not play H.264 and AAC" }
 
       - name: Package and publish
-        if: steps.published.outputs.skip != 'true'
         shell: pwsh
         run: |
           python tools\use-codec-engine.py --package "C:\engine" "$env:GITHUB_WORKSPACE\dist"

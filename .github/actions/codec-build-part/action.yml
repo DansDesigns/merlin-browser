@@ -1,0 +1,282 @@
+name: Codec engine build, one part
+description: >
+  One part of building Qt WebEngine with H.264 and AAC. GitHub stops a job
+  after six hours and a Chromium build on its runners needs longer, so the
+  build is split: each part compiles for a fixed time, then saves the source
+  and build folders for the next part, which carries on where it stopped. The
+  part that finishes installs the engine and hands it on for publishing.
+
+inputs:
+  part:
+    description: Which part this is, from 1
+    required: true
+  previous-done:
+    description: "'true' when an earlier part already finished the build"
+    required: true
+  qt-version:
+    required: true
+  web-version:
+    required: true
+  build-minutes:
+    description: How long this part compiles before saving its progress
+    default: "285"
+
+outputs:
+  done:
+    description: "'true' once the engine is built"
+    value: ${{ steps.finish.outputs.done }}
+
+runs:
+  using: composite
+  steps:
+    # ------------------------------------------------ nothing left to do
+    - name: Already built by an earlier part
+      if: inputs.previous-done == 'true'
+      shell: pwsh
+      run: Write-Host "An earlier part finished the build; nothing to do."
+
+    - name: Note the start
+      if: inputs.previous-done != 'true'
+      shell: pwsh
+      run: |
+        "PART_START=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+        Get-PSDrive C, D -ErrorAction SilentlyContinue | Format-Table Name, Free
+
+    - name: Free disk space
+      if: inputs.previous-done != 'true'
+      shell: pwsh
+      run: |
+        # Chromium needs far more room than a runner has spare by default, and
+        # a later part unpacks the saved progress alongside it
+        foreach ($path in "C:\Android", "C:\hostedtoolcache\windows\go",
+                          "C:\Program Files\dotnet\sdk", "C:\Strawberry\c") {
+          if (Test-Path $path) { Remove-Item $path -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+        Get-PSDrive C, D -ErrorAction SilentlyContinue | Format-Table Name, Free
+
+    # ---------------------------------------------------------- tools
+    # Every tool lives at the same path in every part. The build files record
+    # absolute paths; a tool found somewhere else in the next part, as the
+    # CMake and Ninja actions' random temporary folders were, would leave the
+    # resumed build looking for programs that are not there.
+    - name: Python 3.12.10, pinned so its path never changes
+      if: inputs.previous-done != 'true'
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12.10"
+
+    - name: Build tools
+      if: inputs.previous-done != 'true'
+      shell: pwsh
+      run: |
+        # html5lib: without it configure quietly turns Qt WebEngine off
+        python -m pip install html5lib
+        # choco's flex and bison are broken on Windows; winflexbison3 works
+        choco install ninja gperf winflexbison3 nasm strawberryperl nodejs-lts 7zip -y --no-progress
+        $dir = "C:\ProgramData\chocolatey\lib\winflexbison3\tools"
+        if (-not (Test-Path $dir)) {
+          $dir = (Get-ChildItem "C:\ProgramData\chocolatey\lib\winflexbison3" -Recurse -Filter "win_flex.exe" |
+                  Select-Object -First 1).DirectoryName
+        }
+        Copy-Item (Join-Path $dir "win_flex.exe")  (Join-Path $dir "flex.exe")  -Force
+        Copy-Item (Join-Path $dir "win_bison.exe") (Join-Path $dir "bison.exe") -Force
+        $dir | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+        # CMake 3.29 at a fixed path: 4.1 wrongly reports valid Qt files as
+        # "File exists" during install, and an action's random folder moves
+        $cmake = "C:\tools\cmake-3.29.6-windows-x86_64"
+        if (-not (Test-Path "$cmake\bin\cmake.exe")) {
+          New-Item -ItemType Directory -Force C:\tools | Out-Null
+          Invoke-WebRequest "https://github.com/Kitware/CMake/releases/download/v3.29.6/cmake-3.29.6-windows-x86_64.zip" -OutFile C:\tools\cmake.zip
+          Expand-Archive C:\tools\cmake.zip -DestinationPath C:\tools -Force
+          Remove-Item C:\tools\cmake.zip
+        }
+        "$cmake\bin" | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+
+    - name: Windows SDK 26100
+      if: inputs.previous-done != 'true'
+      uses: ChristopheLav/windows-sdk-install@v1
+      with:
+        version-sdk: "26100"
+        features: "OptionId.DesktopCPPx64,OptionId.DesktopCPPx86"
+
+    - name: Qt ${{ inputs.qt-version }} for MSVC 2022, at C:\Qt
+      if: inputs.previous-done != 'true'
+      shell: pwsh
+      run: |
+        # the PyPI release of aqtinstall predates Qt 6.11's folder layout
+        python -m pip install -U "git+https://github.com/miurahr/aqtinstall.git@master"
+        aqt install-qt windows desktop ${{ inputs.qt-version }} win64_msvc2022_64 --outputdir "C:\Qt"
+        if (-not (Test-Path "C:\Qt\${{ inputs.qt-version }}\msvc2022_64\bin")) { throw "Qt was not installed" }
+
+    # ----------------------------------------------- part 1: from scratch
+    # Source, build and output all on C:. Chromium's gn relates these paths,
+    # and Windows has no relative path from one drive to another: the first
+    # run failed on exactly that.
+    - name: Qt WebEngine ${{ inputs.web-version }} source
+      if: inputs.previous-done != 'true' && inputs.part == '1'
+      shell: bash
+      run: |
+        mkdir -p /c/s && cd /c/s
+        # code.qt.io sometimes drops the large Chromium submodule part way
+        for attempt in 1 2 3 4 5; do
+          rm -rf qtwebengine
+          if git clone https://code.qt.io/qt/qtwebengine.git --branch "v${{ inputs.web-version }}" \
+               --recursive --depth 1 --shallow-submodules; then
+            exit 0
+          fi
+          echo "Clone attempt $attempt failed, waiting before retrying"
+          sleep 30
+        done
+        exit 1
+
+    - name: Configure, with the codecs
+      if: inputs.previous-done != 'true' && inputs.part == '1'
+      shell: cmd
+      run: |
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" 10.0.26100.0
+        mkdir C:\b
+        cd /d C:\b
+        set "PATH=C:\Qt\${{ inputs.qt-version }}\msvc2022_64\bin;%PATH%"
+        rem Only what Merlin does not use is switched off: WebRTC (video
+        rem calls), PDF and printing, the spellchecker and extensions, which
+        rem the PDF viewer is built on, all stay. Ninja is named explicitly, at
+        rem choco's fixed path, so a later part finds the same one.
+        cmake "C:\s\qtwebengine" -G Ninja -DCMAKE_BUILD_TYPE=Release ^
+          -DCMAKE_MAKE_PROGRAM="C:\ProgramData\chocolatey\bin\ninja.exe" ^
+          -DCMAKE_PREFIX_PATH="C:\Qt\${{ inputs.qt-version }}\msvc2022_64" ^
+          -DQT_FEATURE_webengine_proprietary_codecs=ON ^
+          -DQT_FEATURE_qtpdf_build=OFF ^
+          -DQT_FEATURE_webengine_kerberos=OFF ^
+          -DCMAKE_INSTALL_PREFIX="C:\engine"
+
+    # ---------------------------------------- later parts: carry on from it
+    - name: Progress from part ${{ inputs.part }} before this
+      if: inputs.previous-done != 'true' && inputs.part != '1'
+      uses: actions/download-artifact@v4
+      with:
+        name: codec-build-state
+        path: D:\state
+
+    - name: Unpack it where it was
+      if: inputs.previous-done != 'true' && inputs.part != '1'
+      shell: pwsh
+      run: |
+        # 7-Zip keeps each file's modification time, which is how the build
+        # tool knows what is already done
+        $first = Get-ChildItem D:\state -Filter "state.7z.001" | Select-Object -First 1
+        if (-not $first) { throw "The previous part's progress was not found" }
+        & "C:\Program Files\7-Zip\7z.exe" x $first.FullName -oC:\ -y -bso0 -bsp0
+        if ($LASTEXITCODE -ne 0) { throw "Unpacking failed" }
+        Remove-Item D:\state -Recurse -Force
+        Get-PSDrive C, D -ErrorAction SilentlyContinue | Format-Table Name, Free
+
+    # --------------------------------------------------- build, for a while
+    - name: Build for up to ${{ inputs.build-minutes }} minutes
+      id: build
+      if: inputs.previous-done != 'true'
+      shell: pwsh
+      run: |
+        $deadline = [int64]$env:PART_START + [int64]"${{ inputs.build-minutes }}" * 60
+        # the command in a batch file of its own, rather than a long quoted
+        # line passed through Start-Process into cmd
+        @(
+          '@echo off'
+          'call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" 10.0.26100.0'
+          'cd /d C:\b'
+          'cmake --build . --parallel 4 > C:\build.log 2>&1'
+          'exit /b %ERRORLEVEL%'
+        ) | Set-Content -Path C:\build-part.cmd -Encoding ascii
+        $p = Start-Process cmd.exe -ArgumentList '/c', 'C:\build-part.cmd' -PassThru -NoNewWindow
+        # Read the handle now: a process started this way reports no exit code
+        # at all unless its handle was taken while it ran, and a finished build
+        # would then have read as a failed one.
+        $null = $p.Handle
+        $stopped = $false
+        $shown = 0
+        while (-not $p.HasExited) {
+          Start-Sleep -Seconds 30
+          $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+          if ($now - $shown -ge 600) {
+            $last = Get-Content C:\build.log -Tail 1 -ErrorAction SilentlyContinue
+            Write-Host "progress: $last"
+            $shown = $now
+          }
+          if ($now -ge $deadline) {
+            Write-Host "Time for this part is up; saving progress for the next."
+            & taskkill /PID $p.Id /T /F | Out-Null
+            # the compiler's debug-info server outlives the build and would
+            # hold files open while they are saved
+            & taskkill /IM mspdbsrv.exe /F 2>$null | Out-Null
+            $stopped = $true
+            break
+          }
+        }
+        $p.WaitForExit()
+        if ($stopped) {
+          "result=stopped" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+        } elseif ($p.ExitCode -eq 0) {
+          "result=built" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+        } else {
+          Get-Content C:\build.log -Tail 60
+          throw "The build failed"
+        }
+        Get-Content C:\build.log -Tail 3
+
+    # ------------------------------------------------ finished: install it
+    - name: Install the engine
+      if: inputs.previous-done != 'true' && steps.build.outputs.result == 'built'
+      shell: cmd
+      run: |
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" 10.0.26100.0
+        cd /d C:\b
+        cmake --install .
+
+    - name: Hand the engine on for publishing
+      if: inputs.previous-done != 'true' && steps.build.outputs.result == 'built'
+      uses: actions/upload-artifact@v4
+      with:
+        name: codec-engine
+        path: C:\engine
+        retention-days: 3
+
+    # ------------------------------------- not finished: save for the next
+    - name: Save progress for the next part
+      if: inputs.previous-done != 'true' && steps.build.outputs.result == 'stopped'
+      shell: pwsh
+      run: |
+        # Nothing needs tidying first. Ninja records a step as done only once
+        # it has finished, so a file half-written when the part was stopped
+        # is simply built again by the next part: tested with a build killed
+        # outright partway, saved and resumed, which came out whole.
+        # onto whichever drive has more room, in parts GitHub can store
+        $d = (Get-PSDrive D -ErrorAction SilentlyContinue).Free
+        $out = if ($d -gt 40GB) { "D:\state" } else { "C:\state" }
+        New-Item -ItemType Directory -Force $out | Out-Null
+        & "C:\Program Files\7-Zip\7z.exe" a -t7z -mx=1 -mmt=on -v2g "$out\state.7z" C:\s C:\b -bso0 -bsp0
+        # 1 is a warning: a file still held open was skipped, and the next
+        # part simply builds it again. Anything higher is a real failure.
+        if ($LASTEXITCODE -gt 1) { throw "Saving progress failed" }
+        "STATE_DIR=$out" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+        Get-ChildItem $out | Format-Table Name, Length
+
+    - name: Upload the progress
+      if: inputs.previous-done != 'true' && steps.build.outputs.result == 'stopped'
+      uses: actions/upload-artifact@v4
+      with:
+        name: codec-build-state
+        path: ${{ env.STATE_DIR }}
+        retention-days: 2
+        compression-level: 0
+        overwrite: true
+
+    - name: Report
+      id: finish
+      shell: pwsh
+      run: |
+        if ("${{ inputs.previous-done }}" -eq "true" -or "${{ steps.build.outputs.result }}" -eq "built") {
+          "done=true" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "The engine is built."
+        } else {
+          "done=false" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Progress saved; the next part carries on."
+        }

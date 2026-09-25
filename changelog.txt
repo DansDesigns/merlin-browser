@@ -6,6 +6,15 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  The codec engine build now runs in parts. Its second run on GitHub compiled
+  for the full six hours GitHub allows a job and was stopped there, unfinished.
+  Each part now compiles for a fixed time, saves the source and build folders,
+  and the next part carries on where it stopped, up to five parts; the part
+  that finishes hands the engine on, and it is checked and published as
+  before. Every tool sits at a fixed path in every part, since the build
+  records absolute paths: CMake and Ninja had come from random temporary
+  folders, and Python's folder moved with each patch release. A build stopped
+  outright partway and resumed was tested to come out whole.
   yt-dlp is given Merlin's own YouTube and Google cookies when it looks for a
   stream. merlin-log.txt showed YouTube refusing it as "a page that needs to
   be reloaded", its check for a client it does not trust, and the same stream

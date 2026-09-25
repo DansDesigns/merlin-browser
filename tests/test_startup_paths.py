@@ -302,8 +302,25 @@ check("MerlinSetup.exe carries every file install.bat reads",
 
 # The engine must match the Qt actually running (qVersion), not the version
 # PyQt6 was compiled against (QT_VERSION_STR): in PyQt6 6.11 those differ.
-_wf = open(os.path.join(root, ".github", "workflows", "build-webengine-codecs.yml"),
-           encoding="utf-8").read()
+_wf_only = open(os.path.join(root, ".github", "workflows", "build-webengine-codecs.yml"),
+                encoding="utf-8").read()
+_part = open(os.path.join(root, ".github", "actions", "codec-build-part", "action.yml"),
+             encoding="utf-8").read()
+# the build steps live in the shared part; the checks read both together
+_wf = _wf_only + "\n" + _part
+# GitHub stops a job at six hours and the build needs longer: it runs in
+# parts, each carrying on from the last, and the tools stay at fixed paths so
+# a resumed build finds them where the first part did.
+check("the engine build runs in parts that carry on from each other",
+      all(f"previous-done: ${{{{ needs.part{i - 1}.outputs.done }}}}" in _wf_only
+          for i in range(2, 6)) and "timeout-minutes: 355" in _wf_only)
+check("each part's tools are at fixed paths",
+      'python-version: "3.12.10"' in _part and "lukka/get-cmake" not in _wf
+      and 'CMAKE_MAKE_PROGRAM="C:\\ProgramData\\chocolatey\\bin\\ninja.exe"' in _part
+      and "C:\\tools\\cmake-3.29.6-windows-x86_64" in _part)
+check("a finished build is not mistaken for a failed one",
+      "$null = $p.Handle" in _part
+      and _part.index("$null = $p.Handle") < _part.index("while (-not $p.HasExited)"))
 check("the engine workflow builds the running Qt, not the compiled-against one",
       "qVersion()" in _wf and "QT_VERSION_STR" not in _wf)
 check("the workflow checks H.264 plays before it publishes",
