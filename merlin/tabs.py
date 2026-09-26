@@ -927,8 +927,19 @@ class TabContainer(QWidget):
     def orientation(self) -> str:
         return self._orientation
 
+    def _torn_down(self) -> bool:
+        """Whether Python has already let go of this container's parts.
+
+        As a window is destroyed, Qt still delivers show, hide, move and
+        resize events to it after that has happened, and reading the parts
+        then raised at random; twice it stopped the test suite.
+        """
+        return not (hasattr(self, "_overlay") and hasattr(self, "stack"))
+
     def showEvent(self, event):  # noqa: N802
         super().showEvent(event)
+        if self._torn_down():
+            return
         self._place_strip()
         self._round_page()
 
@@ -1099,15 +1110,21 @@ class TabContainer(QWidget):
 
     def moveEvent(self, event):  # noqa: N802
         super().moveEvent(event)
+        if self._torn_down():
+            return
         self._round_page()
 
     def hideEvent(self, event):  # noqa: N802
         super().hideEvent(event)
+        if self._torn_down():
+            return
         if self._overlay is not None:
             self._overlay.hide()
 
     def resizeEvent(self, event):  # noqa: N802
         super().resizeEvent(event)
+        if self._torn_down():
+            return
         self._place_strip()
         self._round_page()
 

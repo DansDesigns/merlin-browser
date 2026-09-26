@@ -10,7 +10,12 @@ added as pages show they are needed.
 """
 from __future__ import annotations
 
-from html.parser import HTMLParser
+try:
+    from html.parser import HTMLParser
+except ImportError:
+    # A Merlin.exe built before the engine existed has no html.parser; the
+    # engine carries its own copy of the same module for that case.
+    from ._htmlparser import HTMLParser
 
 from .dom import Document, Element, Text
 

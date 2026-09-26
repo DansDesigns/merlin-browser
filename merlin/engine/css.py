@@ -83,6 +83,35 @@ _LENGTH = re.compile(r"^(-?[\d.]+)(px|em|rem|pt|%|vw|vh|ex|ch)?$")
 def parse_length(value: str, font_size: float, root_size: float, viewport=(1024, 768)):
     """A length as px, or ("%", n) for a percentage, "auto", or None."""
     value = value.strip().lower()
+    maths = re.match(r"^(min|max|clamp)\((.*)\)$", value)
+    if maths:
+        # min(), max() and clamp() over lengths that resolve now. A percentage
+        # needs the containing block, known only at layout, so it is set
+        # aside; the rest still give a sensible answer, as with
+        # width: min(620px, 86vw).
+        parts = [p.strip() for p in _split_outside(maths.group(2), ",")]
+        resolved = [parse_length(p, font_size, root_size, viewport) for p in parts]
+        numbers = [r for r in resolved if isinstance(r, float)]
+        if not numbers:
+            return next((r for r in resolved if isinstance(r, tuple)), None)
+        if maths.group(1) == "min":
+            return min(numbers)
+        if maths.group(1) == "max":
+            return max(numbers)
+        if len(resolved) == 3 and all(isinstance(r, float) for r in resolved):
+            low, preferred, high = resolved
+            return max(low, min(preferred, high))
+        return numbers[len(numbers) // 2]
+    calc = re.match(r"^calc\((.*)\)$", value)
+    if calc:
+        # the simplest calc(): one length plus or minus another
+        found = re.match(r"^\s*([^\s]+)\s*([+-])\s*([^\s]+)\s*$", calc.group(1))
+        if found:
+            left = parse_length(found.group(1), font_size, root_size, viewport)
+            right = parse_length(found.group(3), font_size, root_size, viewport)
+            if isinstance(left, float) and isinstance(right, float):
+                return left + right if found.group(2) == "+" else left - right
+        return None
     if value in ("auto", "none", "normal"):
         return "auto"
     if value == "0":
@@ -576,6 +605,19 @@ class Styler:
                 return ("normal",)
         if name == "font-family":
             return value.strip()
+        if name in ("flex-grow", "flex-shrink"):
+            try:
+                return max(0.0, float(lowered))
+            except ValueError:
+                return 1.0 if name == "flex-shrink" else 0.0
+        if name == "order":
+            try:
+                return int(float(lowered))
+            except ValueError:
+                return 0
+        if name in ("flex-direction", "flex-wrap", "justify-content", "align-items",
+                    "align-self", "align-content", "vertical-align", "border-collapse"):
+            return lowered.split()[-1] if lowered else ""
         if name in ("display", "text-align", "white-space", "font-style",
                     "text-decoration", "list-style-type", "visibility",
                     "border-top-style", "border-right-style", "border-bottom-style",
@@ -589,7 +631,10 @@ class Styler:
                 return "none"
             return lowered.split()[0] if lowered else ""
         if (name.startswith(("margin-", "padding-", "border-")) and name.endswith(("width", "top", "right", "bottom", "left"))) \
-                or name in ("width", "max-width", "min-width", "height", "min-height", "max-height", "text-indent"):
+                or name in ("width", "max-width", "min-width", "height", "min-height", "max-height",
+                            "text-indent", "row-gap", "column-gap", "flex-basis",
+                            "border-top-left-radius", "border-top-right-radius",
+                            "border-bottom-right-radius", "border-bottom-left-radius"):
             if name.startswith("border-") and name.endswith("-width"):
                 lowered = {"thin": "1px", "medium": "3px", "thick": "5px"}.get(lowered, lowered)
             length = parse_length(lowered, font, root_size, self.viewport)
@@ -696,6 +741,48 @@ def expand_shorthand(name: str, value: str) -> list:
         return found
     if name == "text-decoration-line":
         return [("text-decoration", value)]
+    if name == "gap" or name == "grid-gap":
+        values = [v for v in value.split() if v]
+        if not values:
+            return []
+        return [("row-gap", values[0]), ("column-gap", values[1] if len(values) > 1 else values[0])]
+    if name == "flex-flow":
+        found = []
+        for token in value.lower().split():
+            if token in ("row", "row-reverse", "column", "column-reverse"):
+                found.append(("flex-direction", token))
+            elif token in ("wrap", "nowrap", "wrap-reverse"):
+                found.append(("flex-wrap", token))
+        return found
+    if name == "flex":
+        tokens = value.lower().split()
+        if tokens == ["none"]:
+            return [("flex-grow", "0"), ("flex-shrink", "0"), ("flex-basis", "auto")]
+        if tokens == ["auto"]:
+            return [("flex-grow", "1"), ("flex-shrink", "1"), ("flex-basis", "auto")]
+        if tokens in (["initial"], ["0 1 auto"]):
+            return [("flex-grow", "0"), ("flex-shrink", "1"), ("flex-basis", "auto")]
+        numbers = [t for t in tokens if re.match(r"^[\d.]+$", t)]
+        lengths = [t for t in tokens if t not in numbers]
+        grow = numbers[0] if numbers else "1"
+        shrink = numbers[1] if len(numbers) > 1 else "1"
+        # a flex with only numbers means a basis of 0: the space is shared
+        # out from nothing, which is what makes flex: 1 columns equal
+        basis = lengths[0] if lengths else "0px"
+        return [("flex-grow", grow), ("flex-shrink", shrink), ("flex-basis", basis)]
+    if name == "border-radius":
+        values = [v for v in value.split("/")[0].split() if v]
+        if not values:
+            return []
+        corners = ("top-left", "top-right", "bottom-right", "bottom-left")
+        return [(f"border-{corner}-radius", v) for corner, v in zip(corners, _sides(values))]
+    if name in ("place-items",):
+        values = value.split()
+        return [("align-items", values[0])] if values else []
+    if name in ("place-content",):
+        values = value.split()
+        return ([("align-content", values[0]),
+                 ("justify-content", values[-1])] if values else [])
     return [(name, value)]
 
 

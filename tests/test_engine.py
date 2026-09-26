@@ -51,6 +51,33 @@ def test_no_chromium() -> None:
     check("MerlinEngine imports nothing from Chromium", not offenders, ", ".join(offenders))
 
 
+def test_without_html_parser() -> None:
+    """On a Merlin.exe with no html.parser the engine uses its own copy."""
+    import subprocess
+
+    script = (
+        "import importlib.abc, sys\n"
+        "class M(importlib.abc.MetaPathFinder):\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        "        if name in ('html.parser', '_markupbase'):\n"
+        "            raise ModuleNotFoundError(name)\n"
+        "sys.meta_path.insert(0, M())\n"
+        f"sys.path.insert(0, {ROOT!r})\n"
+        "from merlin.engine import html\n"
+        "doc = html.parse('<title>T</title><p>one<p>two<table><tr><td>a<td>b</table>"
+        "<!-- c --><script>if (a < b) {}</script>&amp; &copy;')\n"
+        "print(html.HTMLParser.__module__)\n"
+        "print(','.join(e.tag for e in doc.root.elements()))\n"
+        "print(doc.title, doc.body.text()[-3:])\n")
+    done = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    lines = done.stdout.splitlines()
+    check("without html.parser, the engine falls back to its own copy",
+          done.returncode == 0 and lines[:1] == ["merlin.engine._htmlparser"],
+          (done.stderr or done.stdout).strip()[-120:])
+    check("and builds the same tree the standard parser does",
+          lines[1:] == ["title,body,p,p,table,tr,td,td,script", "T & \u00a9"], str(lines[1:]))
+
+
 def test_parsing() -> None:
     from merlin.engine.dom import Element
     from merlin.engine.html import parse
@@ -287,7 +314,7 @@ def test_view(app) -> None:
 
 def main() -> int:
     app = QApplication(sys.argv[:1])
-    for test in (test_no_chromium, test_parsing, test_cascade, test_layout,
+    for test in (test_no_chromium, test_without_html_parser, test_parsing, test_cascade, test_layout,
                  test_body_and_markers, test_tables):
         print(test.__name__)
         test()

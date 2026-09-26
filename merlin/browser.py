@@ -43,7 +43,36 @@ from .brand import (
 
 
 # --------------------------------------------------------------------- page
-from .engine import MerlinView                                # noqa: E402
+def _merlin_view_class():
+    """MerlinView, loaded only when a tab asks for it; None if it cannot load.
+
+    Importing the engine at start-up made Merlin depend on it to start at all:
+    on a Merlin.exe without html.parser, 1.6.96 would not open, even with the
+    engine switched off. Loaded on demand, the most a failure can do is send
+    the tab to Chromium, with the reason in the status bar and the log.
+    """
+    global _ENGINE_ERROR
+    try:
+        from .engine import MerlinView
+    except Exception as exc:                          # noqa: BLE001
+        _ENGINE_ERROR = f"{type(exc).__name__}: {exc}"
+        try:
+            from . import crashlog
+
+            crashlog.note(f"Merlin Engine could not load: {_ENGINE_ERROR}")
+        except Exception:                             # noqa: BLE001
+            pass
+        return None
+    return MerlinView
+
+
+_ENGINE_ERROR = ""
+
+
+def _is_merlin_view(widget) -> bool:
+    """Whether a tab's view is MerlinEngine's, without loading the engine."""
+    return type(widget).__name__ == "MerlinView" and \
+        type(widget).__module__.endswith("engine.view")
 
 
 class _LinkCatcher(QWebEnginePage):
@@ -262,10 +291,20 @@ class WebView(QWebEngineView):
 
 
 # ------------------------------------------------------------------- window
-# A tab's page, drawn by either engine. The checks that mean "is this a web
-# page tab" use this; the few that need Chromium itself, running JavaScript in
-# the page, still ask for WebView.
-PAGE_VIEWS = (WebView, MerlinView)
+class _PageViews(type):
+    """isinstance(view, PAGE_VIEWS): a tab's page, drawn by either engine.
+
+    The checks that mean "is this a web page tab" use this; the few that need
+    Chromium itself, running JavaScript in the page, still ask for WebView.
+    Recognising a MerlinView this way needs no import of the engine.
+    """
+
+    def __instancecheck__(cls, widget):
+        return isinstance(widget, WebView) or _is_merlin_view(widget)
+
+
+class PAGE_VIEWS(metaclass=_PageViews):                   # noqa: N801
+    pass
 
 
 class BrowserWindow(QMainWindow):
@@ -1026,11 +1065,16 @@ class BrowserWindow(QMainWindow):
         before the browser felt usable. Deferred tabs cost a widget and nothing
         else until you click them.
         """
-        if self.settings.get("merlin_engine", False):
+        engine_view = _merlin_view_class() if self.settings.get("merlin_engine", False) else None
+        if engine_view is not None:
             # Merlin's own engine, switched on in Settings > Merlin Engine.
             # The window's content blocker and settings apply to it as well.
-            view = MerlinView(self, host=self, profile=self.profile)
+            view = engine_view(self, host=self, profile=self.profile)
         else:
+            if self.settings.get("merlin_engine", False) and _ENGINE_ERROR:
+                self.status_label.setText(
+                    "Merlin Engine could not load, so this tab uses Chromium. "
+                    "Details are in merlin-log.txt")
             view = WebView(self, self.profile, self)
         index = self.tabs.addTab(view, "New tab")
         view.titleChanged.connect(lambda title, v=view: self._on_title(v, title))
@@ -1045,7 +1089,7 @@ class BrowserWindow(QMainWindow):
             if ok else None)
         view.setZoomFactor(self.window_zoom
                            or float(self.settings.get("default_zoom", 1.0)))
-        if isinstance(view, MerlinView):
+        if _is_merlin_view(view):
             self.tabs.setTabToolTip(index, "Merlin Engine")
 
         if not background:
@@ -2085,7 +2129,7 @@ class BrowserWindow(QMainWindow):
         address = view.url().toString()
         if not address or address == "about:blank":
             return
-        use_merlin = not isinstance(view, MerlinView)
+        use_merlin = not _is_merlin_view(view)
         setting = self.settings.get("merlin_engine", False)
         self.settings.set("merlin_engine", use_merlin, save=False)
         try:

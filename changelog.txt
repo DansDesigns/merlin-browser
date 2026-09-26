@@ -5,7 +5,24 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
-1.5.4
+1.6.97
+  Fixed: 1.6.96 would not start on an existing Merlin.exe, even with Merlin
+  Engine switched off ("No module named 'html.parser'"). The browser window
+  imported the engine as Merlin started, the engine needs html.parser, and
+  an executable built before the engine existed does not have it. Now the
+  engine is loaded only when a tab asks for it, and if it cannot load, the
+  tab opens in Chromium and the reason goes to merlin-log.txt; Merlin never
+  needs the engine to start. The engine also carries its own copy of Python's
+  html.parser, used only when the executable lacks one, so on such an
+  executable it works rather than falling back. Both are checked by tests,
+  one of them with html.parser removed. No reinstall is needed.
+  Fixed: closing a window could, now and then, raise an error from the tab
+  strip, which was still being sent show, hide, move and resize events after
+  its parts had been let go. It now stands aside while being torn down.
+  The changelog's recent entries sat under 1.5.4; they are the notes for
+  1.6.96, and now carry that heading, so the updater shows them.
+
+1.6.96
   MerlinEngine can be switched on: Settings > Merlin Engine > "Use Merlin
   Engine for new tabs". It takes effect at once, for every tab opened from then
   on; tabs already open keep their engine. A button there reopens the current

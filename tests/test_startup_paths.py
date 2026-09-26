@@ -402,6 +402,35 @@ check("tab checks accept either engine's tab",
 check("only the in-page player paths require Chromium",
       _checks_in("play_stream")[1] and _checks_in("_on_stream_resolved")[1])
 
+# 1.6.96 would not start on an existing Merlin.exe: browser.py imported the
+# engine at module level, the engine needs html.parser, and that executable
+# had none. Merlin must never need the engine to start; it is loaded only when
+# a tab asks for it.
+def _module_level_imports(name):
+    tree = _ast.parse(open(os.path.join(root, "merlin", name), encoding="utf-8").read())
+    found = []
+    for node in tree.body:
+        if isinstance(node, _ast.ImportFrom):
+            found.append(("." * node.level) + (node.module or ""))
+        elif isinstance(node, _ast.Import):
+            found.extend(a.name for a in node.names)
+    return found
+_engine_at_start = [(f, m) for f in ("app.py", "browser.py", "ui.py", "tabs.py")
+                    for m in _module_level_imports(f) if "engine" in m.split(".")]
+check("Merlin's start-up never imports the engine", not _engine_at_start,
+      str(_engine_at_start))
+check("the engine is loaded on demand, and a failure falls back to Chromium",
+      "def _merlin_view_class():" in browser_src2
+      and "from .engine import MerlinView" in browser_src2.split("def _merlin_view_class():")[1][:1200]
+      and "return None" in browser_src2.split("def _merlin_view_class():")[1][:1200])
+
+_tabs_src = open(os.path.join(root, "merlin", "tabs.py"), encoding="utf-8").read()
+# within TabContainer only: another class in tabs.py has a resizeEvent too
+_container = _tabs_src.split("class TabContainer(")[1].split("\nclass ")[0]
+check("the tab container's events stand aside while it is torn down",
+      all("if self._torn_down():" in _container.split(f"    def {h}(self, event)")[1][:260]
+          for h in ("showEvent", "moveEvent", "hideEvent", "resizeEvent")))
+
 # --- batch quoting hazards --------------------------------------------------
 # A PowerShell call with \" escapes inside a for /f broke install.bat twice:
 # cmd has no backslash escape, so the quotes ended the string early and the
