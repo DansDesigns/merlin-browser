@@ -1,7 +1,7 @@
 # Merlin Browser
 ![version](https://img.shields.io/badge/version-1.6.97-6f8ff0)
 
-### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6 Requires a reinstall as there has been a fundamental change to the folder structure. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
+### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6.97 Requires a reinstall to enable Merlin Engine. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
 
 A Rust-free desktop web browser built with Python and C++, on Qt and the Chromium engine.
 
