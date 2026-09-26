@@ -6,6 +6,35 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.5.4
+  MerlinEngine can be switched on: Settings > Merlin Engine > "Use Merlin
+  Engine for new tabs". It takes effect at once, for every tab opened from then
+  on; tabs already open keep their engine. A button there reopens the current
+  page in the other engine, to compare the two. Tabs it draws say "Merlin
+  Engine" when you point at them. Switched off, which is the default, nothing
+  changes. The window works with its tabs as with Chromium's: the address bar,
+  titles, back and forward, reload, find, zoom, sessions, closing and reopening.
+  MerlinEngine now shows images: at their natural size, kept in proportion
+  when one dimension is given, held to their column by max-width, from http,
+  files and data: addresses, fetched off the UI thread with the page laid out
+  again as they arrive.
+  Tables: automatic column widths from each column's narrowest and widest
+  content, colspan, border spacing and collapsed borders, cell and row
+  backgrounds, captions, and cells centred vertically by default; and the old
+  attributes real pages still use, border, cellpadding, cellspacing, width,
+  bgcolor, align and valign, as the weakest kind of style.
+  The content blocker works in MerlinEngine as in Chromium's tabs: the same
+  decisions, now one method shared by both engines, the same per-site shields,
+  the site's hiding rules applied through the engine's own cascade, and what it
+  blocks counted and listed in the shield menu. HTTPS upgrade and Do Not Track
+  apply too.
+  Also in MerlinEngine: find in page, view source, a <body> made for pages
+  that do not write one (they had lost their margins), and a gradient
+  background shown as its first colour until gradients are drawn.
+  Fixed on the way: rows of a table whose markup never closed them were nested
+  each inside the one before; a cell centred vertically moved the cells after
+  it too; margins never set were treated as auto, centring tables and blocks
+  that had not asked to be; the word "image" in a page's text was taken for an
+  image; and saving the session at shutdown could read a page already released.
   MerlinEngine begins: Merlin's own web engine, in merlin/engine/, built
   alongside Chromium rather than in place of it. Nothing in the browser uses
   it yet; try it with  python -m merlin.engine <address or file>.

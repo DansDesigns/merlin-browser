@@ -391,6 +391,17 @@ check("event filters stand aside while their object is destroyed",
       and 'getattr(self, "_full_screen", False)' in _filter_body("inplace.py")
       and 'getattr(self, "url_bar", None)' in _filter_body("browser.py"))
 
+# A tab's view may be either engine's. Checks meaning "a web page tab" accept
+# both; only the ones that run JavaScript in the page need Chromium itself.
+def _checks_in(name):
+    body = browser_src2.split(f"    def {name}(")[1].split("\n    def ")[0]
+    return ("PAGE_VIEWS" in body, "isinstance(view, WebView)" in body)
+check("tab checks accept either engine's tab",
+      all(_checks_in(n)[0] for n in ("current", "close_tab", "save_session",
+                                     "release_pages", "refresh_start_pages")))
+check("only the in-page player paths require Chromium",
+      _checks_in("play_stream")[1] and _checks_in("_on_stream_resolved")[1])
+
 # --- batch quoting hazards --------------------------------------------------
 # A PowerShell call with \" escapes inside a for /f broke install.bat twice:
 # cmd has no backslash escape, so the quotes ended the string early and the

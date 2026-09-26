@@ -20,8 +20,14 @@ from PyQt6.QtGui import QFont, QFontMetricsF
 
 from .dom import Element, Text
 
+# Markers for the pieces of a line that are not text. Objects, not strings:
+# a word of text is a string, and the word "image" or "anchor" in a page was
+# once taken for one of these.
+_IMAGE, _ANCHOR, _BREAK = object(), object(), object()
+
 BLOCK = {"block", "list-item", "table", "table-row", "table-row-group",
-         "table-header-group", "table-footer-group", "flex", "grid", "table-caption"}
+         "table-header-group", "table-footer-group", "flex", "grid", "table-caption",
+         "table-cell"}
 
 
 class DisplayList:
@@ -88,9 +94,14 @@ def _px(value, reference: float = 0.0, auto: float | None = 0.0) -> float | None
 
 
 class Layout:
-    def __init__(self, document, styles: dict, width: float, zoom: float = 1.0):
+    def __init__(self, document, styles: dict, width: float, zoom: float = 1.0,
+                 images: dict | None = None):
+        # src -> QImage once loaded, or False when it will never show
+        # (blocked, or failed): such an image takes no room
+        self.images = images or {}
         self._runs: list = []
         self._last_baseline = None
+        self._measuring = False
         self.document = document
         self.styles = styles
         self.zoom = zoom
@@ -117,7 +128,13 @@ class Layout:
     # ------------------------------------------------------------ blocks
     def _edges(self, style: dict, reference: float):
         z = self.zoom
-        margin = [(_px(style.get(f"margin-{s}"), reference, auto=None)) for s in ("top", "right", "bottom", "left")]
+        # a margin never set is 0; only an explicit "auto" is auto. Treating
+        # the unset ones as auto centred tables and max-width blocks that had
+        # asked for nothing of the sort.
+        margin = []
+        for side in ("top", "right", "bottom", "left"):
+            value = style.get(f"margin-{side}")
+            margin.append(0.0 if value is None else _px(value, reference, auto=None))
         padding = [(_px(style.get(f"padding-{s}"), reference) or 0.0) * z for s in ("top", "right", "bottom", "left")]
         border = []
         for side in ("top", "right", "bottom", "left"):
@@ -171,7 +188,19 @@ class Layout:
         background_index = len(self.out.items)
         self.out.items.append(None)
 
-        inner_height, first_baseline = self._contents(element, style, content_x, content_y, content_width)
+        if style.get("display") == "table":
+            if width_value is None:
+                # a table is only as wide as its contents need, up to the space
+                natural = self._table_natural_width(element, style)
+                if natural < content_width:
+                    spare = content_width - natural
+                    content_width = natural
+                    if margin[3] is None and margin[1] is None:
+                        box_x += spare / 2
+                        content_x += spare / 2
+            inner_height, first_baseline = self._table(element, style, content_x, content_y, content_width)
+        else:
+            inner_height, first_baseline = self._contents(element, style, content_x, content_y, content_width)
         # where this block's first line of text sits, for a list marker outside it
         self._last_baseline = first_baseline
 
@@ -281,6 +310,227 @@ class Layout:
         cursor += pending_margin
         return cursor - y, first_baseline
 
+    # ------------------------------------------------------------ images
+    def _image_size(self, element, style: dict, available: float):
+        """Width and height for an image: given, natural, or kept in proportion."""
+        picture = self.images.get(element.attrs.get("src", "").strip())
+        if picture is False:
+            return 0.0, 0.0                     # blocked, or failed: takes no room
+        natural = (picture.width(), picture.height()) if picture is not None else None
+        w = _px(style.get("width"), available, auto=None)
+        h = _px(style.get("height"), 0.0, auto=None) \
+            if not isinstance(style.get("height"), tuple) else None
+        if w is None and h is None and natural:
+            w, h = float(natural[0]), float(natural[1])
+        elif w is not None and h is None:
+            h = w * natural[1] / natural[0] if natural and natural[0] else 0.0
+        elif h is not None and w is None:
+            w = h * natural[0] / natural[1] if natural and natural[1] else 0.0
+        if w is None or h is None:
+            return 0.0, 0.0                     # not loaded yet, and no size given
+        w, h = w * self.zoom, h * self.zoom
+        limit = _px(style.get("max-width"), available, auto=None)
+        if limit is not None:
+            limit = limit * self.zoom if not isinstance(style.get("max-width"), tuple) else limit
+            if w > limit > 0:
+                h = h * limit / w
+                w = limit
+        return w, h
+
+    # ------------------------------------------------------------ tables
+    def _table_grid(self, table):
+        """Rows of the table as lists of cells, and the caption if any."""
+        rows, caption = [], None
+
+        def take_rows(node):
+            for child in node.children:
+                if not isinstance(child, Element):
+                    continue
+                display = self.styles[child].get("display")
+                if display == "none":
+                    continue
+                if display == "table-row":
+                    rows.append([c for c in child.children
+                                 if isinstance(c, Element)
+                                 and self.styles[c].get("display") == "table-cell"])
+                    rows[-1] = (child, rows[-1])
+                elif display in ("table-row-group", "table-header-group",
+                                 "table-footer-group"):
+                    take_rows(child)
+
+        for child in table.children:
+            if isinstance(child, Element) and self.styles[child].get("display") == "table-caption":
+                caption = child
+        take_rows(table)
+        return rows, caption
+
+    @staticmethod
+    def _span(cell) -> int:
+        try:
+            return max(1, min(50, int(cell.attrs.get("colspan", "1") or 1)))
+        except ValueError:
+            return 1
+
+    def _spacing(self, style: dict) -> float:
+        if style.get("border-collapse") == "collapse":
+            return 0.0
+        value = str(style.get("border-spacing", "0")).split()[0]
+        found = re.match(r"^([\d.]+)", value)
+        return float(found.group(1)) * self.zoom if found else 0.0
+
+    def _columns(self, table, style: dict):
+        """Each column's narrowest and widest content, cell edges included."""
+        rows, _caption = self._table_grid(table)
+        count = max((sum(self._span(c) for c in cells) for _r, cells in rows), default=0)
+        low, high = [0.0] * count, [0.0] * count
+        spanning = []
+        measure = _Measure(self)
+        for _row, cells in rows:
+            column = 0
+            for cell in cells:
+                span = self._span(cell)
+                cell_style = self.styles[cell]
+                _m, padding, border = self._edges(cell_style, 0.0)
+                edges = padding[1] + padding[3] + border[1] + border[3]
+                fixed = _px(cell_style.get("width"), 0.0, auto=None) \
+                    if not isinstance(cell_style.get("width"), tuple) else None
+                narrow = measure.extent(cell, cell_style, 1.0) + edges
+                wide = measure.extent(cell, cell_style, 100000.0) + edges
+                if fixed is not None:
+                    narrow = max(narrow, fixed * self.zoom + edges)
+                    wide = max(narrow, fixed * self.zoom + edges)
+                if span == 1 and column < count:
+                    low[column] = max(low[column], narrow)
+                    high[column] = max(high[column], wide)
+                elif span > 1:
+                    spanning.append((column, min(span, count - column), narrow, wide))
+                column += span
+        # A cell spanning columns needing more than they give it: share the
+        # extra out across the columns it spans.
+        spacing = self._spacing(style)
+        for start, span, narrow, wide in spanning:
+            if span <= 0:
+                continue
+            gap = spacing * (span - 1)
+            for sizes, need in ((low, narrow), (high, wide)):
+                have = sum(sizes[start:start + span]) + gap
+                if need > have:
+                    extra = (need - have) / span
+                    for index in range(start, start + span):
+                        sizes[index] += extra
+        return low, high
+
+    def _table_natural_width(self, table, style: dict) -> float:
+        _low, high = self._columns(table, style)
+        spacing = self._spacing(style)
+        return sum(high) + spacing * (len(high) + 1)
+
+    def _table(self, table, style: dict, x: float, y: float, width: float):
+        rows, caption = self._table_grid(table)
+        spacing = self._spacing(style)
+        low, high = self._columns(table, style)
+        count = len(low)
+        cursor = y
+        first_baseline = None
+        if caption is not None:
+            cursor += self._block(caption, self.styles[caption], x, cursor, width)
+        if not count:
+            return cursor - y, first_baseline
+        room = max(0.0, width - spacing * (count + 1))
+        if sum(high) <= room:
+            # everything fits on one line: share out any spare room
+            extra = room - sum(high)
+            total = sum(high) or 1.0
+            widths = [h + extra * (h / total) for h in high]
+        elif sum(low) >= room:
+            widths = list(low)
+        else:
+            spare = room - sum(low)
+            give = [h - l for l, h in zip(low, high)]
+            total = sum(give) or 1.0
+            widths = [l + spare * g / total for l, g in zip(low, give)]
+        cursor += spacing
+        for row, cells in rows:
+            row_style = self.styles[row]
+            row_start = len(self.out.items)
+            self.out.items.append(None)          # the row's background, once known
+            placed = []                          # (cell, x, width, start items, links, height)
+            column = 0
+            for cell in cells:
+                span = self._span(cell)
+                if column >= count:
+                    break
+                cell_x = x + spacing + sum(widths[:column]) + spacing * column
+                cell_width = sum(widths[column:column + span]) + spacing * (span - 1)
+                cell_style = self.styles[cell]
+                _m, padding, border = self._edges(cell_style, cell_width)
+                inner_width = max(0.0, cell_width - padding[1] - padding[3] - border[1] - border[3])
+                items_before, links_before = len(self.out.items), len(self.out.links)
+                self.out.items.append(None)      # the cell's background and borders
+                inner, baseline = self._contents(
+                    cell, cell_style, cell_x + border[3] + padding[3],
+                    cursor + border[0] + padding[0], inner_width)
+                height = inner + padding[0] + padding[2] + border[0] + border[2]
+                fixed = _px(cell_style.get("height"), 0.0, auto=None) \
+                    if not isinstance(cell_style.get("height"), tuple) else None
+                if fixed is not None:
+                    height = max(height, fixed * self.zoom)
+                if first_baseline is None:
+                    first_baseline = baseline
+                placed.append((cell_style, cell_x, cell_width, items_before, links_before,
+                               height, inner, padding, border,
+                               len(self.out.items), len(self.out.links)))
+                column += span
+            row_height = max((p[5] for p in placed), default=0.0)
+            fixed_row = _px(row_style.get("height"), 0.0, auto=None) \
+                if not isinstance(row_style.get("height"), tuple) else None
+            if fixed_row is not None:
+                row_height = max(row_height, fixed_row * self.zoom)
+            for (cell_style, cell_x, cell_width, items_before, links_before,
+                 height, inner, padding, border, items_after, links_after) in placed:
+                align = cell_style.get("vertical-align", "middle")
+                content_room = row_height - padding[0] - padding[2] - border[0] - border[2]
+                shift = {"top": 0.0, "bottom": content_room - inner,
+                         "baseline": 0.0}.get(align, (content_room - inner) / 2)
+                if shift > 0.5:
+                    # this cell's own content only: moving everything laid out
+                    # since it began moved the later cells in the row too
+                    self._shift(items_before + 1, links_before, shift,
+                                items_after, links_after)
+                box = QRectF(cell_x, cursor, cell_width, row_height)
+                paint = []
+                colour = cell_style.get("background-color")
+                if colour and colour[3] > 0:
+                    paint.append(("rect", box, colour))
+                paint.extend(self._borders(cell_style, box, border))
+                self.out.items[items_before] = ("group", paint)
+            colour = row_style.get("background-color")
+            row_box = QRectF(x + spacing, cursor, max(0.0, width - 2 * spacing), row_height)
+            self.out.items[row_start] = ("group", [("rect", row_box, colour)]
+                                         if colour and colour[3] > 0 else [])
+            cursor += row_height + spacing
+        return cursor - y, first_baseline
+
+    def _shift(self, items_from: int, links_from: int, dy: float,
+               items_to: int | None = None, links_to: int | None = None) -> None:
+        """Move a stretch of what was laid out down by dy."""
+        def moved(item):
+            if item is None:
+                return None
+            kind = item[0]
+            if kind == "group":
+                return ("group", [moved(sub) for sub in item[1]])
+            if kind in ("rect", "image"):
+                return (kind, item[1].translated(0, dy)) + tuple(item[2:])
+            if kind == "text":
+                return item[:2] + (item[2] + dy,) + item[3:]
+            return item
+        for index in range(items_from, len(self.out.items) if items_to is None else items_to):
+            self.out.items[index] = moved(self.out.items[index])
+        for index in range(links_from, len(self.out.links) if links_to is None else links_to):
+            rect, href = self.out.links[index]
+            self.out.links[index] = (rect.translated(0, dy), href)
+
     # ------------------------------------------------------------ inline
     def _items(self, nodes, style: dict, link: str | None, out: list) -> None:
         """Flatten inline content into (kind, payload, style, link) items."""
@@ -318,21 +568,21 @@ class Layout:
         at_line_start = True
         for kind, payload, style, link in items:
             if kind == "anchor":
-                pieces.append(("anchor", payload, style, link))
+                pieces.append((_ANCHOR, payload, style, link))
                 continue
             if kind == "break":
-                pieces.append(("\n", style, link))
+                pieces.append((_BREAK, style, link))
                 at_line_start = True
                 continue
             if kind == "image":
-                pieces.append(("image", payload, style, link))
+                pieces.append((_IMAGE, payload, style, link))
                 at_line_start = False
                 continue
             text = payload
             if style.get("white-space") in ("pre", "pre-wrap", "break-spaces"):
                 for index, line in enumerate(text.split("\n")):
                     if index:
-                        pieces.append(("\n", style, link))
+                        pieces.append((_BREAK, style, link))
                     if line:
                         pieces.append((line.replace("\t", "    "), style, link))
                 continue
@@ -360,19 +610,15 @@ class Layout:
             line_width = 0.0
 
         for piece in pieces:
-            if piece[0] == "anchor":
+            if piece[0] is _ANCHOR:
                 anchors_here.append(piece[1])
                 continue
-            if piece[0] == "\n":
+            if piece[0] is _BREAK:
                 finish(force=True)
                 continue
-            if piece[0] == "image":
+            if piece[0] is _IMAGE:
                 element, style, link = piece[1], piece[2], piece[3]
-                w = _px(style.get("width"), width, auto=None)
-                h = _px(style.get("height"), 0, auto=None)
-                w = w if w is not None else float(element.attrs.get("width", "0") or 0)
-                h = h if h is not None else float(element.attrs.get("height", "0") or 0)
-                w, h = w * self.zoom, h * self.zoom
+                w, h = self._image_size(element, style, width)
                 if w <= 0 or h <= 0:
                     continue
                 if line and line_width + w > width:
@@ -385,7 +631,8 @@ class Layout:
             advance = metrics.horizontalAdvance(text)
             if text == " " and not line:
                 continue
-            if not pre and text != " " and line and line_width + advance > width:
+            if (not pre and style.get("white-space") != "nowrap" and text != " "
+                    and line and line_width + advance > width):
                 finish()
             size = style["font-size"] * self.zoom
             lh = style.get("line-height", ("normal",))
@@ -415,8 +662,11 @@ class Layout:
             baseline = cursor + (line_height - (ascent + descent)) / 2 + ascent
             if first_baseline is None:
                 first_baseline = baseline
-            offset = {"center": (width - used) / 2, "right": width - used,
-                      "end": width - used}.get(align, 0.0)
+            # while measuring, alignment would only push text towards the far
+            # end of a very long line and make its content look enormous
+            offset = 0.0 if self._measuring else {
+                "center": (width - used) / 2, "right": width - used,
+                "end": width - used}.get(align, 0.0)
             pen = x + max(0.0, offset)
             for anchor in anchors:
                 self.out.anchors.setdefault(anchor, cursor)
@@ -425,7 +675,7 @@ class Layout:
                 if part[0] == "image":
                     _k, w, element, style, link, h, _d, _lh, _f = part
                     rect = QRectF(pen, baseline - h, w, h)
-                    self.out.items.append(("image", rect, element.attrs.get("src", ""),
+                    self.out.items.append(("image", rect, element.attrs.get("src", "").strip(),
                                            element.attrs.get("alt", "")))
                     if link:
                         self.out.links.append((rect, link))
@@ -457,6 +707,40 @@ class Layout:
             self._runs = []
             cursor += line_height
         return cursor - y, first_baseline
+
+
+class _Measure:
+    """Lay something out into a scratch display list, to learn how wide it is."""
+
+    def __init__(self, layout):
+        self.layout = layout
+
+    def extent(self, element, style, width: float) -> float:
+        saved = self.layout.out
+        was_measuring = self.layout._measuring
+        self.layout.out = DisplayList()
+        self.layout._measuring = True
+        try:
+            self.layout._contents(element, style, 0.0, 0.0, width)
+            right = 0.0
+            for item in self.layout.out.items:
+                right = max(right, _right_edge(item))
+            return right
+        finally:
+            self.layout.out = saved
+            self.layout._measuring = was_measuring
+
+
+def _right_edge(item) -> float:
+    if item is None:
+        return 0.0
+    if item[0] == "group":
+        return max((_right_edge(sub) for sub in item[1]), default=0.0)
+    if item[0] == "rect" or item[0] == "image":
+        return item[1].right()
+    if item[0] == "text":
+        return item[1] + QFontMetricsF(item[4]).horizontalAdvance(item[3])
+    return 0.0
 
 
 def _roman(number: int) -> str:

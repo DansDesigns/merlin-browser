@@ -389,8 +389,13 @@ def parse_stylesheet(text: str, start_order: int = 0) -> list:
 DEFAULT_STYLESHEET = """
 html, body, div, p, h1, h2, h3, h4, h5, h6, ul, ol, li, dl, dt, dd, pre,
 blockquote, address, article, aside, footer, header, main, nav, section,
-figure, figcaption, form, fieldset, hr, table, tr, center, details, summary,
-menu, caption, thead, tbody, tfoot { display: block }
+figure, figcaption, form, fieldset, hr, center, details, summary,
+menu { display: block }
+table { display: table; border-spacing: 2px }
+caption { display: table-caption; text-align: center }
+thead, tbody, tfoot { display: table-row-group }
+tr { display: table-row }
+td, th { display: table-cell; vertical-align: middle }
 li { display: list-item }
 head, script, style, title, meta, link, noscript, template, base, datalist,
 param, source, track { display: none }
@@ -422,6 +427,7 @@ center { text-align: center }
 hr { border-top: 1px solid #888888; margin-top: 0.5em; margin-bottom: 0.5em }
 th { text-align: center }
 td, th { padding: 1px }
+img { display: inline }
 """
 
 _DEFAULT_RULES = parse_stylesheet(DEFAULT_STYLESHEET)
@@ -475,6 +481,8 @@ class Styler:
                     for name, value, important in rule.declarations:
                         found.append((layer_important if important else layer_normal,
                                       rule.selector.specificity, rule.order, name, value))
+        for name, value in presentational_hints(element):
+            found.append((1, (0, 0, 0), -1, name, value))
         inline = element.attrs.get("style")
         if inline:
             for name, value, important in parse_declarations(inline):
@@ -645,6 +653,19 @@ def expand_shorthand(name: str, value: str) -> list:
         kind = name.split("-")[1]
         values = [v for v in _split_outside(value, " ") if v.strip()]
         return [(f"border-{side}-{kind}", v) for side, v in zip(sides, _sides(values))]
+    if name in ("background", "background-image") and "gradient(" in value.lower():
+        # Gradients are not drawn yet: their first colour stands in, so a page
+        # with light text on a dark gradient stays readable rather than
+        # falling back to white.
+        for token in re.findall(r"#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)|\b[a-zA-Z]+\b", value):
+            if token.lower() not in ("linear", "radial", "conic", "gradient", "to", "deg",
+                                     "left", "right", "top", "bottom", "repeating", "in",
+                                     "circle", "ellipse", "at", "center", "closest",
+                                     "farthest", "side", "corner", "srgb", "oklab"):
+                colour = parse_colour(token)
+                if colour is not None:
+                    return [("background-color", token)]
+        return []
     if name == "background":
         for token in reversed(_split_outside(value, " ")):
             if parse_colour(token) is not None:
@@ -676,3 +697,99 @@ def expand_shorthand(name: str, value: str) -> list:
     if name == "text-decoration-line":
         return [("text-decoration", value)]
     return [(name, value)]
+
+
+# ---------------------------------------------------- presentational hints
+
+
+def _html_length(value: str) -> str:
+    """An HTML attribute length, "300" or "50%", as a CSS one."""
+    value = (value or "").strip()
+    if not value:
+        return ""
+    if value.endswith("%"):
+        return value
+    try:
+        return f"{float(value)}px"
+    except ValueError:
+        return ""
+
+
+def _enclosing(element: Element, tag: str):
+    node = element.parent
+    while isinstance(node, Element):
+        if node.tag == tag:
+            return node
+        node = node.parent
+    return None
+
+
+def presentational_hints(element: Element) -> list:
+    """What old HTML attributes say about style, as CSS declarations.
+
+    Real pages still use border="1", cellpadding, width="100%", bgcolor and
+    align, and browsers honour them as the weakest kind of author style: any
+    CSS rule wins over them.
+    """
+    attrs = element.attrs
+    tag = element.tag
+    found = []
+    if tag in ("table", "td", "th", "img", "col", "hr", "iframe") and attrs.get("width"):
+        length = _html_length(attrs["width"])
+        if length:
+            found.append(("width", length))
+    if tag in ("td", "th", "img", "tr", "iframe") and attrs.get("height"):
+        length = _html_length(attrs["height"])
+        if length:
+            found.append(("height", length))
+    if attrs.get("bgcolor") and tag in ("body", "table", "tr", "td", "th"):
+        found.append(("background-color", attrs["bgcolor"]))
+    if tag == "font":
+        if attrs.get("color"):
+            found.append(("color", attrs["color"]))
+        if attrs.get("face"):
+            found.append(("font-family", attrs["face"]))
+    if tag == "body" and attrs.get("text"):
+        found.append(("color", attrs["text"]))
+    align = attrs.get("align", "").lower()
+    if align:
+        if tag == "table" and align == "center":
+            found.extend([("margin-left", "auto"), ("margin-right", "auto")])
+        elif tag in ("td", "th", "tr", "p", "div", "h1", "h2", "h3", "h4", "h5", "h6"):
+            if align in ("left", "right", "center", "justify"):
+                found.append(("text-align", align))
+    if attrs.get("valign") and tag in ("td", "th", "tr"):
+        found.append(("vertical-align", attrs["valign"].lower()))
+    if tag == "table":
+        border = attrs.get("border")
+        if border is not None and border.strip() not in ("0", ""):
+            width = _html_length(border) or "1px"
+            found.extend([(f"border-{side}-{kind}", value)
+                          for side in ("top", "right", "bottom", "left")
+                          for kind, value in (("width", width), ("style", "outset"),
+                                              ("color", "#808080"))])
+        elif border is not None and border.strip() == "":
+            found.extend([(f"border-{side}-{kind}", value)
+                          for side in ("top", "right", "bottom", "left")
+                          for kind, value in (("width", "1px"), ("style", "outset"),
+                                              ("color", "#808080"))])
+        if attrs.get("cellspacing") is not None:
+            found.append(("border-spacing", _html_length(attrs["cellspacing"]) or "0px"))
+    if tag in ("td", "th"):
+        table = _enclosing(element, "table")
+        if table is not None:
+            padding = table.attrs.get("cellpadding")
+            if padding is not None:
+                found.append(("padding-top", _html_length(padding) or "0px"))
+                found.append(("padding-right", _html_length(padding) or "0px"))
+                found.append(("padding-bottom", _html_length(padding) or "0px"))
+                found.append(("padding-left", _html_length(padding) or "0px"))
+            border = table.attrs.get("border")
+            if border is not None and border.strip() != "0":
+                found.extend([(f"border-{side}-{kind}", value)
+                              for side in ("top", "right", "bottom", "left")
+                              for kind, value in (("width", "1px"), ("style", "inset"),
+                                                  ("color", "#808080"))])
+        if element.attrs.get("nowrap") is not None:
+            found.append(("white-space", "nowrap"))
+    return found

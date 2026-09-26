@@ -43,6 +43,9 @@ from .brand import (
 
 
 # --------------------------------------------------------------------- page
+from .engine import MerlinView                                # noqa: E402
+
+
 class _LinkCatcher(QWebEnginePage):
     """A page that is never shown: it hands its first address to the browser.
 
@@ -259,6 +262,12 @@ class WebView(QWebEngineView):
 
 
 # ------------------------------------------------------------------- window
+# A tab's page, drawn by either engine. The checks that mean "is this a web
+# page tab" use this; the few that need Chromium itself, running JavaScript in
+# the page, still ask for WebView.
+PAGE_VIEWS = (WebView, MerlinView)
+
+
 class BrowserWindow(QMainWindow):
     # Results from worker threads. Emitting a signal from another thread
     # queues it onto this window's thread, so the slots can touch widgets.
@@ -743,7 +752,7 @@ class BrowserWindow(QMainWindow):
         self.btn_menu.setIcon(icons.themed_icon("menu", dark))
         for i in range(self.tabs.count()):
             widget = self.tabs.widget(i)
-            name = widget.property("merlin_icon") if isinstance(widget, WebView) else None
+            name = widget.property("merlin_icon") if isinstance(widget, PAGE_VIEWS) else None
             if name:
                 self.tabs.setTabIcon(i, icons.themed_icon(name, dark, 16))
         self.btn_bookmarks.setIcon(icons.themed_icon("bookmarks", dark))
@@ -1017,7 +1026,12 @@ class BrowserWindow(QMainWindow):
         before the browser felt usable. Deferred tabs cost a widget and nothing
         else until you click them.
         """
-        view = WebView(self, self.profile, self)
+        if self.settings.get("merlin_engine", False):
+            # Merlin's own engine, switched on in Settings > Merlin Engine.
+            # The window's content blocker and settings apply to it as well.
+            view = MerlinView(self, host=self, profile=self.profile)
+        else:
+            view = WebView(self, self.profile, self)
         index = self.tabs.addTab(view, "New tab")
         view.titleChanged.connect(lambda title, v=view: self._on_title(v, title))
         view.iconChanged.connect(lambda ico, v=view: self._on_icon(v, ico))
@@ -1031,6 +1045,8 @@ class BrowserWindow(QMainWindow):
             if ok else None)
         view.setZoomFactor(self.window_zoom
                            or float(self.settings.get("default_zoom", 1.0)))
+        if isinstance(view, MerlinView):
+            self.tabs.setTabToolTip(index, "Merlin Engine")
 
         if not background:
             self.tabs.setCurrentIndex(index)
@@ -1054,7 +1070,7 @@ class BrowserWindow(QMainWindow):
         if index < 0 or self.tabs.count() == 0:
             return
         view = self.tabs.widget(index)
-        if isinstance(view, WebView):
+        if isinstance(view, PAGE_VIEWS):
             url = view.url().toString()
             if not url or url == "about:blank":
                 # never opened, so its address is still only pending
@@ -1062,7 +1078,7 @@ class BrowserWindow(QMainWindow):
             if url and url != "about:blank":
                 self._closed_tabs.append(url)
         self.tabs.removeTab(index)
-        if isinstance(view, WebView):
+        if isinstance(view, PAGE_VIEWS):
             self._stop_in_page(view)
             # Stop the load before the view goes: destroying a view that is
             # still fetching a page is a way to take the engine down with it.
@@ -1277,7 +1293,7 @@ class BrowserWindow(QMainWindow):
 
     def current(self) -> WebView | None:
         widget = self.tabs.currentWidget()
-        return widget if isinstance(widget, WebView) else None
+        return widget if isinstance(widget, PAGE_VIEWS) else None
 
     def _current_do(self, what: str) -> None:
         view = self.current()
@@ -1455,7 +1471,7 @@ class BrowserWindow(QMainWindow):
     def refresh_start_pages(self) -> None:
         for index in range(self.tabs.count()):
             view = self.tabs.widget(index)
-            if isinstance(view, WebView) and view.property("merlin_start"):
+            if isinstance(view, PAGE_VIEWS) and view.property("merlin_start"):
                 self.show_start_page(view)
 
     def show_start_page(self, view: WebView) -> None:
@@ -2058,6 +2074,25 @@ class BrowserWindow(QMainWindow):
                 view.page().apply_cosmetic("")   # force recompute next nav
                 view.reload()
 
+    def reopen_in_other_engine(self) -> None:
+        """The current page again, in a new tab drawn by the other engine.
+
+        For comparing MerlinEngine with Chromium on the same page.
+        """
+        view = self.current()
+        if view is None:
+            return
+        address = view.url().toString()
+        if not address or address == "about:blank":
+            return
+        use_merlin = not isinstance(view, MerlinView)
+        setting = self.settings.get("merlin_engine", False)
+        self.settings.set("merlin_engine", use_merlin, save=False)
+        try:
+            self.new_tab(address)
+        finally:
+            self.settings.set("merlin_engine", setting, save=False)
+
     def cosmetic_css_for(self, host: str) -> str:
         if host not in self._cosmetic_cache:
             self._cosmetic_cache[host] = self.filter_engine.cosmetic_css(host)
@@ -2536,10 +2571,14 @@ class BrowserWindow(QMainWindow):
         """
         if self.private:
             return
+        from PyQt6 import sip
+
         urls = []
         for i in range(self.tabs.count()):
             view = self.tabs.widget(i)
-            if not isinstance(view, WebView) or view.property("merlin_start"):
+            # a page already released, at shutdown, has nothing left to read
+            if not isinstance(view, PAGE_VIEWS) or sip.isdeleted(view) \
+                    or view.property("merlin_start"):
                 continue
             url = view.url().toString()
             if not url or url == "about:blank":
@@ -2585,7 +2624,7 @@ class BrowserWindow(QMainWindow):
         released = 0
         for index in range(self.tabs.count() - 1, -1, -1):
             view = self.tabs.widget(index)
-            if isinstance(view, WebView):
+            if isinstance(view, PAGE_VIEWS):
                 self._stop_in_page(view)
                 try:
                     view.stop()

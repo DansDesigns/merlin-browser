@@ -1101,6 +1101,32 @@ def test_youtube_cookies_for_ytdlp(app) -> None:
     window.close()
 
 
+def test_merlin_engine_tabs(app) -> None:
+    """Settings > Merlin Engine: new tabs use it, and the window works with it."""
+    from merlin.browser import WebView
+    from merlin.engine import MerlinView
+
+    window, settings, _ = make_window(app, "t-engine")
+    settings.set("merlin_engine", True, save=False)
+    view = window.new_tab("data:text/html,<title>Drawn by Merlin</title><p>x</p>")
+    wait(app, 1.5)
+    check("with the switch on, a new tab is drawn by MerlinEngine",
+          isinstance(view, MerlinView) and window.current() is view)
+    check("and the window follows it: title and address",
+          view.title() == "Drawn by Merlin" and window.url_bar.text().startswith("data:"))
+    window.save_session()
+    settings.set("merlin_engine", False, save=False)
+    other = window.new_tab(page("chromium"))
+    wait(app, 1.0)
+    check("with it off, new tabs are Chromium again", isinstance(other, WebView))
+    window.tabs.setCurrentIndex(window.tabs.indexOf(view))
+    window.reopen_in_other_engine()
+    wait(app, 1.0)
+    check("a page can be reopened in the other engine, the setting unchanged",
+          isinstance(window.current(), WebView) and settings.get("merlin_engine") is False)
+    window.close()
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -1127,7 +1153,8 @@ def main() -> int:
                  test_blocked_list_and_app_links,
                  test_page_fullscreen_restores_the_window,
                  test_stream_lookup_is_quick, test_stream_failure_is_not_a_box,
-                 test_stalled_stream_recovers, test_youtube_cookies_for_ytdlp):
+                 test_stalled_stream_recovers, test_youtube_cookies_for_ytdlp,
+                 test_merlin_engine_tabs):
         print(f"\n{test.__name__}")
         try:
             test(app)

@@ -34,14 +34,20 @@ IMPLIED_END = {
     "li": {"li"},
     "dt": {"dt", "dd"},
     "dd": {"dt", "dd"},
-    "tr": {"tr", "td", "th"},
+    # a new row closes the previous row, cells and all: stopping at an open
+    # cell instead nested every row inside the one before
+    "tr": {"tr"},
     "td": {"td", "th"},
     "th": {"td", "th"},
     "option": {"option"},
-    "thead": {"tbody", "tfoot"},
+    "thead": {"thead", "tbody", "tfoot"},
     "tbody": {"thead", "tbody", "tfoot"},
-    "tfoot": {"thead", "tbody"},
+    "tfoot": {"thead", "tbody", "tfoot"},
 }
+
+# what may come before the body without starting it
+HEAD_ONLY = {"head", "title", "style", "meta", "link", "base", "script", "noscript",
+             "template"}
 
 # an implied end never reaches past one of these
 SCOPE = {"ul", "ol", "dl", "table", "select", "html", "body", "div"}
@@ -56,6 +62,18 @@ class _Builder(HTMLParser):
     @property
     def current(self) -> Element:
         return self.stack[-1]
+
+    def _ensure_body(self) -> None:
+        """Start the body if real content arrives with none open.
+
+        Browsers always have a <body>, whether or not the page wrote one, and
+        a great many pages do not. Without it the default margin and every
+        body { ... } rule had nothing to apply to.
+        """
+        if len(self.stack) == 1 and self.root.find("body") is None:
+            body = Element("body")
+            self.root.append(body)
+            self.stack.append(body)
 
     def _close(self, tag: str) -> bool:
         """Close the nearest open element with this tag, and all inside it."""
@@ -90,6 +108,17 @@ class _Builder(HTMLParser):
             for key, value in attrs:
                 self.root.attrs.setdefault(key, value or "")
             return
+        if tag == "body":
+            existing = self.root.find("body")
+            if existing is not None:
+                # the body was started already: this tag only adds attributes
+                for key, value in attrs:
+                    existing.attrs.setdefault(key.lower(), value or "")
+                if existing not in self.stack:
+                    self.stack = [self.root, existing]
+                return
+        elif tag not in HEAD_ONLY:
+            self._ensure_body()
         self._close_implied(tag)
         element = Element(tag, {key.lower(): (value if value is not None else "")
                                 for key, value in attrs})
@@ -111,6 +140,8 @@ class _Builder(HTMLParser):
     def handle_data(self, data):
         if not data:
             return
+        if data.strip():
+            self._ensure_body()
         last = self.current.children[-1] if self.current.children else None
         if isinstance(last, Text):
             last.data += data

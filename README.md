@@ -1,5 +1,5 @@
 # Merlin Browser
-![version](https://img.shields.io/badge/version-1.6.1-6f8ff0)
+![version](https://img.shields.io/badge/version-1.6.95-6f8ff0)
 
 ### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6 Requires a reinstall as there has been a fundamental change to the folder structure. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
 
@@ -145,8 +145,9 @@ tries once more. Ctrl+Shift+P plays any page in the player the same way.
 
 Merlin is beginning its own web engine, MerlinEngine, in `merlin/engine/`:
 pure Python on Qt's painting, with no Chromium and no Rust. It is built
-alongside Chromium, not in place of it, and nothing in the browser uses it yet.
-Try it on its own:
+alongside Chromium, not in place of it. Switch it on in **Settings > Merlin
+Engine**: new tabs are then drawn by it, at once, and a button there reopens
+the current page in the other engine to compare. Or try it on its own:
 
 ```bash
 python -m merlin.engine https://example.com
@@ -154,10 +155,11 @@ python -m merlin.engine page.html
 ```
 
 It renders ordinary documents: text, headings, paragraphs, lists, links,
-colours, fonts, margins, padding, borders and centring, with the CSS cascade
-and line breaking by real font measurement. JavaScript, images, forms, tables
-and modern layout are still to come, so sites that depend on them will not
-work in it yet.
+images, tables, colours, fonts, margins, padding, borders and centring, with
+the CSS cascade and line breaking by real font measurement, and Merlin's
+content blocker applies to it as to Chromium's tabs. JavaScript, forms,
+flexbox, grid and floats are still to come, so web apps and many modern sites
+will not work in it yet.
 
 
 

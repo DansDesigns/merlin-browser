@@ -57,10 +57,11 @@ def test_parsing() -> None:
 
     doc = parse("<title>T</title><p>one<p>two<div>block</div>"
                 "<ul><li>a<li>b</ul><img src=x><br>after")
-    body = [c for c in doc.root.children if isinstance(c, Element)]
+    # the content sits in the body, made for it as browsers do
+    body = [c for c in doc.body.children if isinstance(c, Element)]
     tags = [e.tag for e in body]
     check("a new paragraph closes the open one, a div closes a paragraph",
-          tags[:4] == ["title", "p", "p", "div"], str(tags))
+          tags[:3] == ["p", "p", "div"], str(tags))
     lists = doc.root.find("ul")
     check("list items close each other",
           [c.tag for c in lists.children if isinstance(c, Element)] == ["li", "li"])
@@ -147,6 +148,78 @@ def test_layout() -> None:
     check("adjacent vertical margins collapse", abs(out3.height - 50) < 1, f"{out3.height}")
 
 
+def test_body_and_markers() -> None:
+    from merlin.engine.css import Styler, expand_shorthand
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+
+    doc = parse("<title>t</title><style>body { margin: 12px }</style><p>x")
+    out = Layout(doc, Styler(doc).compute(), 400).run()
+    first = next(i for i in out.items if i and i[0] == "text")
+    check("a page with no <body> tag still gets one, and its margin",
+          doc.body.tag == "body" and abs(first[1] - 12) < 0.5, f"x={first[1]:.0f}")
+    # the word "image" in text was once taken for an image marker
+    doc = parse("<p>an image and an anchor in plain words</p>")
+    out = Layout(doc, Styler(doc).compute(), 400).run()
+    words = " ".join(i[3] for i in out.items if i and i[0] == "text")
+    check("the words image and anchor are just words", "image" in words and "anchor" in words)
+    check("a gradient background falls back to its first colour",
+          expand_shorthand("background", "linear-gradient(90deg,#123456,#fff)")
+          == [("background-color", "#123456")])
+
+
+def test_tables() -> None:
+    from merlin.engine.css import Styler
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+
+    # markup that never closes its rows or cells, as old pages do
+    doc = parse("<table border=1 cellpadding=4><tr><th>A<th>B<tr><td>one<td>two"
+                "<tr><td colspan=2>spanning both columns here</table>")
+    rows = [e for e in doc.root.elements() if e.tag == "tr"]
+    check("a new row closes the previous one rather than nesting in it",
+          all(r.parent.tag == "table" for r in rows) and len(rows) == 3)
+    styles = Styler(doc).compute()
+    out = Layout(doc, styles, 800).run()
+    texts = {i[3]: i for i in out.items if i and i[0] == "text"}
+    check("every cell's text is laid out",
+          all(t in texts for t in ("A", "B", "one", "two", "spanning both columns here")))
+    # "one", not the header "A": header cells are centred in their column
+    check("a table with no width is as wide as its contents, at the left",
+          texts["one"][1] < 20 and max(i[1] for i in texts.values()) < 400,
+          f"one at x={texts['one'][1]:.0f}")
+    check("a spanning cell widens its columns rather than wrapping",
+          texts["spanning both columns here"][2] > texts["one"][2])
+    # a tall cell does not push the next cell in its row out of place
+    doc = parse("<table><tr><td>short<td>" + "word " * 40 + "<td>last</table>")
+    out = Layout(doc, Styler(doc).compute(), 300).run()
+    by = {i[3].strip(): i for i in out.items if i and i[0] == "text"}
+    tall = [i for i in out.items if i and i[0] == "text" and "word" in i[3]]
+    top, bottom = min(i[2] for i in tall), max(i[2] for i in tall)
+    check("short cells sit centred beside a tall one, each in its own place",
+          top < by["short"][2] < bottom and abs(by["short"][2] - by["last"][2]) < 1)
+
+
+def test_images(app) -> None:
+    from PyQt6.QtGui import QColor, QImage
+
+    from merlin.engine.css import Styler
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+
+    picture = QImage(240, 160, QImage.Format.Format_RGB32)
+    picture.fill(QColor("steelblue"))
+    doc = parse("<p><img src=a.png> <img src=a.png width=120> "
+                "<img src=gone.png width=50 height=50></p>"
+                "<div style='width:100px'><img src=a.png style='max-width:100%'></div>")
+    images = {"a.png": picture, "gone.png": False}
+    out = Layout(doc, Styler(doc).compute(), 800, images=images).run()
+    sizes = [(round(i[1].width()), round(i[1].height())) for i in out.items if i and i[0] == "image"]
+    check("images: natural size, width alone keeps the shape, max-width fits the column",
+          sizes == [(240, 160), (120, 80), (100, 67)], str(sizes))
+    check("a blocked or missing image takes no room", (50, 50) not in sizes)
+
+
 def test_view(app) -> None:
     from merlin.engine import MerlinView
 
@@ -214,9 +287,12 @@ def test_view(app) -> None:
 
 def main() -> int:
     app = QApplication(sys.argv[:1])
-    for test in (test_no_chromium, test_parsing, test_cascade, test_layout):
+    for test in (test_no_chromium, test_parsing, test_cascade, test_layout,
+                 test_body_and_markers, test_tables):
         print(test.__name__)
         test()
+    print("test_images")
+    test_images(app)
     print("test_view")
     test_view(app)
     if FAILED:

@@ -14,8 +14,8 @@ import threading
 import urllib.parse
 import urllib.request
 
-from PyQt6.QtCore import QRectF, Qt, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QColor, QIcon, QPainter
+from PyQt6.QtCore import QObject, QRectF, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QIcon, QImage, QPainter
 from PyQt6.QtWidgets import QScrollBar, QWidget
 
 from . import html as html_parser
@@ -26,8 +26,46 @@ from .paint import paint
 USER_AGENT = "Mozilla/5.0 (compatible; MerlinEngine/0.1)"
 
 
-def fetch(url: str, timeout: int = 20) -> tuple:
+def fetch_bytes(url: str, headers: dict | None = None, timeout: int = 20,
+                limit: int = 16 * 1024 * 1024) -> tuple:
+    """(ok, final url, bytes or reason, content type). Off the UI thread."""
+    parsed = urllib.parse.urlsplit(url)
+    scheme = parsed.scheme.lower()
+    try:
+        if scheme == "data":
+            header, _comma, data = url[5:].partition(",")
+            kind = header.split(";")[0] or "text/plain"
+            if header.endswith(";base64"):
+                import base64
+
+                return True, url, base64.b64decode(data), kind
+            return True, url, urllib.parse.unquote_to_bytes(data), kind
+        if scheme == "file":
+            with open(QUrl(url).toLocalFile(), "rb") as handle:
+                return True, url, handle.read(limit), ""
+        if scheme in ("http", "https"):
+            sent = {"User-Agent": USER_AGENT, "Accept": "*/*",
+                    "Accept-Language": "en-GB,en;q=0.8"}
+            sent.update(headers or {})
+            request = urllib.request.Request(url, headers=sent)
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return (True, response.geturl(), response.read(limit),
+                        response.headers.get("Content-Type", ""))
+        return False, url, f"MerlinEngine cannot open {scheme}: addresses yet.".encode(), ""
+    except Exception as exc:                              # noqa: BLE001
+        return False, url, str(exc).encode(), ""
+
+
+def fetch(url: str, timeout: int = 20, headers: dict | None = None) -> tuple:
     """(ok, final url, text or reason). Runs off the UI thread."""
+    if url.startswith("view-source:"):
+        import html
+
+        ok, final, text = fetch(url[len("view-source:"):], timeout, headers)
+        if not ok:
+            return ok, url, text
+        return True, url, (f"<title>Source of {html.escape(final)}</title>"
+                           f"<pre style='white-space:pre-wrap'>{html.escape(text)}</pre>")
     parsed = urllib.parse.urlsplit(url)
     scheme = parsed.scheme.lower()
     try:
@@ -42,10 +80,11 @@ def fetch(url: str, timeout: int = 20) -> tuple:
             with open(QUrl(url).toLocalFile(), "rb") as handle:
                 return True, url, _decode(handle.read(), "")
         if scheme in ("http", "https"):
-            request = urllib.request.Request(url, headers={
-                "User-Agent": USER_AGENT,
-                "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
-                "Accept-Language": "en-GB,en;q=0.8"})
+            sent = {"User-Agent": USER_AGENT,
+                    "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
+                    "Accept-Language": "en-GB,en;q=0.8"}
+            sent.update(headers or {})
+            request = urllib.request.Request(url, headers=sent)
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 body = response.read(8 * 1024 * 1024)
                 kind = response.headers.get("Content-Type", "")
@@ -96,6 +135,50 @@ class _History:
         self.index = len(self.entries) - 1
 
 
+class _Page(QObject):
+    """What Merlin's window asks of Chromium's page, answered by MerlinEngine.
+
+    The window was written for Chromium, and reaches through view.page() for
+    a few things. Each is answered here: history, the profile, reload, the
+    hover signal and the hiding rules. Running JavaScript, which MerlinEngine
+    cannot do yet, answers with nothing rather than failing.
+    """
+
+    fullScreenRequested = pyqtSignal(object)
+    featurePermissionRequested = pyqtSignal(object, object)
+    permissionRequested = pyqtSignal(object)
+    renderProcessTerminated = pyqtSignal(object, int)
+
+    def __init__(self, view: "MerlinView", profile=None):
+        super().__init__(view)
+        self._view = view
+        self._profile = profile
+        self.linkHovered = view.linkHovered
+
+    def runJavaScript(self, _script, *rest):                  # noqa: N802
+        callback = next((r for r in rest if callable(r)), None)
+        if callback is not None:
+            QTimer.singleShot(0, lambda: callback(None))
+
+    def history(self):
+        return self._view.history()
+
+    def profile(self):
+        return self._profile
+
+    def url(self) -> QUrl:
+        return self._view.url()
+
+    def title(self) -> str:
+        return self._view.title()
+
+    def triggerAction(self, _action, *_rest):                 # noqa: N802
+        self._view.reload()
+
+    def apply_cosmetic(self, _css: str) -> None:
+        self._view.refresh_hiding()
+
+
 class MerlinView(QWidget):
     titleChanged = pyqtSignal(str)
     urlChanged = pyqtSignal(QUrl)
@@ -105,9 +188,17 @@ class MerlinView(QWidget):
     loadFinished = pyqtSignal(bool)
     linkHovered = pyqtSignal(str)
     _fetched = pyqtSignal(int, bool, str, str)      # load number, ok, url, text
+    _image_fetched = pyqtSignal(int, str, bytes, bool)   # load number, src, data, ok
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, host=None, profile=None):
+        """host, when given, is Merlin's window: its content blocker and
+        settings apply here as they do to Chromium's tabs."""
         super().__init__(parent)
+        self._host = host
+        self._images: dict = {}        # src -> QImage, or False: blocked or failed
+        self._find = ("", -1)          # what was searched for, and where it was
+        self._found_rect = None
+        self._page = _Page(self, profile)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
         self._url = QUrl()
@@ -128,6 +219,7 @@ class MerlinView(QWidget):
         self._relayout.setInterval(60)
         self._relayout.timeout.connect(self._layout)
         self._fetched.connect(self._on_fetched)
+        self._image_fetched.connect(self._on_image)
 
     # ------------------------------------------------ what Merlin asks for
     def url(self) -> QUrl:
@@ -141,6 +233,44 @@ class MerlinView(QWidget):
 
     def history(self) -> _History:
         return self._history
+
+    def page(self) -> _Page:
+        return self._page
+
+    # --------------------------------------------- Merlin's window, if any
+    def _interceptor(self):
+        return getattr(self._host, "interceptor", None)
+
+    def _headers(self) -> dict:
+        settings = getattr(self._host, "settings", None)
+        if settings is not None and settings.get("send_do_not_track"):
+            return {"DNT": "1", "Sec-GPC": "1"}
+        return {}
+
+    def _hiding_css(self) -> str:
+        """The content blocker's hiding rules for this site, as CSS."""
+        finder = getattr(self._host, "cosmetic_css_for", None)
+        host = self._url.host()
+        if finder is None or not host:
+            return ""
+        try:
+            return finder(host) or ""
+        except Exception:                                  # noqa: BLE001
+            return ""
+
+    def _blocked(self, url: str, kind: str) -> bool:
+        """Whether the content blocker stops something this page pulls in."""
+        interceptor = self._interceptor()
+        if interceptor is None or not url.startswith(("http://", "https://")):
+            return False
+        return interceptor.check(url, self._url.host(), kind)
+
+    def refresh_hiding(self) -> None:
+        """Styles again, for when the site's shields were switched."""
+        if self._document is not None:
+            self._styles = Styler(self._document, viewport=(self._page_width(), self.height()),
+                                  extra_css=self._hiding_css()).compute()
+            self._layout()
 
     def zoomFactor(self) -> float:                            # noqa: N802
         return self._zoom
@@ -191,10 +321,14 @@ class MerlinView(QWidget):
             self.urlChanged.emit(self.url())
             self._scroll_to_fragment(url.fragment())
             return
+        interceptor = self._interceptor()
+        if interceptor is not None and url.scheme() == "http":
+            url = interceptor.upgrade(url)
         self._load_number += 1
         number = self._load_number
         self._url = url
         self._pending_fragment = url.fragment()
+        headers = self._headers()
         self.urlChanged.emit(self.url())
         self.loadStarted.emit()
         self.loadProgress.emit(10)
@@ -204,7 +338,7 @@ class MerlinView(QWidget):
             # whatever goes wrong here becomes an error page, never a page
             # left loading for ever
             try:
-                ok, final, text = fetch(target)
+                ok, final, text = fetch(target, headers=headers)
             except Exception as exc:                  # noqa: BLE001
                 ok, final, text = False, target, f"MerlinEngine failed loading it: {exc}"
             self._fetched.emit(number, ok, final, text)
@@ -237,13 +371,64 @@ class MerlinView(QWidget):
     # ----------------------------------------------------- the pipeline
     def _show(self, markup: str) -> None:
         self._document = html_parser.parse(markup, self._url.toString())
-        self._styles = Styler(self._document, viewport=(self._page_width(), self.height())).compute()
+        self._images = {}
+        self._find = ("", -1)
+        self._found_rect = None
+        self._styles = Styler(self._document, viewport=(self._page_width(), self.height()),
+                              extra_css=self._hiding_css()).compute()
         title = self._document.title or self._url.toString()
         if title != self._title:
             self._title = title
             self.titleChanged.emit(title)
         self._scroll = 0.0
         self._layout()
+        self._load_images()
+
+    # ----------------------------------------------------------- images
+    def _load_images(self) -> None:
+        """Fetch every image the page shows, off the UI thread.
+
+        Each is checked with the content blocker first, as Chromium's tabs
+        are; a blocked one takes no room. As images arrive the page is laid
+        out again, since an image with no size given is as big as it is.
+        """
+        number = self._load_number
+        headers = dict(self._headers())
+        headers["Accept"] = "image/avif,image/webp,image/png,image/*;q=0.8,*/*;q=0.5"
+        page = self._url.toString()
+        if page.startswith(("http://", "https://")):
+            headers["Referer"] = page
+        wanted = []
+        for element in self._document.root.elements():
+            if element.tag != "img" or self._styles.get(element, {}).get("display") == "none":
+                continue
+            src = element.attrs.get("src", "").strip()
+            if not src or src in self._images or src in wanted:
+                continue
+            address = self._url.resolved(QUrl(src)).toString()
+            if self._blocked(address, "image"):
+                self._images[src] = False
+                continue
+            wanted.append(src)
+        if not wanted:
+            if any(v is False for v in self._images.values()):
+                self._layout()
+            return
+
+        def work(src, address):
+            ok, _final, data, _kind = fetch_bytes(address, headers)
+            self._image_fetched.emit(number, src, data if ok else b"", ok)
+
+        for src in wanted[:200]:                  # enough for any ordinary page
+            address = self._url.resolved(QUrl(src)).toString()
+            threading.Thread(target=work, args=(src, address), daemon=True).start()
+
+    def _on_image(self, number: int, src: str, data: bytes, ok: bool) -> None:
+        if number != self._load_number:
+            return
+        picture = QImage.fromData(data) if ok and data else QImage()
+        self._images[src] = picture if not picture.isNull() else False
+        self._relayout.start()                   # batch several arrivals into one
 
     def _page_width(self) -> float:
         return max(100.0, float(self.width() - self.scrollbar.sizeHint().width()))
@@ -251,7 +436,8 @@ class MerlinView(QWidget):
     def _layout(self) -> None:
         if self._document is None:
             return
-        self._display = Layout(self._document, self._styles, self._page_width(), self._zoom).run()
+        self._display = Layout(self._document, self._styles, self._page_width(), self._zoom,
+                               images=self._images).run()
         self._update_scrollbar()
         self.update()
 
@@ -274,6 +460,45 @@ class MerlinView(QWidget):
         if self._display and fragment in self._display.anchors:
             self.scrollbar.setValue(int(self._display.anchors[fragment]))
 
+    # ------------------------------------------------------ find in page
+    def findText(self, text: str, flags=None, callback=None) -> None:     # noqa: N802
+        """Find text on the page, the next match on each call, and scroll to it."""
+        from PyQt6.QtGui import QFontMetricsF
+
+        if not text or not self._display:
+            self._find = ("", -1)
+            self._found_rect = None
+            self.update()
+            return
+        backward = bool(flags) and "Backward" in str(flags)
+        hits = []
+        for item in self._display.items:
+            for sub in (item[1] if item and item[0] == "group" else [item]):
+                if sub and sub[0] == "text":
+                    _k, x, baseline, words, font, _c, _d = sub
+                    start = words.lower().find(text.lower())
+                    while start >= 0:
+                        metrics = QFontMetricsF(font)
+                        left = x + metrics.horizontalAdvance(words[:start])
+                        width = metrics.horizontalAdvance(words[start:start + len(text)])
+                        hits.append(QRectF(left, baseline - metrics.ascent(), width,
+                                           metrics.ascent() + metrics.descent()))
+                        start = words.lower().find(text.lower(), start + 1)
+        hits.sort(key=lambda r: (round(r.top()), r.left()))
+        if not hits:
+            self._find = (text, -1)
+            self._found_rect = None
+            self.update()
+            return
+        last = self._find[1] if self._find[0] == text else -1
+        index = (last - 1) % len(hits) if backward else (last + 1) % len(hits)
+        self._find = (text, index)
+        self._found_rect = hits[index]
+        top = hits[index].top()
+        if not (self._scroll <= top <= self._scroll + self.height() - 40):
+            self.scrollbar.setValue(int(max(0.0, top - self.height() / 3)))
+        self.update()
+
     # ------------------------------------------------------------ Qt
     def resizeEvent(self, event) -> None:                     # noqa: N802
         bar = self.scrollbar.sizeHint().width()
@@ -289,7 +514,10 @@ class MerlinView(QWidget):
             painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
             painter.translate(0, -self._scroll)
             visible = QRectF(0, self._scroll, self.width(), self.height())
-            paint(painter, self._display, visible)
+            if self._found_rect is not None:
+                painter.fillRect(self._found_rect.adjusted(-1, -1, 1, 1), QColor(255, 214, 0, 200))
+            paint(painter, self._display, visible,
+                  {k: v for k, v in self._images.items() if v is not False})
         painter.end()
 
     def wheelEvent(self, event) -> None:                      # noqa: N802

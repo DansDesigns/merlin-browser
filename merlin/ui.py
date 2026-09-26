@@ -518,6 +518,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._build_webapps_page(), "Web apps")
         tabs.addTab(self._shields_tab(), "Shields")
         tabs.addTab(self._media_tab(), "Media")
+        tabs.addTab(self._engine_tab(), "Merlin Engine")
         tabs.addTab(self._advanced_tab(), "Advanced")
         tabs.addTab(self._updates_tab(), "Updates")
 
@@ -1195,6 +1196,35 @@ class SettingsDialog(QDialog):
             self.rule_label.setText("Downloading filter lists in the background...")
 
     # -------------------------------------------------------------- media
+    def _engine_tab(self) -> QWidget:
+        """Merlin's own engine, to switch on and try."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(self._check(
+            "Use Merlin Engine for new tabs", "merlin_engine",
+            "Draws pages with MerlinEngine, Merlin's own engine, instead of "
+            "Chromium. Takes effect at once: every tab opened from now on uses "
+            "it, and tabs already open keep the engine they have. Switch it "
+            "off to go back to Chromium for new tabs."))
+        note = QLabel(
+            "MerlinEngine is new and partial. It draws text, headings, lists, "
+            "links, tables and images, with the page's CSS and Merlin's content "
+            "blocker. It does not run JavaScript yet, has no forms, and lays out "
+            "floats, flexbox and grid as ordinary blocks, so web apps and many "
+            "modern sites will not work in it. Tabs drawn by it say "
+            "\"Merlin Engine\" when you point at them.", page)
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#9a9ba1; font-size:12px;")
+        layout.addWidget(note)
+        compare = QPushButton("Open the current page in the other engine", page)
+        compare.setToolTip("A new tab with the same page, drawn by whichever "
+                           "engine the current tab is not using")
+        compare.clicked.connect(
+            lambda: getattr(self.window_ref, "reopen_in_other_engine", lambda: None)())
+        layout.addWidget(compare)
+        layout.addStretch(1)
+        return page
+
     def _media_tab(self) -> QWidget:
         from . import media
 

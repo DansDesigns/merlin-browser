@@ -672,43 +672,55 @@ class RequestInterceptor(QWebEngineUrlRequestInterceptor):
         # that first hop kills the redirect before it happens, and the site
         # simply never loads. Hosts that have failed this way once are left
         # alone afterwards.
-        if (self.settings.get("https_upgrade") and scheme == "http"
-                and info.resourceType() == RT.ResourceTypeMainFrame
+        if info.resourceType() == RT.ResourceTypeMainFrame:
+            upgraded = self.upgrade(url)
+            if upgraded != url:
+                info.redirect(upgraded)
+            # Never block a top-level document. Blockers exist to stop what a
+            # page pulls in, not to stop you going somewhere.
+            #
+            # This mattered on redirects: firstPartyUrl is still the previous
+            # page while the new one is being fetched, so following a redirect
+            # to another domain looked like a third-party request, and any
+            # $third-party rule that happened to match could take out the
+            # whole page. The site simply failed to load with no explanation.
+            return
+
+        rtype = RESOURCE_TYPE_NAMES.get(info.resourceType(), "other")
+        if self.check(url.toString(), fp_host, rtype, url.host()):
+            info.block(True)
+
+    # Both engines ask these, Chromium through interceptRequest above and
+    # MerlinEngine directly, so a page is blocked and upgraded the same way
+    # whichever draws it.
+    def upgrade(self, url: QUrl) -> QUrl:
+        """The https address to use for a top-level http one, or the same."""
+        if (self.settings.get("https_upgrade") and url.scheme() == "http"
                 and not _is_local(url)
                 and url.host().lower() not in self.no_upgrade()):
             upgraded = QUrl(url)
             upgraded.setScheme("https")
             self.upgraded_to_https.emit(url.host().lower(), url.toString())
-            info.redirect(upgraded)
-            return
+            return upgraded
+        return url
 
+    def check(self, url_str: str, fp_host: str, rtype: str, host: str = "") -> bool:
+        """Whether to block something a page pulls in, counting it if so.
+
+        Never for the page itself: callers ask only about what it loads.
+        """
         if not self.settings.shields_enabled_for(fp_host):
-            return
-
-        # Never block a top-level document. Blockers exist to stop what a page
-        # pulls in, not to stop you going somewhere.
-        #
-        # This mattered on redirects: firstPartyUrl is still the previous page
-        # while the new one is being fetched, so following a redirect to
-        # another domain looked like a third-party request, and any
-        # $third-party rule that happened to match could take out the whole
-        # page. The site simply failed to load with no explanation.
-        if info.resourceType() == RT.ResourceTypeMainFrame:
-            return
-
-        rtype = RESOURCE_TYPE_NAMES.get(info.resourceType(), "other")
-        url_str = url.toString()
-        host = url.host()
+            return False
+        host = host or QUrl(url_str).host()
         is_third_party = bool(fp_host) and not _same_site(host, fp_host)
-
         try:
-            if self.engine.should_block(url_str, rtype, is_third_party,
-                                        fp_host, host):
-                info.block(True)
+            if self.engine.should_block(url_str, rtype, is_third_party, fp_host, host):
                 self.counts[fp_host] = self.counts.get(fp_host, 0) + 1
                 self.blocked.emit(fp_host, url_str)
+                return True
         except Exception:                              # never break navigation
-            return
+            return False
+        return False
 
     def count_for(self, host: str) -> int:
         return self.counts.get(host, 0)
