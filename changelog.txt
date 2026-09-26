@@ -5,6 +5,21 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.6.98
+  Merlin Engine lays out flexbox, which most modern sites and Merlin's own
+  new-tab page are built with: rows and columns, reversed or not, wrapping
+  onto more lines; flex-basis, flex-grow sharing out spare room and
+  flex-shrink taking it back in proportion, never below an item's narrowest
+  content; justify-content (start, end, centre, space-between, space-around,
+  space-evenly), align-items and align-self (stretch, start, end, centre),
+  margin: auto on items, gap, order, and loose text as an item of its own.
+  Checked against the positions the specification requires, 21 cases in all.
+  Also: min-height and max-height, rounded corners (border-radius), CSS
+  min(), max(), clamp() and simple calc(), links laid out as blocks that can
+  be clicked anywhere on them, and form fields drawn with their value or
+  placeholder, though not yet usable. The new-tab page now looks much as it
+  does in Chromium.
+
 1.6.97
   Fixed: 1.6.96 would not start on an existing Merlin.exe, even with Merlin
   Engine switched off ("No module named 'html.parser'"). The browser window

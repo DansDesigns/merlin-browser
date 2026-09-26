@@ -1,5 +1,5 @@
 # Merlin Browser
-![version](https://img.shields.io/badge/version-1.6.96-6f8ff0)
+![version](https://img.shields.io/badge/version-1.6.97-6f8ff0)
 
 ### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6 Requires a reinstall as there has been a fundamental change to the folder structure. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
 
@@ -154,12 +154,12 @@ python -m merlin.engine https://example.com
 python -m merlin.engine page.html
 ```
 
-It renders ordinary documents: text, headings, paragraphs, lists, links,
-images, tables, colours, fonts, margins, padding, borders and centring, with
-the CSS cascade and line breaking by real font measurement, and Merlin's
-content blocker applies to it as to Chromium's tabs. JavaScript, forms,
-flexbox, grid and floats are still to come, so web apps and many modern sites
-will not work in it yet.
+It renders text, headings, paragraphs, lists, links, images, tables and
+flexbox layouts, with colours, fonts, margins, padding, borders, rounded
+corners and centring, the CSS cascade, and line breaking by real font
+measurement; Merlin's content blocker applies to it as to Chromium's tabs.
+JavaScript, usable forms, grid, floats and positioning are still to come, so
+web apps and many modern sites will not work in it yet.
 
 
 

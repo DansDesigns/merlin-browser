@@ -102,6 +102,7 @@ class Layout:
         self._runs: list = []
         self._last_baseline = None
         self._measuring = False
+        self._link = None                 # the href of an enclosing block-level link
         self.document = document
         self.styles = styles
         self.zoom = zoom
@@ -183,6 +184,15 @@ class Layout:
         content_y = box_y + border[0] + padding[0]
         if element.id:
             self.out.anchors.setdefault(element.id, box_y)
+        # a link laid out as a block: everything inside it leads there, and so
+        # does the whole box, so a tile can be clicked anywhere on it
+        href = element.attrs.get("href") if element.tag == "a" and "href" in element.attrs else None
+        enclosing_link = self._link
+        if href is not None:
+            self._link = href
+        min_height = self._length(style.get("min-height"), 0.0, vertical=True)
+        max_height = self._length(style.get("max-height"), 0.0, vertical=True)
+        fixed_height = self._length(style.get("height"), 0.0, vertical=True)
 
         # the background goes under the children, so its place is kept now
         background_index = len(self.out.items)
@@ -199,24 +209,41 @@ class Layout:
                         box_x += spare / 2
                         content_x += spare / 2
             inner_height, first_baseline = self._table(element, style, content_x, content_y, content_width)
+        elif style.get("display") in ("flex", "inline-flex"):
+            inner_height, first_baseline = self._flex(
+                element, style, content_x, content_y, content_width,
+                room=fixed_height, least=min_height)
         else:
             inner_height, first_baseline = self._contents(element, style, content_x, content_y, content_width)
         # where this block's first line of text sits, for a list marker outside it
         self._last_baseline = first_baseline
 
-        height_value = _px(style.get("height"), 0.0, auto=None)
-        if height_value is not None and not isinstance(style.get("height"), tuple):
-            inner_height = height_value * z
+        if fixed_height is not None:
+            inner_height = fixed_height
+        if min_height is not None:
+            inner_height = max(inner_height, min_height)
+        if max_height is not None:
+            inner_height = min(inner_height, max_height)
+        self._link = enclosing_link
         box_height = border[0] + padding[0] + inner_height + padding[2] + border[2]
         box_width = border[3] + padding[3] + content_width + padding[1] + border[1]
         box = QRectF(box_x, box_y, box_width, box_height)
 
         colour = style.get("background-color")
+        radius = self._length(style.get("border-top-left-radius"), box_width) or 0.0
+        radius = min(radius, box_width / 2, box_height / 2)
         paint = []
         if colour and colour[3] > 0 and not (root_level and self.out.canvas == colour):
-            paint.append(("rect", box, colour))
-        paint.extend(self._borders(style, box, border))
+            paint.append(("rrect", box, colour, radius) if radius > 0.5 else ("rect", box, colour))
+        if radius > 0.5 and len(set(border)) == 1 and border[0] > 0:
+            # one border all round, drawn along the rounded edge
+            paint.append(("rborder", box, style.get("border-top-color") or style.get("color"),
+                          border[0], radius))
+        else:
+            paint.extend(self._borders(style, box, border))
         self.out.items[background_index] = ("group", paint)
+        if href is not None:
+            self.out.links.append((box, href))
 
         if style.get("display") == "list-item" and first_baseline is not None:
             self._marker(element, style, content_x, first_baseline)
@@ -265,8 +292,45 @@ class Layout:
     def _is_block(self, node) -> bool:
         return isinstance(node, Element) and self.styles[node].get("display") in BLOCK
 
+    def _control_text(self, element: Element, style: dict):
+        """What a form control shows, and in what style; None for nothing.
+
+        Controls cannot be used yet; this only draws them, so a page's search
+        box or button is at least there to see: its value, or its placeholder
+        in a softer colour.
+        """
+        kind = element.attrs.get("type", "text").lower() if element.tag == "input" else element.tag
+        if kind in ("hidden",):
+            return None
+        if kind in ("checkbox",):
+            return ("\u2611" if "checked" in element.attrs else "\u2610", style)
+        if kind in ("radio",):
+            return ("\u25c9" if "checked" in element.attrs else "\u25cb", style)
+        value = element.attrs.get("value", "")
+        if element.tag == "textarea":
+            value = element.text()
+        if element.tag == "select":
+            chosen = [o for o in element.elements() if o.tag == "option"]
+            picked = [o for o in chosen if "selected" in o.attrs] or chosen[:1]
+            value = picked[0].text().strip() if picked else ""
+        if kind in ("submit", "button", "reset") and not value:
+            value = {"submit": "Submit", "reset": "Reset"}.get(kind, "")
+        if value:
+            return (value, style)
+        placeholder = element.attrs.get("placeholder", "")
+        softer = dict(style)
+        colour = style.get("color", (0, 0, 0, 255))
+        softer["color"] = (colour[0], colour[1], colour[2], max(60, colour[3] * 55 // 100))
+        # a non-breaking space still gives an empty box the height of a line
+        return (placeholder or "\u00a0", softer)
+
     def _contents(self, element: Element, style: dict, x: float, y: float, width: float):
         """Children of a block: returns (height, baseline of the first line)."""
+        if element.tag in ("input", "textarea", "select"):
+            shown = self._control_text(element, style)
+            if shown is None:
+                return 0.0, None
+            return self._inline([Text(shown[0])], shown[1], x, y, width)
         children = [c for c in element.children
                     if not (isinstance(c, Element) and self.styles[c].get("display") == "none")]
         if not any(self._is_block(c) for c in children):
@@ -308,6 +372,330 @@ class Layout:
                 run.append(child)
         flush_run()
         cursor += pending_margin
+        return cursor - y, first_baseline
+
+    # ------------------------------------------------------------ lengths
+    def _length(self, value, reference: float, vertical: bool = False):
+        """A computed length in page pixels, zoom included; None for auto.
+
+        Percentages are of reference, which is already in page pixels. A
+        percentage height with nothing definite to refer to is treated as
+        auto, as browsers do.
+        """
+        if value is None or value == "auto":
+            return None
+        if isinstance(value, tuple):
+            if vertical and reference <= 0:
+                return None
+            return reference * value[1] / 100
+        try:
+            return float(value) * self.zoom
+        except (TypeError, ValueError):
+            return None
+
+    # ------------------------------------------------------------ flexbox
+    def _flex_items(self, element: Element):
+        """The container's items, in order: its elements, and loose text."""
+        items = []
+        for child in element.children:
+            if isinstance(child, Element):
+                child_style = self.styles[child]
+                if child_style.get("display") == "none":
+                    continue
+                if child_style.get("position") in ("absolute", "fixed"):
+                    # not a flex item, by the specification: it is placed on
+                    # its own, which waits for positioning; left out, it no
+                    # longer takes a slot in the row it was meant to float over
+                    continue
+                items.append((child, child_style))
+            elif isinstance(child, Text) and child.data.strip():
+                # text directly in a flex container becomes an item of its own
+                anonymous = Element("span")
+                anonymous.append(Text(child.data))
+                anonymous.parent = element
+                inherited = {k: v for k, v in self.styles[element].items()
+                             if k in ("color", "font-family", "font-size", "font-weight",
+                                      "font-style", "line-height", "text-align",
+                                      "white-space", "text-decoration")}
+                inherited.update({"display": "block"})
+                items.append((anonymous, inherited))
+        # order, keeping document order among equals
+        return sorted(items, key=lambda pair: pair[1].get("order", 0))
+
+    def _natural_width(self, element: Element, style: dict, narrowest: bool) -> float:
+        """An item's content width with no line breaks, or broken at every chance."""
+        return _Measure(self).extent(element, style, 1.0 if narrowest else 100000.0)
+
+    def _item_box(self, element: Element, style: dict, x: float, y: float,
+                  border_width: float, border_height: float | None = None) -> float:
+        """Lay out one flex item at a size already decided; returns its height."""
+        _m, padding, border = self._edges(style, border_width)
+        z = self.zoom
+        item = dict(style)
+        item["width"] = max(0.0, border_width - padding[1] - padding[3] - border[1] - border[3]) / z
+        item["min-width"] = item["max-width"] = None
+        for side in ("top", "right", "bottom", "left"):
+            item[f"margin-{side}"] = 0.0
+        if border_height is not None:
+            item["height"] = max(0.0, border_height - padding[0] - padding[2]
+                                 - border[0] - border[2]) / z
+            item["min-height"] = item["max-height"] = None
+        display = item.get("display")
+        # an item is always laid out as a block, whatever it was
+        item["display"] = "flex" if display in ("flex", "inline-flex") else \
+            ("table" if display == "table" else "block")
+        return self._block(element, item, x, y, border_width)
+
+    def _scratch_height(self, element, style, border_width) -> float:
+        """How tall an item would be at a width, without drawing it."""
+        saved, saved_runs = self.out, self._runs
+        self.out = DisplayList()
+        self._runs = []
+        try:
+            return self._item_box(element, style, 0.0, 0.0, border_width)
+        finally:
+            self.out, self._runs = saved, saved_runs
+
+    def _flex(self, element: Element, style: dict, x: float, y: float, width: float,
+              room: float | None = None, least: float | None = None):
+        """Lay out a flex container's items; returns (height, first baseline)."""
+        items = self._flex_items(element)
+        if not items:
+            return 0.0, None
+        direction = style.get("flex-direction", "row")
+        if direction.startswith("column"):
+            return self._flex_column(items, style, x, y, width, room, least,
+                                     reverse=direction.endswith("reverse"))
+        return self._flex_row(items, style, x, y, width, room, least,
+                              reverse=direction.endswith("reverse"))
+
+    @staticmethod
+    def _justify(kind: str, spare: float, count: int, reverse: bool):
+        """Where the first item starts, and the extra space between items."""
+        if reverse:
+            kind = {"flex-start": "flex-end", "start": "end", "left": "right",
+                    "flex-end": "flex-start", "end": "start", "right": "left"}.get(kind, kind)
+        if spare <= 0 or count == 0:
+            return 0.0, 0.0
+        if kind in ("flex-end", "end", "right"):
+            return spare, 0.0
+        if kind == "center":
+            return spare / 2, 0.0
+        if kind == "space-between":
+            return (0.0, spare / (count - 1)) if count > 1 else (0.0, 0.0)
+        if kind == "space-around":
+            return spare / count / 2, spare / count
+        if kind == "space-evenly":
+            return spare / (count + 1), spare / (count + 1)
+        return 0.0, 0.0
+
+    def _flex_row(self, items, style, x, y, width, room, least, reverse=False):
+        wrap = style.get("flex-wrap", "nowrap") in ("wrap", "wrap-reverse")
+        column_gap = self._length(style.get("column-gap"), width) or 0.0
+        row_gap = self._length(style.get("row-gap"), width) or 0.0
+        justify = style.get("justify-content", "flex-start")
+        align_items = style.get("align-items", "stretch")
+
+        entries = []
+        for element, item_style in items:
+            margin, padding, border = self._edges(item_style, width)
+            edges = padding[1] + padding[3] + border[1] + border[3]
+            fixed = self._length(item_style.get("width"), width)
+            basis_value = item_style.get("flex-basis", "auto")
+            basis = self._length(basis_value, width) if basis_value not in (None, "auto") else None
+            if basis is None:
+                basis = fixed if fixed is not None else self._natural_width(element, item_style, False)
+            # The automatic minimum is the smaller of the narrowest content and
+            # any width given: an item with width: 300px and little in it can
+            # still shrink, rather than pushing the row off a narrow screen.
+            narrowest = self._natural_width(element, item_style, True)
+            if fixed is not None:
+                narrowest = min(narrowest, fixed)
+            low = self._length(item_style.get("min-width"), width)
+            high = self._length(item_style.get("max-width"), width)
+            # an item's automatic minimum is its narrowest content
+            floor = low if low is not None else narrowest
+            size = max(basis, low or 0.0)
+            if high is not None:
+                size = min(size, high)
+            entries.append({
+                "element": element, "style": item_style, "margin": margin,
+                "edges": edges, "base": basis, "size": size, "floor": floor, "ceiling": high,
+                "grow": item_style.get("flex-grow", 0.0), "shrink": item_style.get("flex-shrink", 1.0),
+            })
+        if reverse:
+            entries.reverse()
+
+        def outer(entry):
+            m = entry["margin"]
+            return entry["size"] + entry["edges"] + (m[1] or 0.0) + (m[3] or 0.0)
+
+        # break into lines
+        lines, line, used = [], [], 0.0
+        for entry in entries:
+            need = outer(entry) + (column_gap if line else 0.0)
+            if wrap and line and used + need > width + 0.01:
+                lines.append(line)
+                line, used = [], 0.0
+                need = outer(entry)
+            line.append(entry)
+            used += need
+        if line:
+            lines.append(line)
+
+        cursor = y
+        first_baseline = None
+        single = len(lines) == 1
+        for number, line in enumerate(lines):
+            gaps = column_gap * (len(line) - 1)
+            free = width - sum(outer(e) for e in line) - gaps
+            if free > 0 and sum(e["grow"] for e in line) > 0:
+                total = sum(e["grow"] for e in line)
+                for entry in line:
+                    entry["size"] += free * entry["grow"] / total
+                    if entry["ceiling"] is not None:
+                        entry["size"] = min(entry["size"], entry["ceiling"])
+            elif free < 0:
+                weights = [e["shrink"] * e["base"] for e in line]
+                total = sum(weights)
+                if total > 0:
+                    for entry, weight in zip(line, weights):
+                        entry["size"] = max(entry["floor"], entry["size"] + free * weight / total)
+            spare = width - sum(outer(e) for e in line) - gaps
+            autos = sum((e["margin"][3] is None) + (e["margin"][1] is None) for e in line)
+            if spare > 0 and autos:
+                share, spare = spare / autos, 0.0
+            else:
+                share = 0.0
+            start, between = self._justify(justify, spare, len(line), reverse)
+
+            heights = []
+            for entry in line:
+                fixed_height = self._length(entry["style"].get("height"), 0.0, vertical=True)
+                border_width = entry["size"] + entry["edges"]
+                height = fixed_height if fixed_height is not None else \
+                    self._scratch_height(entry["element"], entry["style"], border_width)
+                heights.append(height)
+            cross = max((h + (e["margin"][0] or 0.0) + (e["margin"][2] or 0.0)
+                         for h, e in zip(heights, line)), default=0.0)
+            if single:
+                # one line fills the container's height, if it has one
+                cross = max(cross, room or 0.0, least or 0.0)
+
+            pen = x + start
+            for entry, height in zip(line, heights):
+                m = entry["margin"]
+                left = m[3] if m[3] is not None else share
+                right = m[1] if m[1] is not None else share
+                border_width = entry["size"] + entry["edges"]
+                align = entry["style"].get("align-self", "auto")
+                if align in ("auto", "normal", ""):
+                    align = align_items
+                top_margin, bottom_margin = m[0] or 0.0, m[2] or 0.0
+                forced = None
+                if align in ("stretch", "normal") and \
+                        self._length(entry["style"].get("height"), 0.0, vertical=True) is None:
+                    forced = max(height, cross - top_margin - bottom_margin)
+                    offset = 0.0
+                else:
+                    taken = height + top_margin + bottom_margin
+                    offset = {"flex-end": cross - taken, "end": cross - taken,
+                              "center": (cross - taken) / 2}.get(align, 0.0)
+                if m[0] is None and m[2] is None:          # auto margins across: centre
+                    offset = (cross - height) / 2
+                    top_margin = 0.0
+                self._last_baseline = None
+                self._item_box(entry["element"], entry["style"], pen + left,
+                               cursor + offset + top_margin, border_width, forced)
+                if first_baseline is None:
+                    first_baseline = self._last_baseline
+                pen += left + border_width + right + column_gap + between
+            cursor += cross + (row_gap if number < len(lines) - 1 else 0.0)
+        return cursor - y, first_baseline
+
+    def _flex_column(self, items, style, x, y, width, room, least, reverse=False):
+        row_gap = self._length(style.get("row-gap"), width) or 0.0
+        justify = style.get("justify-content", "flex-start")
+        align_items = style.get("align-items", "stretch")
+        entries = []
+        for element, item_style in items:
+            margin, padding, border = self._edges(item_style, width)
+            edges = padding[1] + padding[3] + border[1] + border[3]
+            align = item_style.get("align-self", "auto")
+            if align in ("auto", "normal", ""):
+                align = align_items
+            left, right = margin[3] or 0.0, margin[1] or 0.0
+            fixed = self._length(item_style.get("width"), width)
+            if fixed is not None:
+                border_width = fixed + edges
+            elif align in ("stretch", "normal") and not (margin[3] is None and margin[1] is None):
+                border_width = width - left - right
+            else:
+                border_width = min(self._natural_width(element, item_style, False) + edges,
+                                   width - left - right)
+            low = self._length(item_style.get("min-width"), width)
+            high = self._length(item_style.get("max-width"), width)
+            if high is not None:
+                border_width = min(border_width, high + edges)
+            if low is not None:
+                border_width = max(border_width, low + edges)
+            basis_value = item_style.get("flex-basis", "auto")
+            basis = self._length(basis_value, room or 0.0, vertical=True) \
+                if basis_value not in (None, "auto") else None
+            fixed_height = self._length(item_style.get("height"), room or 0.0, vertical=True)
+            height = basis if basis is not None else (
+                fixed_height if fixed_height is not None
+                else self._scratch_height(element, item_style, border_width))
+            entries.append({"element": element, "style": item_style, "margin": margin,
+                            "width": border_width, "height": height, "align": align,
+                            "grow": item_style.get("flex-grow", 0.0)})
+        if reverse:
+            entries.reverse()
+
+        def outer(entry):
+            m = entry["margin"]
+            return entry["height"] + (m[0] or 0.0) + (m[2] or 0.0)
+
+        gaps = row_gap * (len(entries) - 1)
+        available = room if room is not None else least
+        grown = set()
+        if available is not None:
+            free = available - sum(outer(e) for e in entries) - gaps
+            total = sum(e["grow"] for e in entries)
+            if free > 0 and total > 0:
+                for index, entry in enumerate(entries):
+                    if entry["grow"]:
+                        entry["height"] += free * entry["grow"] / total
+                        grown.add(index)
+            spare = available - sum(outer(e) for e in entries) - gaps
+        else:
+            spare = 0.0
+        start, between = self._justify(justify, spare, len(entries), reverse)
+        cursor = y + start
+        first_baseline = None
+        for index, entry in enumerate(entries):
+            m = entry["margin"]
+            left, right = m[3], m[1]
+            spare_across = width - entry["width"] - (left or 0.0) - (right or 0.0)
+            if left is None and right is None:
+                offset = spare_across / 2 + 0.0
+                left = 0.0
+            elif entry["align"] == "center":
+                offset = spare_across / 2
+            elif entry["align"] in ("flex-end", "end", "right"):
+                offset = spare_across
+            else:
+                offset = 0.0
+            cursor += m[0] or 0.0
+            self._last_baseline = None
+            forced = entry["height"] if index in grown else None
+            used = self._item_box(entry["element"], entry["style"], x + (left or 0.0) + offset,
+                                  cursor, entry["width"], forced)
+            if first_baseline is None:
+                first_baseline = self._last_baseline
+            cursor += max(used, entry["height"] if forced is not None else used) + (m[2] or 0.0)
+            if index < len(entries) - 1:
+                cursor += row_gap + between
         return cursor - y, first_baseline
 
     # ------------------------------------------------------------ images
@@ -548,6 +936,11 @@ class Layout:
                 if node.tag == "img":
                     out.append(("image", node, node_style, link))
                     continue
+                if node.tag in ("input", "textarea", "select"):
+                    shown = self._control_text(node, node_style)
+                    if shown is not None:
+                        out.append(("text", shown[0], shown[1], link))
+                    continue
                 href = node.attrs.get("href") if node.tag == "a" and "href" in node.attrs else link
                 if node.id:
                     out.append(("anchor", node.id, node_style, href))
@@ -561,7 +954,7 @@ class Layout:
 
     def _inline(self, nodes, block_style: dict, x: float, y: float, width: float):
         items: list = []
-        self._items(nodes, block_style, None, items)
+        self._items(nodes, block_style, self._link, items)
         pre = block_style.get("white-space") in ("pre", "pre-wrap", "pre-line", "break-spaces")
         # words and spaces, each with its style
         pieces = []          # (text, style, link) or ("\n", ...) for breaks, or image
@@ -721,7 +1114,10 @@ class _Measure:
         self.layout.out = DisplayList()
         self.layout._measuring = True
         try:
-            self.layout._contents(element, style, 0.0, 0.0, width)
+            if style.get("display") in ("flex", "inline-flex"):
+                self.layout._flex(element, style, 0.0, 0.0, width)
+            else:
+                self.layout._contents(element, style, 0.0, 0.0, width)
             right = 0.0
             for item in self.layout.out.items:
                 right = max(right, _right_edge(item))
@@ -736,7 +1132,7 @@ def _right_edge(item) -> float:
         return 0.0
     if item[0] == "group":
         return max((_right_edge(sub) for sub in item[1]), default=0.0)
-    if item[0] == "rect" or item[0] == "image":
+    if item[0] in ("rect", "image", "rrect", "rborder"):
         return item[1].right()
     if item[0] == "text":
         return item[1] + QFontMetricsF(item[4]).horizontalAdvance(item[3])

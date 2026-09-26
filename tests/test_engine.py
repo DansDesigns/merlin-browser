@@ -247,6 +247,111 @@ def test_images(app) -> None:
     check("a blocked or missing image takes no room", (50, 50) not in sizes)
 
 
+def _flex_check(label, got, want):
+    check(label, got == want, "" if got == want else f"got {got}, want {want}")
+
+
+def test_flexbox() -> None:
+    """Flexbox, against the positions the specification requires."""
+    from merlin.engine.css import Styler
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+
+
+    def boxes(markup, width=600):
+        """Each element with an id, as (x, y, w, h) of its background box."""
+        doc = parse("<body style='margin:0'>" + markup)
+        styles = Styler(doc).compute()
+        out = Layout(doc, styles, width).run()
+        found = {}
+        rects = []
+        for item in out.items:
+            if item and item[0] == "group":
+                for sub in item[1]:
+                    if sub[0] in ("rect", "rrect"):
+                        rects.append(sub)
+        # coloured boxes identify items: each test gives each item its own colour
+        for sub in rects:
+            r = sub[1]
+            found[sub[2][:3]] = (round(r.x()), round(r.y()), round(r.width()), round(r.height()))
+        return found, out
+
+
+
+
+    R, G, B = (255, 0, 0), (0, 128, 0), (0, 0, 255)
+    item = "<div style='background:{c};height:20px;{extra}'></div>"
+
+
+    def three(style, extras=("", "", ""), width=600):
+        markup = f"<div style='display:flex;{style}'>" + "".join(
+            item.format(c=c, extra=e) for c, e in zip(("red", "green", "blue"), extras)) + "</div>"
+        found, _out = boxes(markup, width)
+        return [found.get(c) for c in (R, G, B)]
+
+
+    # widths from width, then justify-content along a 600px row
+    print("row, fixed widths, justify-content")
+    fixed = ("width:100px", "width:100px", "width:100px")
+    _flex_check("flex-start", [b[0] for b in three("", fixed)], [0, 100, 200])
+    _flex_check("flex-end", [b[0] for b in three("justify-content:flex-end", fixed)], [300, 400, 500])
+    _flex_check("center", [b[0] for b in three("justify-content:center", fixed)], [150, 250, 350])
+    _flex_check("space-between", [b[0] for b in three("justify-content:space-between", fixed)], [0, 250, 500])
+    _flex_check("space-around", [b[0] for b in three("justify-content:space-around", fixed)], [50, 250, 450])
+    _flex_check("space-evenly", [b[0] for b in three("justify-content:space-evenly", fixed)], [75, 250, 425])
+    _flex_check("gap between items", [b[0] for b in three("gap:10px", fixed)], [0, 110, 220])
+    _flex_check("row-reverse", [b[0] for b in three("flex-direction:row-reverse", fixed)], [500, 400, 300])
+
+    print("growing and shrinking")
+    _flex_check("flex:1 shares equally", [b[2] for b in three("", ("flex:1", "flex:1", "flex:1"))], [200, 200, 200])
+    _flex_check("flex-grow 1:2:1 of the spare room",
+          [b[2] for b in three("", ("width:100px;flex-grow:1", "width:100px;flex-grow:2",
+                                    "width:100px;flex-grow:1"))], [175, 250, 175])
+    _flex_check("one grows, one fixed, one with margin-left:auto",
+          [(b[0], b[2]) for b in three("", ("width:50px", "flex:1", "width:50px"))],
+          [(0, 50), (50, 500), (550, 50)])
+    _flex_check("margin-left:auto pushes an item to the end",
+          [b[0] for b in three("", ("width:50px", "width:50px", "width:50px;margin-left:auto"))],
+          [0, 50, 550])
+    _flex_check("shrinking in proportion when too wide",
+          [b[2] for b in three("", ("width:300px", "width:300px", "width:300px"), width=600)],
+          [200, 200, 200])
+
+    print("wrapping")
+    wrapped = three("flex-wrap:wrap", ("width:250px", "width:250px", "width:250px"))
+    _flex_check("the third item wraps to a second line", [(b[0], b[1]) for b in wrapped],
+          [(0, 0), (250, 0), (0, 20)])
+
+    print("cross axis")
+    tall = ("height:60px;width:50px", "width:50px", "width:50px")
+    stretch = three("", ("height:60px;width:50px", "width:50px;height:auto", "width:50px;height:auto"))
+    _flex_check("align-items: center", [b[1] for b in three("align-items:center", tall)], [0, 20, 20])
+    _flex_check("align-items: flex-end", [b[1] for b in three("align-items:flex-end", tall)], [0, 40, 40])
+
+    # stretch: items with no height fill the line
+    markup = ("<div style='display:flex'><div style='background:red;width:50px;height:60px'></div>"
+              "<div style='background:green;width:50px'></div></div>")
+    found, _ = boxes(markup)
+    _flex_check("align-items: stretch fills the line", found.get(G), (50, 0, 50, 60))
+
+    print("column direction")
+    column = three("flex-direction:column;align-items:center", fixed)
+    _flex_check("column stacks, align-items:center centres across", [(b[0], b[1]) for b in column],
+          [(250, 0), (250, 20), (250, 40)])
+    markup = ("<div style='display:flex;flex-direction:column;justify-content:center;"
+              "min-height:200px;background:#010203'><div style='background:red;height:20px'></div></div>")
+    found, _ = boxes(markup)
+    _flex_check("min-height with justify-content:center centres vertically", found.get(R), (0, 90, 600, 20))
+    _flex_check("and the container is its min-height tall", found.get((1, 2, 3)), (0, 0, 600, 200))
+
+    print("text in a flex container, and order")
+    found, out = boxes("<div style='display:flex;gap:20px'><span style='order:2'>second</span>"
+                       "<span style='order:1'>first</span></div>")
+    texts = sorted((round(i[1]), i[3]) for i in out.items if i and i[0] == "text")
+    _flex_check("order puts items in its sequence", [t for _x, t in texts], ["first", "second"])
+
+
+
 def test_view(app) -> None:
     from merlin.engine import MerlinView
 
@@ -315,7 +420,7 @@ def test_view(app) -> None:
 def main() -> int:
     app = QApplication(sys.argv[:1])
     for test in (test_no_chromium, test_without_html_parser, test_parsing, test_cascade, test_layout,
-                 test_body_and_markers, test_tables):
+                 test_body_and_markers, test_tables, test_flexbox):
         print(test.__name__)
         test()
     print("test_images")

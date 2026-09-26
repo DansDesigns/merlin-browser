@@ -34,6 +34,26 @@ def _draw(painter, item, visible: QRectF, images) -> None:
         rect = item[1]
         if rect.intersects(visible):
             painter.fillRect(rect, _colour(item[2]))
+    elif kind == "rrect":
+        rect, rgba, radius = item[1], item[2], item[3]
+        if rect.intersects(visible):
+            painter.save()
+            painter.setRenderHint(painter.RenderHint.Antialiasing, True)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(_colour(rgba))
+            painter.drawRoundedRect(rect, radius, radius)
+            painter.restore()
+    elif kind == "rborder":
+        rect, rgba, width, radius = item[1], item[2], item[3], item[4]
+        if rect.intersects(visible) and rgba:
+            painter.save()
+            painter.setRenderHint(painter.RenderHint.Antialiasing, True)
+            painter.setPen(QPen(_colour(rgba), width))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            half = width / 2
+            painter.drawRoundedRect(rect.adjusted(half, half, -half, -half),
+                                    max(0.0, radius - half), max(0.0, radius - half))
+            painter.restore()
     elif kind == "text":
         _k, x, baseline, text, font, rgba, decoration = item
         metrics = QFontMetricsF(font)

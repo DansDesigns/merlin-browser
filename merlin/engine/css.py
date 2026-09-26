@@ -457,6 +457,7 @@ hr { border-top: 1px solid #888888; margin-top: 0.5em; margin-bottom: 0.5em }
 th { text-align: center }
 td, th { padding: 1px }
 img { display: inline }
+input, select, textarea, button { display: inline-block }
 """
 
 _DEFAULT_RULES = parse_stylesheet(DEFAULT_STYLESHEET)
