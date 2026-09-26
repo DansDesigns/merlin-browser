@@ -161,7 +161,7 @@ measurement; Merlin's content blocker applies to it as to Chromium's tabs.
 JavaScript, usable forms, grid, floats and positioning are still to come, so
 web apps and many modern sites will not work in it yet.
 
-
+# Install
 
 Download from the [Releases](https://github.com/DansDesigns/merlin-browser/releases) page or build from source by cloning this repo then running:
 
