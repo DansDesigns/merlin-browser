@@ -3,7 +3,7 @@
 
 ### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6.97 Requires a reinstall to enable Merlin Engine. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
 
-A Rust-free desktop web browser built with Python and C++, on Qt and the Chromium engine.
+A Rust-free desktop web browser built with Python and C++, on Qt and the Chromium engine (being replace with a custom Python "Merlin Engine").
 
 
 ![Merlin](https://github.com/DansDesigns/merlin-browser/blob/main/Screenshot.png?raw=true)
