@@ -5,6 +5,32 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.7.0
+  Forms work in Merlin Engine. Text fields, passwords, check boxes, radio
+  buttons, dropdowns and text areas are real, usable fields: type, select,
+  copy and paste, undo, tab between them. The page's CSS still draws each
+  field's box, and a Qt field inside it does the editing, so they look as the
+  page means and behave as fields should. What is typed survives the page
+  being laid out again, as when the window is resized.
+  Sending a form follows the HTML standard: Enter in a field or a click on a
+  submit button sends it, by GET or POST (form-encoded or multipart), to its
+  action or a button's own formaction, with the named fields, the ticked
+  boxes, the chosen options and the button pressed; disabled fields are left
+  out. Reset puts the page's own values back. Clicking a label ticks its box
+  or puts the cursor in its field; radio buttons group by form and name.
+  The new-tab page's search box works: type and press Enter.
+  Cookies: Merlin Engine keeps a cookie jar for each window, private windows
+  apart, for this session; cookies are sent only to the page's own site, never
+  with another site's images. Without Python's cookie module, as on an older
+  Merlin.exe, pages load without cookies rather than failing.
+  merlin://listen and merlin://addtile, the new-tab page's voice search and
+  add-a-shortcut, are handled by the window, as in Chromium's tabs.
+  Forms with no CSS of their own look like forms: bordered fields and grey
+  buttons, as browsers draw them.
+  Not yet: sending files, and filling in saved passwords.
+  Fixed: an empty field with no placeholder was drawn flat; closing a tab
+  while its page or images were still loading left errors in the log.
+
 1.6.99
   Merlin Engine lays out CSS grid: track lists in px, percentages, fr, auto,
   min-content and max-content, minmax(), fit-content(), repeat(), and

@@ -457,7 +457,15 @@ hr { border-top: 1px solid #888888; margin-top: 0.5em; margin-bottom: 0.5em }
 th { text-align: center }
 td, th { padding: 1px }
 img { display: inline }
-input, select, textarea, button { display: inline-block }
+input, select, textarea, button { display: inline-block; font-size: 13.33px;
+  font-family: sans-serif; color: #000000 }
+input, textarea, select { border: 1px solid #8f8f9d; padding: 2px 3px; background-color: #ffffff }
+select { border-radius: 3px }
+button, input[type="submit"], input[type="button"], input[type="reset"] {
+  border: 1px solid #8f8f9d; padding: 2px 8px; background-color: #e9e9ed; border-radius: 3px;
+  text-align: center; cursor: pointer }
+input[type="checkbox"], input[type="radio"] { border: none; padding: 0; background-color: transparent;
+  margin: 3px 3px 3px 4px }
 input[type="hidden"] { display: none }
 """
 

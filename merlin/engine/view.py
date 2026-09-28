@@ -26,8 +26,45 @@ from .paint import paint
 USER_AGENT = "Mozilla/5.0 (compatible; MerlinEngine/0.1)"
 
 
+def _open(request, timeout: int, opener=None):
+    """Open a request, through a cookie-keeping opener when there is one."""
+    return opener.open(request, timeout=timeout) if opener is not None \
+        else urllib.request.urlopen(request, timeout=timeout)
+
+
+def cookie_opener(jar):
+    """An opener that keeps and sends cookies in jar; None without one."""
+    if jar is None:
+        return None
+    return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+
+
+def new_cookie_jar():
+    """A cookie jar for this session, or None if the module is missing.
+
+    http.cookiejar is not among the modules Merlin.exe was built to carry, so
+    an older executable may not have it; then pages load without cookies
+    rather than not at all.
+    """
+    try:
+        import http.cookiejar
+
+        return http.cookiejar.CookieJar()
+    except Exception:                                      # noqa: BLE001
+        return None
+
+
+def _registrable(host: str) -> str:
+    """Roughly the site a host belongs to: example.co.uk for www.example.co.uk."""
+    parts = host.lower().strip(".").split(".")
+    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in (
+            "co", "com", "org", "net", "ac", "gov", "edu", "ltd", "plc", "me"):
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
+
+
 def fetch_bytes(url: str, headers: dict | None = None, timeout: int = 20,
-                limit: int = 16 * 1024 * 1024) -> tuple:
+                limit: int = 16 * 1024 * 1024, opener=None) -> tuple:
     """(ok, final url, bytes or reason, content type). Off the UI thread."""
     parsed = urllib.parse.urlsplit(url)
     scheme = parsed.scheme.lower()
@@ -48,7 +85,7 @@ def fetch_bytes(url: str, headers: dict | None = None, timeout: int = 20,
                     "Accept-Language": "en-GB,en;q=0.8"}
             sent.update(headers or {})
             request = urllib.request.Request(url, headers=sent)
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with _open(request, timeout, opener) as response:
                 return (True, response.geturl(), response.read(limit),
                         response.headers.get("Content-Type", ""))
         return False, url, f"MerlinEngine cannot open {scheme}: addresses yet.".encode(), ""
@@ -56,12 +93,13 @@ def fetch_bytes(url: str, headers: dict | None = None, timeout: int = 20,
         return False, url, str(exc).encode(), ""
 
 
-def fetch(url: str, timeout: int = 20, headers: dict | None = None) -> tuple:
+def fetch(url: str, timeout: int = 20, headers: dict | None = None,
+          data: bytes | None = None, content_type: str = "", opener=None) -> tuple:
     """(ok, final url, text or reason). Runs off the UI thread."""
     if url.startswith("view-source:"):
         import html
 
-        ok, final, text = fetch(url[len("view-source:"):], timeout, headers)
+        ok, final, text = fetch(url[len("view-source:"):], timeout, headers, opener=opener)
         if not ok:
             return ok, url, text
         return True, url, (f"<title>Source of {html.escape(final)}</title>"
@@ -84,8 +122,12 @@ def fetch(url: str, timeout: int = 20, headers: dict | None = None) -> tuple:
                     "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
                     "Accept-Language": "en-GB,en;q=0.8"}
             sent.update(headers or {})
-            request = urllib.request.Request(url, headers=sent)
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            if data is not None:
+                # a form sent by POST
+                sent["Content-Type"] = content_type or "application/x-www-form-urlencoded"
+            request = urllib.request.Request(url, data=data, headers=sent,
+                                             method="POST" if data is not None else "GET")
+            with _open(request, timeout, opener) as response:
                 body = response.read(8 * 1024 * 1024)
                 kind = response.headers.get("Content-Type", "")
                 text = _decode(body, kind)
@@ -220,6 +262,10 @@ class MerlinView(QWidget):
         self._host = host
         self._images: dict = {}        # src -> QImage, or False: blocked or failed
         self._find = ("", -1)          # what was searched for, and where it was
+        self._widgets: dict = {}       # form control element -> its Qt widget
+        self._places: dict = {}        # form control element -> (rect, fixed)
+        self._buttons: list = []       # (rect, element, fixed) for buttons
+        self._focused_once = False
         self._found_rect = None
         self._page = _Page(self, profile)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -333,8 +379,32 @@ class MerlinView(QWidget):
         self._load_number += 1                    # a fetch still running is ignored
 
     # ------------------------------------------------------- navigation
-    def _navigate(self, url: QUrl, record: bool) -> None:
-        same_page = (self._document is not None and url.hasFragment()
+    def _cookies(self):
+        """This window's cookie jar: private windows keep theirs apart."""
+        owner = self._host if self._host is not None else MerlinView
+        jar = getattr(owner, "_merlin_cookie_jar", None)
+        if jar is None and not getattr(owner, "_merlin_cookie_jar_tried", False):
+            jar = new_cookie_jar()
+            try:
+                owner._merlin_cookie_jar = jar
+                owner._merlin_cookie_jar_tried = True
+            except Exception:                              # noqa: BLE001
+                pass
+        return jar
+
+    def _navigate(self, url: QUrl, record: bool, body: bytes | None = None,
+                  content_type: str = "") -> None:
+        scheme = url.scheme().lower()
+        if scheme == "merlin":
+            # Merlin's own addresses, handled by the window as for Chromium's tabs
+            action = {"listen": "start_dictation", "addtile": "add_start_tile"}.get(url.host())
+            handler = getattr(self._host, action, None) if action else None
+            if handler is not None:
+                QTimer.singleShot(0, handler)
+            return
+        if scheme in ("mailto", "tel", "javascript", "sms"):
+            return
+        same_page = (self._document is not None and url.hasFragment() and body is None
                      and url.adjusted(QUrl.UrlFormattingOption.RemoveFragment)
                      == self._url.adjusted(QUrl.UrlFormattingOption.RemoveFragment))
         if record:
@@ -352,6 +422,11 @@ class MerlinView(QWidget):
         self._url = url
         self._pending_fragment = url.fragment()
         headers = self._headers()
+        if body is not None and self._url.isValid():
+            headers["Origin"] = self._url.adjusted(
+                QUrl.UrlFormattingOption.RemovePath | QUrl.UrlFormattingOption.RemoveQuery
+                | QUrl.UrlFormattingOption.RemoveFragment).toString()
+        opener = cookie_opener(self._cookies())
         self.urlChanged.emit(self.url())
         self.loadStarted.emit()
         self.loadProgress.emit(10)
@@ -361,10 +436,14 @@ class MerlinView(QWidget):
             # whatever goes wrong here becomes an error page, never a page
             # left loading for ever
             try:
-                ok, final, text = fetch(target, headers=headers)
+                ok, final, text = fetch(target, headers=headers, data=body,
+                                        content_type=content_type, opener=opener)
             except Exception as exc:                  # noqa: BLE001
                 ok, final, text = False, target, f"MerlinEngine failed loading it: {exc}"
-            self._fetched.emit(number, ok, final, text)
+            try:
+                self._fetched.emit(number, ok, final, text)
+            except RuntimeError:
+                pass                     # the tab was closed while this loaded
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -394,6 +473,7 @@ class MerlinView(QWidget):
     # ----------------------------------------------------- the pipeline
     def _show(self, markup: str) -> None:
         self._document = html_parser.parse(markup, self._url.toString())
+        self._clear_controls()
         self._images = {}
         self._find = ("", -1)
         self._found_rect = None
@@ -438,9 +518,19 @@ class MerlinView(QWidget):
                 self._layout()
             return
 
+        page_site = _registrable(self._url.host())
+        own_opener = cookie_opener(self._cookies())
+
         def work(src, address):
-            ok, _final, data, _kind = fetch_bytes(address, headers)
-            self._image_fetched.emit(number, src, data if ok else b"", ok)
+            # cookies go only to the page's own site: another site's images
+            # never learn who is looking
+            same = _registrable(QUrl(address).host()) == page_site
+            ok, _final, data, _kind = fetch_bytes(address, headers,
+                                                  opener=own_opener if same else None)
+            try:
+                self._image_fetched.emit(number, src, data if ok else b"", ok)
+            except RuntimeError:
+                pass                     # the tab was closed while this loaded
 
         for src in wanted[:200]:                  # enough for any ordinary page
             address = self._url.resolved(QUrl(src)).toString()
@@ -463,8 +553,10 @@ class MerlinView(QWidget):
             return
         self._display = Layout(self._document, self._styles, self._page_width(), self._zoom,
                                images=self._images,
-                               viewport_height=float(max(1, self.height()))).run()
+                               viewport_height=float(max(1, self.height())),
+                               live_controls=True).run()
         self._update_scrollbar()
+        self._sync_controls()
         self.update()
 
     def _update_scrollbar(self) -> None:
@@ -480,11 +572,266 @@ class MerlinView(QWidget):
 
     def _scrolled(self, value: int) -> None:
         self._scroll = float(value)
+        self._place_controls()
         self.update()
 
     def _scroll_to_fragment(self, fragment: str) -> None:
         if self._display and fragment in self._display.anchors:
             self.scrollbar.setValue(int(self._display.anchors[fragment]))
+
+    # ------------------------------------------------------------ forms
+    def _clear_controls(self) -> None:
+        for widget in self._widgets.values():
+            widget.hide()
+            widget.deleteLater()
+        self._widgets.clear()
+        self._places.clear()
+        self._buttons = []
+        self._focused_once = False
+
+    def _sync_controls(self) -> None:
+        """Make a widget for each form field laid out, and put each in its place."""
+        if self._display is None:
+            return
+        found, buttons = {}, []
+        for source, fixed in ((self._display, False), (self._display.fixed, True)):
+            if source is None:
+                continue
+            for item in source.items:
+                if item and item[0] == "control":
+                    found[item[2]] = (item[1], fixed, item[3], item[4])
+                elif item and item[0] == "button":
+                    buttons.append((item[1], item[2], fixed))
+        for element in [e for e in self._widgets if e not in found]:
+            widget = self._widgets.pop(element)
+            widget.hide()
+            widget.deleteLater()
+        for element, (rect, fixed, font, colour) in found.items():
+            widget = self._widgets.get(element)
+            if widget is None:
+                widget = self._make_control(element)
+                if widget is None:
+                    continue
+                self._widgets[element] = widget
+            self._style_control(widget, font, colour)
+        self._places = {e: (r, f) for e, (r, f, _font, _colour) in found.items()}
+        self._buttons = buttons
+        self._place_controls()
+        if not self._focused_once and self._widgets:
+            self._focused_once = True
+            # autofocus, when the page itself has the focus: never taken from
+            # the address bar
+            if self.hasFocus():
+                for element, widget in self._widgets.items():
+                    if "autofocus" in element.attrs:
+                        widget.setFocus()
+                        break
+
+    def _place_controls(self) -> None:
+        bottom = self.height()
+        right = self.width() - self.scrollbar.sizeHint().width()
+        for element, widget in self._widgets.items():
+            rect, fixed = self._places.get(element, (None, False))
+            if rect is None:
+                widget.hide()
+                continue
+            top = rect.top() - (0.0 if fixed else self._scroll)
+            height = max(rect.height(), 8.0)
+            widget.setGeometry(round(rect.left()), round(top), max(8, round(rect.width())),
+                               round(height))
+            widget.setVisible(top + height > 0 and top < bottom and rect.left() < right)
+
+    def _make_control(self, element):
+        from PyQt6.QtWidgets import (QCheckBox, QComboBox, QLineEdit, QPlainTextEdit,
+                                     QRadioButton)
+
+        from . import forms
+
+        kind = forms.kind_of(element)
+        value = forms.default_value(element)
+        if kind in ("checkbox", "radio"):
+            widget = QCheckBox(self) if kind == "checkbox" else QRadioButton(self)
+            widget.setChecked(bool(value))
+            if kind == "radio":
+                # grouped by form and name, as on the web; Qt would group every
+                # radio button in the view as one
+                widget.setAutoExclusive(False)
+                widget.toggled.connect(lambda on, e=element: self._radio_toggled(e, on))
+        elif kind == "select":
+            widget = QComboBox(self)
+            options = [o for o in element.elements() if o.tag == "option"]
+            for option in options:
+                widget.addItem(" ".join(option.text().split()), forms.option_value(option))
+            chosen = [i for i, o in enumerate(options) if "selected" in o.attrs]
+            if chosen:
+                widget.setCurrentIndex(chosen[0])
+        elif kind == "textarea":
+            widget = QPlainTextEdit(self)
+            widget.setPlainText(str(value))
+            widget.setFrameShape(QPlainTextEdit.Shape.NoFrame)
+            widget.setPlaceholderText(element.attrs.get("placeholder", ""))
+            if "readonly" in element.attrs:
+                widget.setReadOnly(True)
+        else:
+            widget = QLineEdit(self)
+            widget.setFrame(False)
+            if kind == "file":
+                widget.setPlaceholderText("Files cannot be sent from Merlin Engine yet")
+                widget.setReadOnly(True)
+            else:
+                widget.setText(str(value))
+                widget.setPlaceholderText(element.attrs.get("placeholder", ""))
+            if kind == "password":
+                widget.setEchoMode(QLineEdit.EchoMode.Password)
+            try:
+                if element.attrs.get("maxlength"):
+                    widget.setMaxLength(max(0, int(element.attrs["maxlength"])))
+            except ValueError:
+                pass
+            if "readonly" in element.attrs:
+                widget.setReadOnly(True)
+            # Enter sends the form, as in any browser
+            widget.returnPressed.connect(lambda e=element: self._submit(e))
+        if forms._disabled(element):
+            widget.setEnabled(False)
+        widget.setProperty("merlin_control", True)
+        return widget
+
+    @staticmethod
+    def _style_control(widget, font, colour) -> None:
+        from PyQt6.QtGui import QPalette
+
+        widget.setFont(font)
+        rgba = f"rgba({colour[0]},{colour[1]},{colour[2]},{colour[3] / 255:.2f})"
+        name = type(widget).__name__
+        if name in ("QLineEdit", "QPlainTextEdit"):
+            # transparent: the page's CSS has drawn the field's box already
+            widget.setStyleSheet(f"{name} {{ background: transparent; border: none; "
+                                 f"padding: 0px; margin: 0px; color: {rgba}; }}")
+            palette = widget.palette()
+            softer = QColor(colour[0], colour[1], colour[2], max(60, colour[3] * 55 // 100))
+            palette.setColor(QPalette.ColorRole.PlaceholderText, softer)
+            widget.setPalette(palette)
+        elif name == "QComboBox":
+            widget.setStyleSheet(f"QComboBox {{ background: transparent; border: none; "
+                                 f"color: {rgba}; padding: 0px 2px; }}")
+
+    def _radio_toggled(self, element, on: bool) -> None:
+        if not on:
+            return
+        from . import forms
+
+        name, form = element.attrs.get("name"), forms.form_of(element)
+        for other, widget in self._widgets.items():
+            if other is not element and other.attrs.get("name") == name \
+                    and forms.kind_of(other) == "radio" and forms.form_of(other) is form:
+                widget.setChecked(False)
+
+    def _values(self) -> dict:
+        """What each form field holds now."""
+        values = {}
+        for element, widget in self._widgets.items():
+            name = type(widget).__name__
+            if name in ("QCheckBox", "QRadioButton"):
+                values[element] = widget.isChecked()
+            elif name == "QComboBox":
+                values[element] = widget.currentData() if widget.currentIndex() >= 0 else ""
+            elif name == "QPlainTextEdit":
+                values[element] = widget.toPlainText()
+            else:
+                values[element] = widget.text()
+        return values
+
+    def _submit(self, element, submitter=None) -> None:
+        """Send the form element belongs to, as its button or Enter asks."""
+        from . import forms
+
+        form = element if element.tag == "form" else forms.form_of(element)
+        if form is None:
+            return
+        if submitter is None:
+            # Enter in a field: the form's first submit button sends it
+            submitter = next((c for c in forms.controls_of(form)
+                              if forms.kind_of(c) in ("submit", "image")), None)
+        pairs = forms.form_data(form, self._values(), submitter)
+        where = forms.submission(form, pairs, self._url.toString(), submitter)
+        if where is None:
+            return
+        url = QUrl(where["url"])
+        new_tab = getattr(self._host, "new_tab", None)
+        if where["target"] == "_blank" and where["method"] == "GET" and new_tab is not None:
+            new_tab(where["url"])
+        elif where["method"] == "POST":
+            self._navigate(url, record=True, body=where["body"], content_type=where["type"])
+        else:
+            self.setUrl(url)
+
+    def _reset(self, form) -> None:
+        from . import forms
+
+        for control in forms.controls_of(form):
+            widget = self._widgets.get(control)
+            if widget is None:
+                continue
+            value = forms.default_value(control)
+            name = type(widget).__name__
+            if name in ("QCheckBox", "QRadioButton"):
+                widget.setChecked(bool(value))
+            elif name == "QComboBox":
+                index = widget.findData(value)
+                widget.setCurrentIndex(max(0, index))
+            elif name == "QPlainTextEdit":
+                widget.setPlainText(str(value))
+            else:
+                widget.setText(str(value))
+
+    def _button_at(self, position):
+        point = position.toPointF() if hasattr(position, "toPointF") else position
+        for rect, element, fixed in reversed(self._buttons):
+            y = point.y() + (0.0 if fixed else self._scroll)
+            if rect.contains(point.__class__(point.x(), y)):
+                return element
+        return None
+
+    def _press_button(self, element) -> None:
+        from . import forms
+
+        kind = forms.kind_of(element)
+        if forms._disabled(element):
+            return
+        if kind in ("submit", "image"):
+            self._submit(element, submitter=element)
+        elif kind == "reset":
+            form = forms.form_of(element)
+            if form is not None:
+                self._reset(form)
+
+    def _activate_label(self, label) -> None:
+        """A click on a <label>: tick its box, or put the cursor in its field."""
+        from . import forms
+
+        target = None
+        if label.attrs.get("for"):
+            root = label
+            while root.parent is not None:
+                root = root.parent
+            target = next((e for e in root.elements() if e.attrs.get("id") == label.attrs["for"]), None)
+        if target is None:
+            target = next((e for e in label.elements() if forms.kind_of(e)), None)
+        if target is None:
+            return
+        widget = self._widgets.get(target)
+        if widget is None:
+            if forms.kind_of(target) in ("submit", "image", "reset"):
+                self._press_button(target)
+            return
+        name = type(widget).__name__
+        if name == "QCheckBox":
+            widget.setChecked(not widget.isChecked())
+        elif name == "QRadioButton":
+            widget.setChecked(True)
+        else:
+            widget.setFocus()
 
     # ------------------------------------------------------ find in page
     def findText(self, text: str, flags=None, callback=None) -> None:     # noqa: N802
@@ -583,16 +930,32 @@ class MerlinView(QWidget):
         return ""
 
     def mouseMoveEvent(self, event) -> None:                  # noqa: N802
+        from .layout import LabelTarget
+
         href = self._link_at(event.position())
-        if href != self._hovered:
-            self._hovered = href
-            self.setCursor(Qt.CursorShape.PointingHandCursor if href else Qt.CursorShape.ArrowCursor)
-            self.linkHovered.emit(self._url.resolved(QUrl(href)).toString() if href else "")
+        button = self._button_at(event.position())
+        state = (href, button)
+        if state != self._hovered:
+            self._hovered = state
+            pointing = button is not None or (href and not isinstance(href, LabelTarget))
+            self.setCursor(Qt.CursorShape.PointingHandCursor if pointing else Qt.CursorShape.ArrowCursor)
+            shown = "" if not href or isinstance(href, LabelTarget) else \
+                self._url.resolved(QUrl(href)).toString()
+            self.linkHovered.emit(shown)
 
     def mouseReleaseEvent(self, event) -> None:               # noqa: N802
+        from .layout import LabelTarget
+
         if event.button() != Qt.MouseButton.LeftButton:
             return
+        button = self._button_at(event.position())
+        if button is not None:
+            self._press_button(button)
+            return
         href = self._link_at(event.position())
+        if isinstance(href, LabelTarget):
+            self._activate_label(href.element)
+            return
         if not href or href.lower().startswith("javascript:"):
             return
         self.setUrl(self._url.resolved(QUrl(href)))

@@ -1127,6 +1127,29 @@ def test_merlin_engine_tabs(app) -> None:
     window.close()
 
 
+def test_merlin_engine_typing(app) -> None:
+    """Typing into a Merlin Engine field in Merlin's window reaches the field."""
+    from PyQt6.QtTest import QTest
+
+    from merlin.engine import MerlinView
+
+    window, settings, _ = make_window(app, "t-engine-type")
+    settings.set("merlin_engine", True, save=False)
+    view = window.new_tab("data:text/html,<title>Type</title><form action='https://example.org/s'>"
+                          "<input name=q></form>")
+    wait(app, 1.5)
+    field = next((w for e, w in view._widgets.items() if e.attrs.get("name") == "q"), None)
+    check("a Merlin Engine tab's form field is a live widget in the window",
+          isinstance(view, MerlinView) and field is not None)
+    field.setFocus()
+    # letters and keys the window or the player also use
+    QTest.keyClicks(field, "k m f / space bar")
+    check("every key typed reaches the field, none taken by the window",
+          field.text() == "k m f / space bar", field.text())
+    settings.set("merlin_engine", False, save=False)
+    window.close()
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -1154,7 +1177,7 @@ def main() -> int:
                  test_page_fullscreen_restores_the_window,
                  test_stream_lookup_is_quick, test_stream_failure_is_not_a_box,
                  test_stalled_stream_recovers, test_youtube_cookies_for_ytdlp,
-                 test_merlin_engine_tabs):
+                 test_merlin_engine_tabs, test_merlin_engine_typing):
         print(f"\n{test.__name__}")
         try:
             test(app)

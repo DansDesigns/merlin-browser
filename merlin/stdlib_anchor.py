@@ -90,6 +90,7 @@ if __name__ == "__merlin_never_runs__":
     import html  # noqa: F401
     import html.parser  # noqa: F401
     import http  # noqa: F401
+    import http.cookiejar  # noqa: F401
     import imaplib  # noqa: F401
     import imghdr  # noqa: F401
     import importlib  # noqa: F401

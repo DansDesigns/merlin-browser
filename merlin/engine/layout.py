@@ -18,6 +18,7 @@ import re
 from PyQt6.QtCore import QRectF
 from PyQt6.QtGui import QFont, QFontMetricsF
 
+from . import forms
 from .dom import Element, Text
 
 # Markers for the pieces of a line that are not text. Objects, not strings:
@@ -32,6 +33,15 @@ INLINE_BOXES = ("inline-block", "inline-flex", "inline-grid", "inline-table")
 BLOCK = {"block", "list-item", "table", "table-row", "table-row-group",
          "table-header-group", "table-footer-group", "flex", "grid", "table-caption",
          "table-cell", "grid"}
+
+
+class LabelTarget(str):
+    """A <label> in the links list: clicking it acts on its control."""
+
+    def __new__(cls, element):
+        made = super().__new__(cls, "label")
+        made.element = element
+        return made
 
 
 class DisplayList:
@@ -100,7 +110,11 @@ def _px(value, reference: float = 0.0, auto: float | None = 0.0) -> float | None
 
 class Layout:
     def __init__(self, document, styles: dict, width: float, zoom: float = 1.0,
-                 images: dict | None = None, viewport_height: float = 768.0):
+                 images: dict | None = None, viewport_height: float = 768.0,
+                 live_controls: bool = False):
+        # In a view, form fields are real widgets: layout draws their boxes,
+        # leaves their text to the widget, and says where each one is.
+        self.live_controls = live_controls
         self.viewport_height = viewport_height
         self._floats: list = []           # floats in the current formatting context
         self._absolute: list = [[]]       # waiting for their containing block
@@ -296,6 +310,9 @@ class Layout:
         self.out.items[background_index] = ("group", paint)
         if href is not None:
             self.out.links.append((box, href))
+        if self.live_controls and forms.kind_of(element) in forms.BUTTON_KINDS \
+                and not self._measuring:
+            self.out.items.append(("button", box, element))
 
         # position: relative, and translate(), move the box once laid out;
         # nothing around it moves
@@ -421,7 +438,30 @@ class Layout:
             shown = self._control_text(element, style)
             if shown is None:
                 return 0.0, None
-            return self._inline([Text(shown[0])], shown[1], x, y, width)
+            items_before, links_before = len(self.out.items), len(self.out.links)
+            height, baseline = self._inline([Text(shown[0])], shown[1], x, y, width)
+            _font, metrics = self.fonts.get(style)
+            # at least one line tall, whatever it holds: an empty field with no
+            # placeholder had no line at all, and was drawn flat
+            if height < metrics.lineSpacing():
+                height = metrics.lineSpacing()
+                if baseline is None:
+                    baseline = y + metrics.ascent()
+            if element.tag == "textarea":
+                try:
+                    rows = max(1, int(element.attrs.get("rows", "2")))
+                except ValueError:
+                    rows = 2
+                height = max(height, rows * metrics.lineSpacing())
+            kind = forms.kind_of(element)
+            if self.live_controls and not self._measuring and kind not in forms.BUTTON_KINDS:
+                # the widget draws the value, the caret and the placeholder
+                del self.out.items[items_before:]
+                del self.out.links[links_before:]
+                font, _metrics = self.fonts.get(style)
+                self.out.items.append(("control", QRectF(x, y, width, height), element,
+                                       font, style.get("color", (0, 0, 0, 255))))
+            return height, baseline
         children = [c for c in element.children
                     if not (isinstance(c, Element) and self.styles[c].get("display") == "none")]
         if not any(self._is_block(c) for c in children):
@@ -1040,7 +1080,7 @@ class Layout:
             kind = item[0]
             if kind == "group":
                 return ("group", [moved(sub) for sub in item[1]])
-            if kind in ("rect", "image", "rrect", "rborder", "svg"):
+            if kind in ("rect", "image", "rrect", "rborder", "svg", "control", "button"):
                 return (kind, item[1].translated(dx, dy)) + tuple(item[2:])
             if kind == "text":
                 return (kind, item[1] + dx, item[2] + dy) + item[3:]
@@ -1083,6 +1123,8 @@ class Layout:
                         out.append(("text", shown[0], shown[1], link))
                     continue
                 href = node.attrs.get("href") if node.tag == "a" and "href" in node.attrs else link
+                if node.tag == "label" and self.live_controls and href is None:
+                    href = LabelTarget(node)
                 if node.id:
                     out.append(("anchor", node.id, node_style, href))
                 if display in BLOCK:
@@ -1326,12 +1368,19 @@ class Layout:
         fixed = self._length(style.get("width"), available)
         if fixed is not None:
             border_width = fixed + edges
-        elif element.tag in ("input", "select", "textarea") and \
+        elif element.tag == "select":
+            # wide enough for its longest option, and the arrow
+            _font, metrics = self.fonts.get(style)
+            longest = max((metrics.horizontalAdvance(" ".join(o.text().split()))
+                           for o in element.elements() if o.tag == "option"), default=40.0)
+            border_width = longest + 28 * self.zoom + edges
+        elif element.tag in ("input", "textarea") and \
                 element.attrs.get("type", "text").lower() not in (
-                    "checkbox", "radio", "submit", "button", "reset", "hidden"):
+                    "checkbox", "radio", "submit", "button", "reset", "hidden", "image"):
             # a text field with no width: as browsers, about 20 characters wide
+            attribute = "cols" if element.tag == "textarea" else "size"
             try:
-                characters = int(element.attrs.get("size", "20"))
+                characters = int(element.attrs.get(attribute, "20"))
             except ValueError:
                 characters = 20
             _font, metrics = self.fonts.get(style)

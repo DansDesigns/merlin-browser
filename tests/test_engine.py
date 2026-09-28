@@ -556,6 +556,124 @@ def test_grid_svg_inline_block() -> None:
 
 
 
+def test_forms(app) -> None:
+    """Forms, typed into and sent, against a server that echoes what it gets."""
+    import json
+    import urllib.request
+
+    from PyQt6.QtTest import QTest
+
+    from merlin.engine import MerlinView
+
+    seen = []
+    page = """<title>Form</title><form action="/echo" method="{m}">
+      <label for=n>Name</label> <input id=n name=name placeholder="Your name">
+      <input type=password name=secret>
+      <label><input type=checkbox name=news> News</label>
+      <input type=radio name=size value=s><input type=radio name=size value=l checked>
+      <select name=colour><option value=r>Red</option><option value=g>Green</option></select>
+      <textarea name=note></textarea>
+      <button name=go value=sent>Send</button> <input type=reset>
+    </form><img src="http://localhost:{port}/pixel.png">"""
+
+    class Echo(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _reply(self, body, cookie=False):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            if cookie:
+                self.send_header("Set-Cookie", "session=abc123; Path=/")
+            self.end_headers()
+            self.wfile.write(body.encode())
+
+        def do_GET(self):
+            path, _q, query = self.path.partition("?")
+            seen.append({"method": "GET", "path": path, "query": query,
+                         "cookie": self.headers.get("Cookie", "")})
+            if path.startswith("/form"):
+                return self._reply(page.format(m="post" if "post" in path else "get",
+                                               port=self.server.server_address[1]), True)
+            self._reply("<title>Echo</title>")
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()
+            seen.append({"method": "POST", "path": self.path, "body": body,
+                         "origin": self.headers.get("Origin", "")})
+            self._reply("<title>Posted</title>")
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Echo)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    view = MerlinView()
+    view.resize(700, 600)
+    view.show()
+
+    def field(name, value=None):
+        return next((w for e, w in view._widgets.items() if e.attrs.get("name") == name
+                     and (value is None or e.attrs.get("value") == value)), None)
+
+    try:
+        view.setUrl(QUrl(base + "/form-get"))
+        wait(app, 1.5)
+        kinds = sorted(type(w).__name__ for w in view._widgets.values())
+        check("form fields become live widgets", kinds == sorted(
+            ["QLineEdit", "QLineEdit", "QCheckBox", "QRadioButton", "QRadioButton",
+             "QComboBox", "QPlainTextEdit"]), str(kinds))
+        check("an empty field is still a line tall", field("secret").height() >= 12,
+              str(field("secret").geometry()))
+        QTest.keyClicks(field("name"), "Dan Miles")
+        QTest.keyClicks(field("secret"), "hunter2")
+        label = next(h for r, h in view._display.links if h == "label"
+                     and h.element.text().strip() == "News")
+        rect = next(r for r, h in view._display.links if h is label)
+        QTest.mouseClick(view, Qt.MouseButton.LeftButton,
+                         pos=QPoint(int(rect.center().x()), int(rect.center().y() - view._scroll)))
+        check("clicking a label ticks its box", field("news").isChecked())
+        field("size", "s").setChecked(True)
+        check("radio buttons in a group untick each other", not field("size", "l").isChecked())
+        field("colour").setCurrentIndex(1)
+        QTest.keyClicks(field("note"), "two")
+        QTest.keyClick(field("note"), Qt.Key.Key_Return)
+        QTest.keyClicks(field("note"), "lines")
+        QTest.keyClick(field("name"), Qt.Key.Key_Return)
+        wait(app, 1.5)
+        sent = [r for r in seen if r["path"] == "/echo"][-1]
+        check("Enter sends the form by GET, with what was typed, ticked and chosen",
+              sent["query"] == "name=Dan+Miles&secret=hunter2&news=on&size=s&colour=g"
+                               "&note=two%0D%0Alines&go=sent", sent["query"])
+        check("the page's cookie comes back with it", sent["cookie"] == "session=abc123",
+              sent["cookie"])
+        pixel = [r for r in seen if r["path"] == "/pixel.png"]
+        check("another site's image gets no cookie", pixel and pixel[0]["cookie"] == "", str(pixel))
+        view.setUrl(QUrl(base + "/form-post"))
+        wait(app, 1.5)
+        QTest.keyClicks(field("name"), "Posted")
+        rect = next(r for r, e, f in view._buttons if e.tag == "button")
+        QTest.mouseClick(view, Qt.MouseButton.LeftButton,
+                         pos=QPoint(int(rect.center().x()), int(rect.center().y() - view._scroll)))
+        wait(app, 1.5)
+        posted = [r for r in seen if r["method"] == "POST"]
+        check("clicking the button sends it by POST, with an Origin",
+              posted and "name=Posted" in posted[-1]["body"] and posted[-1]["origin"] == base,
+              str(posted[-1:]))
+        view.setUrl(QUrl(base + "/form-get"))
+        wait(app, 1.5)
+        QTest.keyClicks(field("name"), "gone")
+        view._press_button(next(e for r, e, f in view._buttons if e.attrs.get("type") == "reset"))
+        check("Reset puts the page's own values back", field("name").text() == "")
+        QTest.keyClicks(field("name"), "kept")
+        view.resize(520, 600)
+        wait(app, 0.5)
+        check("what was typed survives the page being laid out again", field("name").text() == "kept")
+        view.setUrl(QUrl("merlin://listen"))
+        check("merlin:// addresses are not loaded as pages", view.url().scheme() != "merlin")
+    finally:
+        server.shutdown()
+        view.close()
+
+
 def test_view(app) -> None:
     from merlin.engine import MerlinView
 
@@ -630,6 +748,8 @@ def main() -> int:
         test()
     print("test_images")
     test_images(app)
+    print("test_forms")
+    test_forms(app)
     print("test_view")
     test_view(app)
     if FAILED:
