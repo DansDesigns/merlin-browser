@@ -5,6 +5,53 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.7.1
+  The mouse's back and forward buttons work, in every tab. Chromium embedded
+  in Qt leaves them to the browser around it, and Merlin had never handled
+  them, so they did nothing in either kind of tab.
+  Merlin Engine loads a page's linked stylesheets. It had read only CSS
+  written into the page itself, and nearly every site links its CSS: GitHub's
+  home page links 42 stylesheets, and came out all but unstyled. They are
+  fetched in parallel before the page is shown, checked by the content
+  blocker, their @imports followed, and kept for the session, so a site's CSS
+  is fetched and parsed once.
+  @media rules are decided properly, for the window's size and more (min- and
+  max-width, the newer width >= 600px form, orientation, prefers-color-scheme,
+  not, only, lists), where before all but print ones applied at once, so a
+  site's phone and desktop layouts fought each other; resizing across a
+  breakpoint chooses rules again without parsing again. CSS variables work:
+  var(--name, fallback), variables made of others, redefined further down a
+  page, and loops and missing names handled as the standard says. @supports
+  and @layer blocks are read, and a rule after @import, @charset or an
+  @layer statement is no longer lost. Selectors: :not(), :is(), :where(),
+  :nth-child() and its family, :first-of-type and the like, :disabled,
+  :enabled and :checked. On GitHub's page with its CSS framework, a
+  megabyte of CSS parses in a quarter of a second.
+  YouTube still cannot show in Merlin Engine: it is built by JavaScript,
+  which is still to come.
+  Files can be sent from forms: a file field opens a file dialog, follows its
+  accept and multiple attributes, and sends the files' contents with their
+  names and types.
+  Saved passwords fill into Merlin Engine pages; after a login there, Merlin
+  offers to save the password, or to update it when it has changed, never in
+  private windows, and keeping only the site's address, not the page's,
+  which can carry one-time tokens. Settings > Merlin Engine can turn the offer
+  off.
+  FTP and SMB open, in a Merlin Engine tab, whichever engine the tab had:
+  Chromium removed FTP and never opened SMB. Folders are index pages to click
+  through; text and pages are shown; other files download to the Downloads
+  folder, streamed to disk. FTP and FTPS with a username and password in the
+  address; SMB on Windows through the network path, \\server\share, with the
+  sign-in Windows already has, and on Linux through the desktop's SMB support
+  (gio) or smbclient. A Windows network path typed in the address bar opens as
+  smb://. file:// folders show as index pages too, and ordinary web downloads
+  are saved rather than refused as "not a page".
+  Checked against real FTP and Samba servers: folders, files byte for byte,
+  logins, wrong passwords and absent servers.
+  Fixed on the way: FTP downloads were made in text mode, adding a byte before
+  each line ending in a binary file; commands run for SMB could wait for ever
+  on Merlin's own input, as when started from a terminal.
+
 1.7.0
   Forms work in Merlin Engine. Text fields, passwords, check boxes, radio
   buttons, dropdowns and text areas are real, usable fields: type, select,

@@ -382,14 +382,18 @@ check("a reload looks for an unplayable stream again",
 # Qt sends events through an event filter while its window is destroyed, after
 # Python has let go of the filter's attributes. The tab container's filter
 # raised there at random and stopped the test suite; each filter guards it.
-def _filter_body(path):
+def _filter_body(path, owner=None):
     text = open(os.path.join(root, "merlin", path), encoding="utf-8").read()
-    return text.split("def eventFilter(")[1][:700]
+    if owner:
+        # the eventFilter of that class: browser.py has more than one
+        text = text.split(f"class {owner}(")[1].split("\nclass ")[0]
+    return text.split("def eventFilter(")[1][:900]
 check("event filters stand aside while their object is destroyed",
       'getattr(self, "stack", None)' in _filter_body("tabs.py")
       and "except (AttributeError, RuntimeError)" in _filter_body("gestures.py")
       and 'getattr(self, "_full_screen", False)' in _filter_body("inplace.py")
-      and 'getattr(self, "url_bar", None)' in _filter_body("browser.py"))
+      and 'getattr(self, "url_bar", None)' in _filter_body("browser.py", "BrowserWindow")
+      and 'getattr(self, "window", None)' in _filter_body("browser.py", "_MouseNavigation"))
 
 # A tab's view may be either engine's. Checks meaning "a web page tab" accept
 # both; only the ones that run JavaScript in the page need Chromium itself.

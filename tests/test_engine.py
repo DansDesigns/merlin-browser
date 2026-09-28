@@ -674,6 +674,239 @@ def test_forms(app) -> None:
         view.close()
 
 
+def test_real_world_css() -> None:
+    """@media, CSS variables, the at-rules and modern selectors."""
+    from merlin.engine.css import Styler, media_matches
+    from merlin.engine.html import parse
+
+    def check(label, got, want):                               # noqa: F811
+        _flex_check(label, got, want)
+    print("media queries, for a 1000 x 700 window")
+    vp = (1000, 700)
+    cases = [
+        ("(min-width: 768px)", True), ("(max-width: 767px)", False), ("screen and (min-width: 1200px)", False),
+        ("print", False), ("screen", True), ("not print", True), ("only screen and (max-width: 1000px)", True),
+        ("(min-width: 40em)", True), ("(min-width: 80em)", False), ("(width >= 600px)", True),
+        ("(400px <= width < 900px)", False), ("(orientation: landscape)", True),
+        ("(prefers-color-scheme: dark)", False), ("(prefers-color-scheme: light)", True),
+        ("(max-width: 500px), (min-width: 900px)", True), ("(prefers-reduced-motion: reduce)", False),
+        ("(hover: hover) and (pointer: fine)", True), ("(some-unknown-feature)", False),
+    ]
+    got = [media_matches(q, vp) for q, _want in cases]
+    check("18 media queries", [q for (q, want), g in zip(cases, got) if g != want], [])
+
+
+    def styles(markup, viewport=(1000, 700)):
+        doc = parse(markup)
+        styler = Styler(doc, viewport=viewport)
+        computed = styler.compute()
+        by_id = {e.id: computed[e] for e in doc.root.elements() if e.id}
+        return by_id, styler, doc
+
+
+    print("@media in a stylesheet, and resizing across a breakpoint")
+    css = """<style>
+     #a { color: red }
+     @media (max-width: 600px) { #a { color: blue } }
+     @media screen and (min-width: 601px) { #a { font-size: 20px } }
+     @media print { #a { color: green } }
+     @supports (display: grid) { #b { color: purple } }
+     @supports not (display: grid) { #b { color: orange } }
+     @charset "utf-8"; @import url(x.css); @layer base, theme;
+     @layer base { #c { color: teal } }
+     #d { color: navy }
+    </style><p id=a>a</p><p id=b>b</p><p id=c>c</p><p id=d>d</p>"""
+    by_id, styler, doc = styles(css)
+    check("wide: the wide rule, not the narrow or print ones",
+          (by_id["a"]["color"], by_id["a"]["font-size"]), ((255, 0, 0, 255), 20.0))
+    check("@supports read, @supports not skipped", by_id["b"]["color"], (128, 0, 128, 255))
+    check("@layer read", by_id["c"]["color"], (0, 128, 128, 255))
+    check("a rule after @charset, @import and @layer statements is kept", by_id["d"]["color"],
+          (0, 0, 128, 255))
+    check("a narrower window would choose other rules", styler.media_changed((500, 700)), True)
+    check("a slightly different wide one would not", styler.media_changed((990, 700)), False)
+    narrow = styler.restyle((500, 700))
+    a = next(e for e in doc.root.elements() if e.id == "a")
+    check("restyled narrow: the narrow rule now", (narrow[a]["color"], narrow[a]["font-size"]),
+          ((0, 0, 255, 255), 16.0))
+    by_id, _s, _d = styles("<style media='(max-width: 600px)'>#a{color:blue}</style><p id=a>a</p>")
+    check("<style media=...> holds only when its media does", by_id["a"]["color"], (0, 0, 0, 255))
+
+    print("CSS variables")
+    by_id, _s, _d = styles("""<style>
+     :root { --brand: #3a5bd9; --gap: 4px 8px; --size: 18px; --alias: var(--brand) }
+     #v1 { color: var(--brand) }
+     #v2 { color: var(--missing, rgb(0, 128, 0)) }
+     #v3 { color: var(--alias) }
+     #v4 { padding: var(--gap) }
+     #v5 { font-size: var(--size) }
+     .dark { --brand: #ffffff }
+     #v7 { color: var(--nothing) }
+     #v8 { --x: var(--y); --y: var(--x); color: var(--x, red) }
+    </style><div style="color: rgb(1,2,3)">
+    <p id=v1>1</p><p id=v2>2</p><p id=v3>3</p><p id=v4>4</p><p id=v5>5</p>
+    <div class=dark><p id=v6 style="color: var(--brand)">6</p></div><p id=v7>7</p><p id=v8>8</p></div>""")
+    check("var(--brand)", by_id["v1"]["color"], (58, 91, 217, 255))
+    check("a missing variable uses its fallback", by_id["v2"]["color"], (0, 128, 0, 255))
+    check("a variable defined through another", by_id["v3"]["color"], (58, 91, 217, 255))
+    check("a variable holding two values, in a shorthand",
+          (by_id["v4"]["padding-top"], by_id["v4"]["padding-right"]), (4.0, 8.0))
+    check("a length from a variable", by_id["v5"]["font-size"], 18.0)
+    check("redefined lower down, it changes for that part of the page", by_id["v6"]["color"],
+          (255, 255, 255, 255))
+    check("missing with no fallback: inherited as if not set", by_id["v7"]["color"], (1, 2, 3, 255))
+    check("two variables defined by each other: the fallback, no hang", by_id["v8"]["color"],
+          (255, 0, 0, 255))
+    doc = parse("""<style>
+     li:nth-child(odd) { color: red }  li:nth-child(3n + 2) { font-weight: bold }
+     li:nth-last-child(1) { font-style: italic }
+     p:not(.skip) { color: blue }  p:not(:hover) { font-weight: bold }
+     :is(h1, h2).t { color: green }  :where(.w) { color: orange }  .w { color: purple }
+     span:first-of-type { color: teal }  span:last-of-type { font-style: italic }
+     input:disabled { color: gray }  input:enabled { color: navy }  input:checked { font-weight: bold }
+     ul > li:not(:first-child):not(:last-child) { text-decoration: underline }
+     p::before { color: pink }
+    </style>
+    <ul><li id=l1>1<li id=l2>2<li id=l3>3<li id=l4>4<li id=l5>5</ul>
+    <p id=p1>a</p><p id=p2 class=skip>b</p><h2 id=h class=t>h</h2><div id=w class=w>w</div>
+    <div><b>x</b><span id=s1>s</span><i>y</i><span id=s2>t</span></div>
+    <input id=i1 disabled><input id=i2 type=checkbox checked>""")
+    st = Styler(doc).compute()
+    e = {x.id: st[x] for x in doc.root.elements() if x.id}
+    black, red = (0, 0, 0, 255), (255, 0, 0, 255)
+    check(":nth-child(odd)", [e[f"l{i}"]["color"] for i in range(1, 6)], [red, black, red, black, red])
+    check(":nth-child(3n + 2), spaces inside the brackets", [e[f"l{i}"]["font-weight"] for i in range(1, 6)], [400, 700, 400, 400, 700])
+    check(":nth-last-child(1)", [e[f"l{i}"]["font-style"] for i in range(1, 6)], ["normal"] * 4 + ["italic"])
+    check(":not(.skip)", (e["p1"]["color"], e["p2"]["color"]), ((0, 0, 255, 255), black))
+    check(":not(:hover) holds at rest", e["p1"]["font-weight"], 700)
+    check(":is(h1, h2).t", e["h"]["color"], (0, 128, 0, 255))
+    check(":where() adds no specificity: .w after it wins", e["w"]["color"], (128, 0, 128, 255))
+    check(":first-of-type and :last-of-type", (e["s1"]["color"], e["s2"]["font-style"]), ((0, 128, 128, 255), "italic"))
+    check(":disabled, :enabled, :checked", (e["i1"]["color"], e["i2"]["color"], e["i2"]["font-weight"]),
+          ((128, 128, 128, 255), (0, 0, 128, 255), 700))
+    check("chained :not()s", [e[f"l{i}"]["text-decoration"] for i in range(1, 6)], ["none", "underline", "underline", "underline", "none"])
+    check("::before is not applied to the element itself", e["p1"]["color"], (0, 0, 255, 255))
+
+
+def test_files_ftp_smb() -> None:
+    """Sending files; FTP and SMB folders and files, byte for byte."""
+    import email
+    import email.policy
+    import shutil
+    import subprocess
+
+    from merlin.engine import forms, remote
+    from merlin.engine.html import parse
+
+    work = tempfile.mkdtemp(prefix="merlin-remote-")
+    payload = bytes(range(256)) * 64 + b"\r\n\x00 tail"
+    source = os.path.join(work, "report.pdf")
+    open(source, "wb").write(payload)
+    doc = parse("<form method=post enctype=multipart/form-data><input name=t value=x>"
+                "<input type=file name=doc><input type=file name=none></form>")
+    form = doc.root.find("form")
+    fields = {e.attrs["name"]: e for e in doc.root.elements() if e.attrs.get("name")}
+    sent = forms.submission(form, forms.form_data(form, {fields["doc"]: [source]}), "https://x/")
+    message = email.message_from_bytes(f"Content-Type: {sent['type']}\r\n\r\n".encode()
+                                       + sent["body"], policy=email.policy.HTTP)
+    parts = list(message.iter_parts())
+    check("a file is sent byte for byte, with its name and type",
+          parts[1].get_payload(decode=True) == payload and parts[1].get_filename() == "report.pdf"
+          and parts[1].get_content_type() == "application/pdf")
+    check("an empty file field sends an empty part", parts[2].get_filename() == "")
+    check("a Windows network path from an smb:// address",
+          remote.unc_path("smb://nas/Media/a%20b.mkv") == "\\\\nas\\Media\\a b.mkv",
+          remote.unc_path("smb://nas/Media/a%20b.mkv"))
+    downloads = os.path.join(work, "Downloads")
+    # FTP, when a server can be started here
+    try:
+        from pyftpdlib.authorizers import DummyAuthorizer
+        from pyftpdlib.handlers import FTPHandler
+        from pyftpdlib.servers import FTPServer
+    except ImportError:
+        print("  skip  FTP: pyftpdlib is not installed")
+    else:
+        import logging
+
+        logging.getLogger("pyftpdlib").setLevel(logging.CRITICAL)
+        root = os.path.join(work, "ftp")
+        os.makedirs(os.path.join(root, "docs"))
+        open(os.path.join(root, "archive.bin"), "wb").write(payload)
+        open(os.path.join(root, "readme.txt"), "w").write("Hello from FTP")
+        users = DummyAuthorizer()
+        users.add_anonymous(root)
+        users.add_user("dan", "pw", root, perm="elr")
+        handler = type("H", (FTPHandler,), {"authorizer": users})
+        server = FTPServer(("127.0.0.1", 0), handler)
+        port = server.address[1]
+        threading.Thread(target=server.serve_forever, kwargs={"handle_exit": False},
+                         daemon=True).start()
+        try:
+            ok, final, page, _saved = remote.open_remote(f"ftp://127.0.0.1:{port}/docs", downloads)
+            check("an FTP folder is an index page, its address ending in /",
+                  ok and final.endswith("/docs/") and 'href="../"' in page, final)
+            ok, _f, page, _saved = remote.open_remote(f"ftp://127.0.0.1:{port}/readme.txt", downloads)
+            check("an FTP text file is shown", ok and "Hello from FTP" in page)
+            ok, _f, _p, saved = remote.open_remote(f"ftp://127.0.0.1:{port}/archive.bin", downloads)
+            check("an FTP file downloads byte for byte (binary mode)",
+                  ok and open(saved, "rb").read() == payload)
+            ok, _f, page, _saved = remote.open_remote(f"ftp://dan:wrong@127.0.0.1:{port}/", downloads)
+            check("a wrong FTP password is reported", not ok and "530" in page, page[:60])
+        finally:
+            server.close_all()
+    # SMB, when Samba and smbclient are installed here
+    if not (shutil.which("smbd") and shutil.which("smbclient")):
+        print("  skip  SMB: Samba (smbd) and smbclient are not installed")
+        return
+    share = os.path.join(work, "share")
+    os.makedirs(os.path.join(share, "Photos"))
+    open(os.path.join(share, "Photos", "a photo.bin"), "wb").write(payload)
+    state = os.path.join(work, "smbstate")
+    os.makedirs(os.path.join(state, "ncalrpc"))
+    os.chmod(work, 0o755)
+    for folder, _dirs, names in os.walk(share):
+        os.chmod(folder, 0o755)
+        for name in names:
+            os.chmod(os.path.join(folder, name), 0o644)
+    config = os.path.join(work, "smb.conf")
+    open(config, "w").write(f"""[global]
+  smb ports = 4455
+  interfaces = lo
+  bind interfaces only = yes
+  map to guest = Bad User
+  disable netbios = yes
+  server min protocol = SMB2
+  private dir = {state}
+  lock directory = {state}
+  state directory = {state}
+  cache directory = {state}
+  pid directory = {state}
+  ncalrpc dir = {state}/ncalrpc
+  log file = {state}/log
+[public]
+  path = {share}
+  guest ok = yes
+  read only = yes
+""")
+    os.makedirs("/run/samba/ncalrpc", exist_ok=True)
+    # in a session of its own: smbd signals its whole process group as it
+    # stops, which, shared, would stop these tests with it
+    subprocess.run(["smbd", "-s", config, "-D"], capture_output=True, start_new_session=True)
+    time.sleep(3)
+    try:
+        ok, _f, page, _saved = remote.open_remote("smb://127.0.0.1:4455/", downloads)
+        check("an SMB server's shares are listed", ok and 'href="public/"' in page, page[-120:])
+        ok, final, page, _saved = remote.open_remote("smb://127.0.0.1:4455/public/Photos", downloads)
+        check("an SMB folder is an index page", ok and final.endswith("/Photos/"), page[-120:])
+        ok, _f, _p, saved = remote.open_remote(
+            "smb://127.0.0.1:4455/public/Photos/a%20photo.bin", downloads)
+        check("an SMB file downloads byte for byte", ok and open(saved, "rb").read() == payload)
+    finally:
+        pid = os.path.join(state, "smbd.pid")
+        if os.path.exists(pid):
+            os.kill(int(open(pid).read().strip()), 15)
+
+
 def test_view(app) -> None:
     from merlin.engine import MerlinView
 
@@ -743,7 +976,8 @@ def main() -> int:
     app = QApplication(sys.argv[:1])
     for test in (test_no_chromium, test_without_html_parser, test_parsing, test_cascade, test_layout,
                  test_body_and_markers, test_tables, test_flexbox,
-                 test_floats_and_positioning, test_grid_svg_inline_block):
+                 test_floats_and_positioning, test_grid_svg_inline_block,
+                 test_real_world_css, test_files_ftp_smb):
         print(test.__name__)
         test()
     print("test_images")

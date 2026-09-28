@@ -6,7 +6,7 @@ import os
 import time
 
 from PyQt6.QtCore import (
-    QEvent, QSize, QStandardPaths, QStringListModel, Qt, QTimer, QUrl,
+    QEvent, QObject, QSize, QStandardPaths, QStringListModel, Qt, QTimer, QUrl,
     pyqtSignal,
 )
 from PyQt6.QtGui import QAction, QCursor, QDesktopServices, QIcon, QKeySequence, QShortcut
@@ -75,6 +75,45 @@ def _is_merlin_view(widget) -> bool:
         type(widget).__module__.endswith("engine.view")
 
 
+class _MouseNavigation(QObject):
+    """The mouse's back and forward buttons, for every tab in one window.
+
+    Chromium embedded in Qt leaves these to the browser around it, as does
+    MerlinEngine, and Merlin had never handled them: they did nothing in
+    either kind of tab. Watching the whole application catches them over any
+    part of the window, the page included, as desktop browsers do.
+    """
+
+    def __init__(self, window):
+        super().__init__(window)
+        self.window = window
+
+    def eventFilter(self, watched, event):                   # noqa: N802
+        kind = event.type()
+        if kind not in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease,
+                        QEvent.Type.MouseButtonDblClick):
+            return False
+        button = event.button()
+        if button not in (Qt.MouseButton.BackButton, Qt.MouseButton.ForwardButton):
+            return False
+        # while a window is destroyed, events still come through here after
+        # Python has let go of this object's attributes
+        window = getattr(self, "window", None)
+        if window is None:
+            return False
+        try:
+            if not isinstance(watched, QWidget) or watched.window() is not window:
+                return False
+        except RuntimeError:
+            return False
+        # act once, on release; the press is kept from the page too, so
+        # nothing else acts on it as well
+        if kind == QEvent.Type.MouseButtonRelease:
+            window.act_back.trigger() if button == Qt.MouseButton.BackButton \
+                else window.act_forward.trigger()
+        return True
+
+
 class _LinkCatcher(QWebEnginePage):
     """A page that is never shown: it hands its first address to the browser.
 
@@ -90,6 +129,10 @@ class _LinkCatcher(QWebEnginePage):
         self._done = False
 
     def acceptNavigationRequest(self, url, nav_type, is_main_frame):  # noqa: N802
+        if is_main_frame and url.scheme().lower() in ("ftp", "ftps", "smb"):
+            # Chromium cannot open these; Merlin Engine can, in a tab of its own
+            QTimer.singleShot(0, lambda u=url.toString(): self.window_ref.new_tab(u, engine=True))
+            return False
         if not self._done and is_main_frame and url.scheme() in ("http", "https"):
             self._done = True
             QTimer.singleShot(0, lambda u=url.toString(): self._window.open_in_browser(u))
@@ -416,6 +459,9 @@ class BrowserWindow(QMainWindow):
             lambda: self.navigate(self.url_bar.text()))
         # the first click selects the whole address, so typing replaces it
         self.url_bar.installEventFilter(self)
+        # the mouse's back and forward buttons, anywhere in this window
+        self._mouse_navigation = _MouseNavigation(self)
+        QApplication.instance().installEventFilter(self._mouse_navigation)
         self.url_bar.setSizePolicy(QSizePolicy.Policy.Expanding,
                                    QSizePolicy.Policy.Fixed)
         self._install_completer()
@@ -1057,7 +1103,8 @@ class BrowserWindow(QMainWindow):
 
     # ------------------------------------------------------------------ tabs
     def new_tab(self, url: str | None = None, background: bool = False,
-                defer: bool = False, focus_address: bool = True) -> WebView:
+                defer: bool = False, focus_address: bool = True,
+                engine: bool | None = None) -> WebView:
         """Open a tab. With defer, the page is not fetched until it is shown.
 
         Restoring a session used to load every tab at once: twenty tabs meant
@@ -1065,11 +1112,16 @@ class BrowserWindow(QMainWindow):
         before the browser felt usable. Deferred tabs cost a widget and nothing
         else until you click them.
         """
-        engine_view = _merlin_view_class() if self.settings.get("merlin_engine", False) else None
+        wanted = self.settings.get("merlin_engine", False) if engine is None else engine
+        engine_view = _merlin_view_class() if wanted else None
         if engine_view is not None:
             # Merlin's own engine, switched on in Settings > Merlin Engine.
             # The window's content blocker and settings apply to it as well.
             view = engine_view(self, host=self, profile=self.profile)
+            view.loginSubmitted.connect(self._offer_to_save_login)
+            view.downloadFinished.connect(
+                lambda path: self.status_label.setText(
+                    f"Downloaded {os.path.basename(path)} to {os.path.dirname(path)}"))
         else:
             if self.settings.get("merlin_engine", False) and _ENGINE_ERROR:
                 self.status_label.setText(
@@ -1182,6 +1234,11 @@ class BrowserWindow(QMainWindow):
                 return
             entry = matches[names.index(chosen)]
 
+        if _is_merlin_view(view):
+            # a Merlin Engine page fills its fields directly, no script
+            outcome = view.fill_login(entry.get("username", ""), entry.get("password", ""))
+            self.status_label.setText("Login filled" if outcome == "filled" else outcome)
+            return
         script = passwords.fill_script(entry.get("username", ""),
                                        entry.get("password", ""))
         view.page().runJavaScript(
@@ -1370,6 +1427,15 @@ class BrowserWindow(QMainWindow):
                 and self.settings.get("player_mode", "embedded") != "off"):
             self.open_in_player(url.toString())
             return
+        if url.scheme().lower() in ("ftp", "ftps", "smb") and not _is_merlin_view(view):
+            # Chromium refuses these before Merlin is even asked; Merlin Engine
+            # opens them, in a tab of its own. A new-tab page left behind by
+            # typing the address there has no more use, and goes.
+            blank = bool(view.property("merlin_start"))
+            self.new_tab(url.toString(), engine=True)
+            if blank and self.tabs.indexOf(view) >= 0:
+                self.close_tab(self.tabs.indexOf(view))
+            return
         view.setProperty("merlin_start", False)
         view.setProperty("merlin_icon", None)
         view.setUrl(url)
@@ -1382,7 +1448,10 @@ class BrowserWindow(QMainWindow):
             return None
         if os.path.exists(os.path.expanduser(text)):
             return QUrl.fromLocalFile(os.path.abspath(os.path.expanduser(text)))
-        known_schemes = ("about:", "data:", "blob:", "file:", "mailto:", "ftp:",
+        if text.startswith("\\\\") and len(text) > 2:
+            # a Windows network path, \\server\share, as an smb:// address
+            return QUrl("smb://" + text[2:].replace("\\", "/"))
+        known_schemes = ("about:", "data:", "blob:", "file:", "mailto:", "ftp:", "ftps:", "smb:",
                          "view-source:", "chrome:", "magnet:")
         if "://" in text or text.startswith(known_schemes):
             return QUrl(text)
@@ -1611,12 +1680,47 @@ class BrowserWindow(QMainWindow):
         view.page().runJavaScript(media.YOUTUBE_LIVE_JS, got)
 
     def _notice_accepted(self) -> None:
+        action = getattr(self, "_notice_action", None)
+        if action is not None:
+            # a choice other than a stream, such as saving a password
+            self._notice_action = None
+            self.notice_bar.setVisible(False)
+            action()
+            return
         if self._notice_page:
             self.play_stream(self._notice_page)
 
     def _notice_dismissed(self) -> None:
         self.notice_bar.setVisible(False)
         self._notice_page = ""
+        self._notice_action = None
+
+    def _offer_to_save_login(self, url: str, username: str, password: str) -> None:
+        """After a login in a Merlin Engine tab: offer to save, or update, it."""
+        from . import passwords
+
+        if self.private or not self.settings.get("offer_save_passwords", True):
+            return
+        if not passwords.backend():
+            return                              # nowhere safe to keep it
+        host = passwords.host_of(url) or "this site"
+        saved = [e for e in passwords.for_host(url) if e.get("username", "") == username]
+        if saved and saved[0].get("password") == password:
+            return                              # already saved as it is
+        who = f"{username} on {host}" if username else host
+        self._notice_page = ""
+        self._notice_action = lambda: self._save_login(url, username, password)
+        if saved:
+            self.notice_bar.show_notice(f"Update the saved password for {who}?", "Update")
+        else:
+            self.notice_bar.show_notice(f"Save the password for {who}?", "Save")
+
+    def _save_login(self, url: str, username: str, password: str) -> None:
+        from . import passwords
+
+        _added, problem = passwords.add_many([{"url": url, "username": username,
+                                               "password": password}])
+        self.status_label.setText(problem or "Password saved")
 
     def play_stream(self, page: str) -> None:
         """Play the video on a page in Merlin's built-in player.

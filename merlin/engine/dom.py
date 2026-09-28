@@ -92,6 +92,23 @@ class Document:
         return " ".join(found.text().split()) if found else ""
 
     def stylesheets(self) -> list[str]:
-        """The text of every <style> element, in order."""
-        return [element.text() for element in self.root.elements()
-                if element.tag == "style"]
+        """The text of every <style> element, in order, each within its media."""
+        return [source[1] for source in self.stylesheet_sources() if source[0] == "style"]
+
+    def stylesheet_sources(self) -> list:
+        """Every stylesheet in document order: ("style", text) for one in the
+        page, ("link", href, media) for one it links to."""
+        found = []
+        for element in self.root.elements():
+            if element.tag == "style":
+                media = element.attrs.get("media", "").strip()
+                text = element.text()
+                found.append(("style", f"@media {media} {{{text}}}" if media and media != "all"
+                              else text))
+            elif element.tag == "link" and element.attrs.get("href"):
+                rel = element.attrs.get("rel", "").lower().split()
+                if "stylesheet" in rel and "alternate" not in rel \
+                        and "disabled" not in element.attrs:
+                    found.append(("link", element.attrs["href"].strip(),
+                                  element.attrs.get("media", "").strip()))
+        return found

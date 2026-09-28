@@ -1150,6 +1150,160 @@ def test_merlin_engine_typing(app) -> None:
     window.close()
 
 
+def test_mouse_back_forward(app) -> None:
+    """The mouse's back and forward buttons go back and forward, in both engines."""
+    from PyQt6.QtCore import QEvent, QPointF
+    from PyQt6.QtGui import QMouseEvent
+
+    window, settings, _ = make_window(app, "t-mouse-nav")
+
+    def click(widget, button):
+        for kind in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease):
+            event = QMouseEvent(kind, QPointF(20, 20), QPointF(20, 20), button,
+                                button if kind == QEvent.Type.MouseButtonPress
+                                else Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+            app.sendEvent(widget, event)
+
+    for engine in (False, True):
+        settings.set("merlin_engine", engine, save=False)
+        view = window.new_tab(page("first"))
+        wait(app, 2.0)
+        window.navigate(page("second"))
+        wait(app, 2.0)
+        # Chromium can swap the widget inside a tab that takes the mouse as it
+        # changes page, so the one to click is looked up each time, as a real
+        # click always lands on the current one
+        def target():
+            return (view.focusProxy() or view) if not engine else view
+
+        click(target(), Qt.MouseButton.BackButton)
+        wait(app, 2.0)
+        went_back = "first" in view.url().toString()
+        click(target(), Qt.MouseButton.ForwardButton)
+        wait(app, 2.0)
+        went_forward = "second" in view.url().toString()
+        name = "Merlin Engine" if engine else "Chromium"
+        check(f"mouse back and forward buttons work in a {name} tab",
+              went_back and went_forward, view.url().toString())
+    settings.set("merlin_engine", False, save=False)
+    window.close()
+
+
+def test_merlin_engine_passwords(app) -> None:
+    """A login in a Merlin Engine tab: offered, saved, updated, and filled."""
+    from PyQt6.QtTest import QTest
+
+    from merlin import passwords
+
+    store = []                     # in memory: the flow is under test, not the encryption
+    saved_calls = (passwords.backend, passwords.load, passwords.save)
+    passwords.backend = lambda: "test"
+    passwords.load = lambda: [dict(e) for e in store]
+    passwords.save = lambda entries: (store.__setitem__(slice(None), entries) or (True, ""))
+    window, settings, _ = make_window(app, "t-engine-pw")
+    try:
+        settings.set("merlin_engine", True, save=False)
+        login = ("data:text/html,<title>Login</title><form action='about:blank' method=post>"
+                 "<input name=user><input type=password name=pass><button>Go</button></form>")
+        view = window.new_tab(login)
+        wait(app, 1.5)
+
+        def field(kind):
+            return next(w for e, w in view._widgets.items()
+                        if (e.attrs.get("type") == "password") == (kind == "password"))
+
+        QTest.keyClicks(field("user"), "dan")
+        QTest.keyClicks(field("password"), "first-secret")
+        QTest.keyClick(field("password"), Qt.Key.Key_Return)
+        wait(app, 0.5)
+        offered = window.notice_bar.isVisible()
+        check("after a login, Merlin offers to save the password", offered)
+        window._notice_accepted()
+        check("and saving keeps it with the saved logins",
+              [(e["username"], e["password"]) for e in store] == [("dan", "first-secret")],
+              str(store))
+        view.setUrl(QUrl(login))
+        wait(app, 1.5)
+        QTest.keyClicks(field("user"), "dan")
+        QTest.keyClicks(field("password"), "first-secret")
+        QTest.keyClick(field("password"), Qt.Key.Key_Return)
+        wait(app, 0.5)
+        check("the same login again is not offered twice", not window.notice_bar.isVisible())
+        view.setUrl(QUrl(login))
+        wait(app, 1.5)
+        QTest.keyClicks(field("user"), "dan")
+        QTest.keyClicks(field("password"), "changed-secret")
+        QTest.keyClick(field("password"), Qt.Key.Key_Return)
+        wait(app, 0.5)
+        from PyQt6.QtWidgets import QLabel
+
+        message = " ".join(label.text() for label in window.notice_bar.findChildren(QLabel))
+        check("a changed password is offered as an update",
+              window.notice_bar.isVisible() and message.startswith("Update"), message)
+        window._notice_accepted()
+        check("and updating replaces it", [e["password"] for e in store] == ["changed-secret"],
+              str(store))
+        view.setUrl(QUrl(login))
+        wait(app, 1.5)
+        window.fill_saved_login()
+        check("the saved login fills into a Merlin Engine page",
+              (field("user").text(), field("password").text()) == ("dan", "changed-secret"),
+              f"{field('user').text()!r}")
+    finally:
+        passwords.backend, passwords.load, passwords.save = saved_calls
+        settings.set("merlin_engine", False, save=False)
+        window.close()
+
+
+def test_ftp_opens_in_merlin_engine(app) -> None:
+    """ftp:// typed in a Chromium tab opens in a Merlin Engine tab; a download follows."""
+    try:
+        from pyftpdlib.authorizers import DummyAuthorizer
+        from pyftpdlib.handlers import FTPHandler
+        from pyftpdlib.servers import FTPServer
+    except ImportError:
+        print("  skip  FTP routing: pyftpdlib is not installed")
+        return
+    import logging
+    import tempfile
+    import threading
+
+    from PyQt6.QtCore import QStandardPaths
+
+    logging.getLogger("pyftpdlib").setLevel(logging.CRITICAL)
+    root = tempfile.mkdtemp(prefix="merlin-ftp-")
+    open(os.path.join(root, "notes.bin"), "wb").write(bytes(range(256)) * 10)
+    users = DummyAuthorizer()
+    users.add_anonymous(root)
+    server = FTPServer(("127.0.0.1", 0), type("H", (FTPHandler,), {"authorizer": users}))
+    threading.Thread(target=server.serve_forever, kwargs={"handle_exit": False}, daemon=True).start()
+    address = f"ftp://127.0.0.1:{server.address[1]}/"
+    window, settings, _ = make_window(app, "t-ftp")
+    try:
+        settings.set("merlin_engine", False, save=False)
+        window.new_tab(page("start"))
+        wait(app, 2.0)
+        before = window.tabs.count()
+        window.navigate(address)
+        wait(app, 3.0)
+        view = window.current()
+        check("ftp:// in a Chromium tab opens in a Merlin Engine tab",
+              type(view).__name__ == "MerlinView" and window.tabs.count() == before + 1
+              and "notes.bin" in [h for _r, h in view._display.links])
+        view.setUrl(QUrl(address + "notes.bin"))
+        wait(app, 3.0)
+        saved = os.path.join(QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DownloadLocation), "notes.bin")
+        check("a file there downloads, and the status bar says so",
+              os.path.exists(saved) and window.status_label.text().startswith("Downloaded notes.bin"),
+              window.status_label.text())
+        if os.path.exists(saved):
+            os.remove(saved)
+    finally:
+        server.close_all()
+        window.close()
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -1177,7 +1331,9 @@ def main() -> int:
                  test_page_fullscreen_restores_the_window,
                  test_stream_lookup_is_quick, test_stream_failure_is_not_a_box,
                  test_stalled_stream_recovers, test_youtube_cookies_for_ytdlp,
-                 test_merlin_engine_tabs, test_merlin_engine_typing):
+                 test_merlin_engine_tabs, test_merlin_engine_typing,
+                 test_mouse_back_forward, test_merlin_engine_passwords,
+                 test_ftp_opens_in_merlin_engine):
         print(f"\n{test.__name__}")
         try:
             test(app)

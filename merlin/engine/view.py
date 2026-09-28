@@ -10,6 +10,8 @@ Not here yet: JavaScript, cookies, forms, images, and the content blocker.
 """
 from __future__ import annotations
 
+import os
+import re
 import threading
 import urllib.parse
 import urllib.request
@@ -52,6 +54,21 @@ def new_cookie_jar():
         return http.cookiejar.CookieJar()
     except Exception:                                      # noqa: BLE001
         return None
+
+
+_IMPORT = re.compile(r"""@import\s+(?:url\(\s*)?["']?([^"')\s;]+)["']?\s*\)?\s*([^;]*);""",
+                     re.I)
+
+
+def _expand_imports(text: str, base: str, get) -> str:
+    """A stylesheet with its @import rules replaced by what they import."""
+    def replace(match):
+        imported = get(urllib.parse.urljoin(base, match.group(1)))
+        media = match.group(2).strip()
+        if media and not media.lower().startswith(("layer", "supports")):
+            return f"@media {media} {{{imported}}}"
+        return imported
+    return _IMPORT.sub(replace, text)
 
 
 def _registrable(host: str) -> str:
@@ -158,6 +175,72 @@ def _decode(body: bytes, content_type: str) -> str:
         return body.decode("utf-8", "replace")
 
 
+def fetch_page(url: str, headers: dict | None = None, data: bytes | None = None,
+               content_type: str = "", opener=None, download_dir: str = "",
+               progress=None) -> tuple:
+    """(ok, final url, page, downloaded path or "") for any address a tab opens.
+
+    FTP, SMB and local folders go through remote.py. A web response that is
+    not a page, text or an image is saved to the Downloads folder, streamed to
+    disk, and the page says where; an image is shown on a page of its own.
+    """
+    from . import remote
+
+    scheme = urllib.parse.urlsplit(url).scheme.lower()
+    if scheme in ("ftp", "ftps", "smb", "file") and not url.startswith("view-source:"):
+        return remote.open_remote(url, download_dir, progress)
+    if scheme not in ("http", "https"):
+        ok, final, text = fetch(url, headers=headers, data=data,
+                                content_type=content_type, opener=opener)
+        return ok, final, text, ""
+    sent = {"User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
+            "Accept-Language": "en-GB,en;q=0.8"}
+    sent.update(headers or {})
+    if data is not None:
+        sent["Content-Type"] = content_type or "application/x-www-form-urlencoded"
+    request = urllib.request.Request(url, data=data, headers=sent,
+                                     method="POST" if data is not None else "GET")
+    try:
+        with _open(request, 20, opener) as response:
+            final = response.geturl()
+            kind = response.headers.get("Content-Type", "")
+            disposition = response.headers.get("Content-Disposition", "") or ""
+            name = _download_name(disposition, final)
+            attachment = disposition.lower().startswith("attachment")
+            shown = remote.shown_type(kind, "" if kind else name)
+            if not attachment and shown == "html":
+                return True, final, _decode(response.read(8 * 1024 * 1024), kind), ""
+            if not attachment and shown == "text":
+                body = response.read(8 * 1024 * 1024)
+                return True, final, remote.text_page(name, body), ""
+            if not attachment and kind.lower().startswith("image/"):
+                import html as escape
+
+                return True, final, (f"<title>{escape.escape(name)}</title><body style='margin:0;"
+                                     f"background:#2b2d33;text-align:center'><img src="
+                                     f"'{escape.escape(final)}' style='max-width:100%'></body>"), ""
+            if not download_dir:
+                return False, final, f"This is {kind.split(';')[0] or 'a file'}, not a page.", ""
+            total = int(response.headers.get("Content-Length", "0") or 0)
+            path, size = remote.save_stream(response.read, download_dir, name, progress, total)
+            return True, final, remote.download_page(path, size), path
+    except Exception as exc:                              # noqa: BLE001
+        return False, url, str(exc), ""
+
+
+def _download_name(disposition: str, url: str) -> str:
+    """The name to save a download as: the server's, or the address's last part."""
+    found = re.search(r"filename\*\s*=\s*[^']*'[^']*'([^;]+)", disposition, re.I)
+    if found:
+        return urllib.parse.unquote(found.group(1).strip().strip('"'))
+    found = re.search(r'filename\s*=\s*"?([^";]+)"?', disposition, re.I)
+    if found:
+        return found.group(1).strip()
+    tail = urllib.parse.unquote(urllib.parse.urlsplit(url).path.rstrip("/").split("/")[-1])
+    return tail or "download"
+
+
 def _svg_image(data: bytes) -> QImage:
     """An SVG file drawn to an image at its own size, for <img src="...svg">."""
     try:
@@ -252,8 +335,10 @@ class MerlinView(QWidget):
     loadProgress = pyqtSignal(int)
     loadFinished = pyqtSignal(bool)
     linkHovered = pyqtSignal(str)
-    _fetched = pyqtSignal(int, bool, str, str)      # load number, ok, url, text
+    _fetched = pyqtSignal(int, bool, str, str, object)   # number, ok, url, text, prepared
     _image_fetched = pyqtSignal(int, str, bytes, bool)   # load number, src, data, ok
+    loginSubmitted = pyqtSignal(str, str, str)       # page, username, password
+    downloadFinished = pyqtSignal(str)               # the saved file
 
     def __init__(self, parent=None, host=None, profile=None):
         """host, when given, is Merlin's window: its content blocker and
@@ -266,6 +351,8 @@ class MerlinView(QWidget):
         self._places: dict = {}        # form control element -> (rect, fixed)
         self._buttons: list = []       # (rect, element, fixed) for buttons
         self._focused_once = False
+        self._sheets = None            # the page's stylesheets, linked and inline
+        self._styler = None
         self._found_rect = None
         self._page = _Page(self, profile)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -337,8 +424,10 @@ class MerlinView(QWidget):
     def refresh_hiding(self) -> None:
         """Styles again, for when the site's shields were switched."""
         if self._document is not None:
-            self._styles = Styler(self._document, viewport=(self._page_width(), self.height()),
-                                  extra_css=self._hiding_css()).compute()
+            self._styler = Styler(self._document, author_css=self._sheets,
+                                  viewport=(self._page_width(), self.height()),
+                                  extra_css=self._hiding_css())
+            self._styles = self._styler.compute()
             self._layout()
 
     def zoomFactor(self) -> float:                            # noqa: N802
@@ -427,6 +516,18 @@ class MerlinView(QWidget):
                 QUrl.UrlFormattingOption.RemovePath | QUrl.UrlFormattingOption.RemoveQuery
                 | QUrl.UrlFormattingOption.RemoveFragment).toString()
         opener = cookie_opener(self._cookies())
+        host_name = url.host()
+        from PyQt6.QtCore import QStandardPaths
+
+        download_dir = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DownloadLocation) or os.path.expanduser("~")
+
+        def progress(percent: int) -> None:
+            try:
+                if number == self._load_number:
+                    self.loadProgress.emit(percent)
+            except RuntimeError:
+                pass                             # the tab was closed
         self.urlChanged.emit(self.url())
         self.loadStarted.emit()
         self.loadProgress.emit(10)
@@ -435,19 +536,94 @@ class MerlinView(QWidget):
         def work():
             # whatever goes wrong here becomes an error page, never a page
             # left loading for ever
+            prepared = None
             try:
-                ok, final, text = fetch(target, headers=headers, data=body,
-                                        content_type=content_type, opener=opener)
+                ok, final, text, saved = fetch_page(
+                    target, headers=headers, data=body, content_type=content_type,
+                    opener=opener, download_dir=download_dir, progress=progress)
+                if ok:
+                    # parsed here, off the UI thread, with its stylesheets
+                    # fetched before the page is shown, as browsers do
+                    prepared = self._prepare(text, final, headers, opener, host_name)
+                    if saved:
+                        prepared["download"] = saved
             except Exception as exc:                  # noqa: BLE001
                 ok, final, text = False, target, f"MerlinEngine failed loading it: {exc}"
             try:
-                self._fetched.emit(number, ok, final, text)
+                self._fetched.emit(number, ok, final, text, prepared)
             except RuntimeError:
                 pass                     # the tab was closed while this loaded
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _on_fetched(self, number: int, ok: bool, final: str, text: str) -> None:
+    def _stylesheet_cache(self) -> dict:
+        owner = self._host if self._host is not None else MerlinView
+        cache = getattr(owner, "_merlin_stylesheets", None)
+        if cache is None:
+            cache = {}
+            try:
+                owner._merlin_stylesheets = cache
+            except Exception:                              # noqa: BLE001
+                pass
+        return cache
+
+    def _prepare(self, markup: str, page_url: str, headers: dict, opener, host_name: str):
+        """The page parsed, and its linked stylesheets fetched, in order.
+
+        Runs on the loading thread. Each stylesheet is checked with the
+        content blocker, fetched in parallel with the others, and its @imports
+        followed; what could not be fetched is simply left out. Stylesheets are
+        kept for the session, so a site's CSS is fetched once.
+        """
+        import concurrent.futures
+
+        document = html_parser.parse(markup, page_url)
+        sources = document.stylesheet_sources()
+        links = [s for s in sources if s[0] == "link"]
+        if not links:
+            return {"document": document, "sheets": [s[1] for s in sources]}
+        cache = self._stylesheet_cache()
+        page_site = _registrable(host_name)
+        sheet_headers = dict(headers)
+        sheet_headers["Accept"] = "text/css,*/*;q=0.1"
+        sheet_headers["Referer"] = page_url
+
+        def get(url: str, depth: int = 0) -> str:
+            if url in cache:
+                return cache[url]
+            interceptor = self._interceptor()
+            if interceptor is not None and url.startswith(("http://", "https://")) \
+                    and interceptor.check(url, host_name, "stylesheet"):
+                return ""
+            same = _registrable(QUrl(url).host()) == page_site
+            ok, final, data, _kind = fetch_bytes(url, sheet_headers, timeout=12,
+                                                 limit=4 * 1024 * 1024,
+                                                 opener=opener if same else None)
+            if not ok:
+                return ""
+            text = data.decode("utf-8", "replace")
+            if depth < 3 and "@import" in text:
+                text = _expand_imports(text, final or url, lambda u: get(u, depth + 1))
+            if len(cache) > 80:
+                cache.pop(next(iter(cache)))
+            cache[url] = text
+            return text
+
+        addresses = [urllib.parse.urljoin(page_url, s[1]) for s in links]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+            fetched = dict(zip(addresses, pool.map(get, addresses)))
+        sheets = []
+        for source in sources:
+            if source[0] == "style":
+                sheets.append(source[1])
+                continue
+            text = fetched.get(urllib.parse.urljoin(page_url, source[1]), "")
+            media = source[2]
+            sheets.append(f"@media {media} {{{text}}}" if media and media != "all" else text)
+        return {"document": document, "sheets": sheets}
+
+    def _on_fetched(self, number: int, ok: bool, final: str, text: str,
+                    prepared=None) -> None:
         if number != self._load_number:
             return                                 # superseded or stopped
         self.loadProgress.emit(70)
@@ -464,21 +640,32 @@ class MerlinView(QWidget):
                     f"sans-serif;margin:40px'><h2>MerlinEngine could not open this page</h2>"
                     f"<p style='color:#555'>{html.escape(self._url.toString())}</p>"
                     f"<p>{html.escape(text)}</p></body>")
-        self._show(text)
+        self._show(text, prepared if ok else None)
         self.loadProgress.emit(100)
         self.loadFinished.emit(ok)
+        if prepared and prepared.get("download"):
+            # announced once the page saying so has loaded, so nothing that
+            # tidies up after a load clears the message
+            self.downloadFinished.emit(prepared["download"])
         if self._pending_fragment:
             self._scroll_to_fragment(self._pending_fragment)
 
     # ----------------------------------------------------- the pipeline
-    def _show(self, markup: str) -> None:
-        self._document = html_parser.parse(markup, self._url.toString())
+    def _show(self, markup: str, prepared=None) -> None:
+        if prepared is not None:
+            self._document = prepared["document"]
+            self._sheets = prepared["sheets"]
+        else:
+            self._document = html_parser.parse(markup, self._url.toString())
+            self._sheets = None                 # the page's own <style> blocks
         self._clear_controls()
         self._images = {}
         self._find = ("", -1)
         self._found_rect = None
-        self._styles = Styler(self._document, viewport=(self._page_width(), self.height()),
-                              extra_css=self._hiding_css()).compute()
+        self._styler = Styler(self._document, author_css=self._sheets,
+                              viewport=(self._page_width(), self.height()),
+                              extra_css=self._hiding_css())
+        self._styles = self._styler.compute()
         title = self._document.title or self._url.toString()
         if title != self._title:
             self._title = title
@@ -551,6 +738,11 @@ class MerlinView(QWidget):
     def _layout(self) -> None:
         if self._document is None:
             return
+        # across a breakpoint, the page's @media rules are chosen again
+        viewport = (self._page_width(), float(self.height()))
+        styler = getattr(self, "_styler", None)
+        if styler is not None and styler.media_changed(viewport):
+            self._styles = styler.restyle(viewport)
         self._display = Layout(self._document, self._styles, self._page_width(), self._zoom,
                                images=self._images,
                                viewport_height=float(max(1, self.height())),
@@ -672,15 +864,19 @@ class MerlinView(QWidget):
             widget.setPlaceholderText(element.attrs.get("placeholder", ""))
             if "readonly" in element.attrs:
                 widget.setReadOnly(True)
+        elif kind == "file":
+            from PyQt6.QtWidgets import QPushButton
+
+            widget = QPushButton(self)
+            widget.setProperty("merlin_files", [])
+            widget.setProperty("merlin_file_button", True)
+            self._show_files(widget, element)
+            widget.clicked.connect(lambda _checked=False, e=element, w=widget: self._choose_files(e, w))
         else:
             widget = QLineEdit(self)
             widget.setFrame(False)
-            if kind == "file":
-                widget.setPlaceholderText("Files cannot be sent from Merlin Engine yet")
-                widget.setReadOnly(True)
-            else:
-                widget.setText(str(value))
-                widget.setPlaceholderText(element.attrs.get("placeholder", ""))
+            widget.setText(str(value))
+            widget.setPlaceholderText(element.attrs.get("placeholder", ""))
             if kind == "password":
                 widget.setEchoMode(QLineEdit.EchoMode.Password)
             try:
@@ -716,6 +912,35 @@ class MerlinView(QWidget):
             widget.setStyleSheet(f"QComboBox {{ background: transparent; border: none; "
                                  f"color: {rgba}; padding: 0px 2px; }}")
 
+    @staticmethod
+    def _show_files(widget, element) -> None:
+        files = widget.property("merlin_files") or []
+        many = "multiple" in element.attrs
+        if not files:
+            widget.setText("Choose files…" if many else "Choose a file…")
+        elif len(files) == 1:
+            import os
+
+            widget.setText(os.path.basename(files[0]))
+        else:
+            widget.setText(f"{len(files)} files")
+        widget.setToolTip("\n".join(files))
+
+    def _choose_files(self, element, widget) -> None:
+        from PyQt6.QtWidgets import QFileDialog
+
+        from . import forms
+
+        which = forms.dialog_filter(element.attrs.get("accept", ""))
+        if "multiple" in element.attrs:
+            files, _filter = QFileDialog.getOpenFileNames(self, "Choose files", "", which)
+        else:
+            path, _filter = QFileDialog.getOpenFileName(self, "Choose a file", "", which)
+            files = [path] if path else []
+        if files:
+            widget.setProperty("merlin_files", files)
+            self._show_files(widget, element)
+
     def _radio_toggled(self, element, on: bool) -> None:
         if not on:
             return
@@ -738,6 +963,8 @@ class MerlinView(QWidget):
                 values[element] = widget.currentData() if widget.currentIndex() >= 0 else ""
             elif name == "QPlainTextEdit":
                 values[element] = widget.toPlainText()
+            elif widget.property("merlin_file_button"):
+                values[element] = list(widget.property("merlin_files") or [])
             else:
                 values[element] = widget.text()
         return values
@@ -753,7 +980,18 @@ class MerlinView(QWidget):
             # Enter in a field: the form's first submit button sends it
             submitter = next((c for c in forms.controls_of(form)
                               if forms.kind_of(c) in ("submit", "image")), None)
-        pairs = forms.form_data(form, self._values(), submitter)
+        values = self._values()
+        pairs = forms.form_data(form, values, submitter)
+        login = self._login_in(form, values)
+        if login is not None:
+            # the site's origin only: a login page's address can carry
+            # one-time tokens, which have no place among saved passwords
+            origin = self._url.adjusted(QUrl.UrlFormattingOption.RemovePath
+                                        | QUrl.UrlFormattingOption.RemoveQuery
+                                        | QUrl.UrlFormattingOption.RemoveFragment
+                                        | QUrl.UrlFormattingOption.RemoveUserInfo)
+            self.loginSubmitted.emit(origin.toString() or self._url.toString(),
+                                     login[0], login[1])
         where = forms.submission(form, pairs, self._url.toString(), submitter)
         if where is None:
             return
@@ -765,6 +1003,47 @@ class MerlinView(QWidget):
             self._navigate(url, record=True, body=where["body"], content_type=where["type"])
         else:
             self.setUrl(url)
+
+    def _login_in(self, form, values: dict):
+        """(username, password) when the form holds a filled-in password field."""
+        from . import forms
+
+        controls = forms.controls_of(form)
+        for index, control in enumerate(controls):
+            if forms.kind_of(control) == "password" and values.get(control):
+                user = ""
+                # the username is the text or email field nearest before it
+                for earlier in reversed(controls[:index]):
+                    if forms.kind_of(earlier) in ("text", "email", "tel") and values.get(earlier):
+                        user = str(values[earlier])
+                        break
+                return user, str(values[control])
+        return None
+
+    def fill_login(self, username: str, password: str) -> str:
+        """Fill a saved login into the page: "filled", or why it could not be."""
+        from PyQt6.QtWidgets import QLineEdit
+
+        from . import forms
+
+        fields = [(e, w) for e, w in self._widgets.items() if isinstance(w, QLineEdit)]
+        secret = next(((e, w) for e, w in fields if forms.kind_of(e) == "password"
+                       and w.isEnabled() and not w.isReadOnly()), None)
+        if secret is None:
+            return "No password field on this page"
+        element, widget = secret
+        widget.setText(password)
+        form = forms.form_of(element)
+        if username and form is not None:
+            controls = forms.controls_of(form)
+            position = controls.index(element)
+            for earlier in reversed(controls[:position]):
+                if forms.kind_of(earlier) in ("text", "email", "tel") \
+                        and earlier in self._widgets:
+                    self._widgets[earlier].setText(username)
+                    break
+        widget.setFocus()
+        return "filled"
 
     def _reset(self, form) -> None:
         from . import forms
@@ -782,6 +1061,9 @@ class MerlinView(QWidget):
                 widget.setCurrentIndex(max(0, index))
             elif name == "QPlainTextEdit":
                 widget.setPlainText(str(value))
+            elif widget.property("merlin_file_button"):
+                widget.setProperty("merlin_files", [])
+                self._show_files(widget, control)
             else:
                 widget.setText(str(value))
 

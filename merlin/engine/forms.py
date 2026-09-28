@@ -11,10 +11,23 @@ Pure Python, with nothing from Qt: the view supplies the current values.
 """
 from __future__ import annotations
 
+import mimetypes
+import os
 import urllib.parse
 import uuid
 
 from .dom import Element
+
+class FileValue:
+    """A file chosen in a file field, sent by its contents."""
+
+    def __init__(self, path: str | None):
+        self.path = path
+
+    @property
+    def name(self) -> str:
+        return os.path.basename(self.path) if self.path else ""
+
 
 TEXT_KINDS = {"text", "search", "email", "url", "tel", "password", "number",
               "date", "time", "datetime-local", "month", "week", "color", "range"}
@@ -126,7 +139,14 @@ def form_data(form: Element, values: dict, submitter: Element | None = None) -> 
             if name:
                 pairs.append((name, control.attrs.get("value", "")))
             continue
-        if not name or kind == "file":
+        if not name:
+            continue
+        if kind == "file":
+            # each chosen file; none chosen still sends an empty part, as
+            # browsers do
+            chosen = [p for p in (value or []) if p] if isinstance(value, (list, tuple)) else []
+            for path in chosen or [None]:
+                pairs.append((name, FileValue(path)))
             continue
         if kind in ("checkbox", "radio"):
             if value:
@@ -160,9 +180,13 @@ def submission(form: Element, pairs: list, page_url: str,
     target = attr("target").strip().lower()
     if method == "dialog":
         return None
+    def plain(pairs):
+        # anywhere but a multipart body, a file is sent as just its name
+        return [(n, v.name if isinstance(v, FileValue) else v) for n, v in pairs]
+
     if method != "post":
         parts = urllib.parse.urlsplit(url)
-        query = urllib.parse.urlencode(pairs)
+        query = urllib.parse.urlencode(plain(pairs))
         # the query replaces any the action had, and the fragment is kept
         url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, query,
                                        parts.fragment))
@@ -170,16 +194,53 @@ def submission(form: Element, pairs: list, page_url: str,
     enctype = attr("enctype", "application/x-www-form-urlencoded").strip().lower()
     if enctype == "multipart/form-data":
         boundary = "----MerlinForm" + uuid.uuid4().hex
-        chunks = []
+        body = bytearray()
+
+        def quoted(text: str) -> str:
+            return text.replace("\\", "\\\\").replace('"', "%22").replace("\r", "%0D") \
+                .replace("\n", "%0A")
+
         for name, value in pairs:
-            chunks.append(f"--{boundary}\r\nContent-Disposition: form-data; "
-                          f"name=\"{name}\"\r\n\r\n{value}\r\n")
-        chunks.append(f"--{boundary}--\r\n")
-        return {"url": url, "method": "POST", "body": "".join(chunks).encode("utf-8"),
+            body += f"--{boundary}\r\n".encode()
+            if isinstance(value, FileValue):
+                kind = (mimetypes.guess_type(value.name)[0] if value.name else None) \
+                    or "application/octet-stream"
+                body += (f'Content-Disposition: form-data; name="{quoted(name)}"; '
+                         f'filename="{quoted(value.name)}"\r\n'
+                         f"Content-Type: {kind}\r\n\r\n").encode("utf-8")
+                if value.path:
+                    with open(value.path, "rb") as handle:
+                        body += handle.read()
+                body += b"\r\n"
+            else:
+                body += (f'Content-Disposition: form-data; name="{quoted(name)}"\r\n\r\n'
+                         f"{value}\r\n").encode("utf-8")
+        body += f"--{boundary}--\r\n".encode()
+        return {"url": url, "method": "POST", "body": bytes(body),
                 "type": f"multipart/form-data; boundary={boundary}", "target": target}
     if enctype == "text/plain":
-        body = "".join(f"{n}={v}\r\n" for n, v in pairs).encode("utf-8")
+        body = "".join(f"{n}={v}\r\n" for n, v in plain(pairs)).encode("utf-8")
         return {"url": url, "method": "POST", "body": body, "type": "text/plain",
                 "target": target}
-    return {"url": url, "method": "POST", "body": urllib.parse.urlencode(pairs).encode("utf-8"),
+    return {"url": url, "method": "POST", "body": urllib.parse.urlencode(plain(pairs)).encode("utf-8"),
             "type": "application/x-www-form-urlencoded", "target": target}
+
+
+def dialog_filter(accept: str) -> str:
+    """A file dialog's filter for an accept attribute: "image/*,.pdf"..."""
+    patterns = []
+    for item in (a.strip().lower() for a in (accept or "").split(",")):
+        if not item:
+            continue
+        if item.startswith("."):
+            patterns.append("*" + item)
+        elif item.endswith("/*"):
+            family = item[:-1]
+            patterns.extend("*" + ext for ext, kind in mimetypes.types_map.items()
+                            if kind.startswith(family))
+        else:
+            patterns.extend("*" + ext for ext in mimetypes.guess_all_extensions(item))
+    if not patterns:
+        return "All files (*)"
+    unique = sorted(set(patterns))
+    return f"Accepted files ({' '.join(unique)});;All files (*)"

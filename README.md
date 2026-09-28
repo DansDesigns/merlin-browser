@@ -1,5 +1,5 @@
 # Merlin Browser
-![version](https://img.shields.io/badge/version-1.7.0-6f8ff0)
+![version](https://img.shields.io/badge/version-1.7.1-6f8ff0)
 
 ### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6 Requires a reinstall as there has been a fundamental change to the folder structure. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
 
@@ -158,9 +158,12 @@ It renders text, headings, paragraphs, lists, links, images, SVG and tables,
 with flexbox, CSS grid, floats, positioning (relative, absolute and fixed) and
 inline-blocks, colours, fonts, margins, padding, borders, rounded corners and
 centring, the CSS cascade, and line breaking by real font measurement; Merlin's
-content blocker applies to it as to Chromium's tabs. Forms work: fields to
-type in, boxes, dropdowns, and sending by GET or POST, with cookies for the
-session. JavaScript is still to come, so web apps and many modern sites will
+content blocker applies to it as to Chromium's tabs. It loads a site's linked
+stylesheets, with @media rules, CSS variables and modern selectors. Forms
+work: fields to type in, boxes, dropdowns, files, and sending by GET or POST,
+with cookies for the session and saved passwords. It also opens ftp:// and
+smb:// addresses, which Chromium cannot, and file:// folders, and saves
+downloads. JavaScript is still to come, so web apps, YouTube among them, will
 not work in it yet.
 
 

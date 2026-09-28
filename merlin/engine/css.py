@@ -167,7 +167,13 @@ _SIMPLE = re.compile(
       | \#(?P<id>[\w-]+)
       | \.(?P<cls>[\w-]+)
       | \[(?P<attr>[^\]]+)\]
-      | ::?(?P<pseudo>[\w-]+(?:\([^)]*\))?)""", re.X)
+      | (?P<colons>::?)(?P<pseudo>[\w-]+)""", re.X)
+
+# pseudo-classes that depend only on the document, so can be matched at rest
+_STRUCTURAL = {"first-child", "last-child", "only-child", "root", "link", "any-link",
+               "empty", "first-of-type", "last-of-type", "only-of-type", "disabled",
+               "enabled", "checked", "required", "optional", "read-only", "read-write",
+               "defined", "scope"}
 
 
 def _compound(text: str):
@@ -197,11 +203,47 @@ def _compound(text: str):
             compound["attrs"].append((op.group(1).lower(), op.group(2) or "", value, flags))
         else:
             pseudo = match.group("pseudo").lower()
-            if pseudo in ("first-child", "last-child", "only-child", "root", "link",
-                          "any-link", "empty"):
+            end = match.end()
+            argument = None
+            if end < len(text) and text[end] == "(":
+                depth, index = 1, end + 1
+                while index < len(text) and depth:
+                    if text[index] == "(":
+                        depth += 1
+                    elif text[index] == ")":
+                        depth -= 1
+                    index += 1
+                argument = text[end + 1:index - 1].strip()
+                end = index
+            if match.group("colons") == "::" or pseudo in ("before", "after",
+                                                            "first-line", "first-letter"):
+                matchable = False            # pseudo-elements: not yet
+            elif argument is not None and pseudo in ("not", "is", "where", "matches",
+                                                     "-webkit-any"):
+                inner = [parse_selector(part) for part in _split_outside(argument, ",")]
+                inner = [x for x in inner if x is not None]
+                if pseudo == "not":
+                    # :not() of what cannot be told at rest, such as :hover,
+                    # is left true: at rest the element is not hovered
+                    compound["pseudo"].append(("not", inner))
+                else:
+                    usable = [x for x in inner if x.matchable]
+                    if not usable:
+                        matchable = False
+                    compound["pseudo"].append(("is" if pseudo != "where" else "where", usable))
+            elif argument is not None and pseudo in ("nth-child", "nth-last-child",
+                                                     "nth-of-type", "nth-last-of-type"):
+                formula = _nth(argument)
+                if formula is None:
+                    matchable = False
+                else:
+                    compound["pseudo"].append((pseudo, formula))
+            elif pseudo in _STRUCTURAL:
                 compound["pseudo"].append(pseudo)
             else:
-                matchable = False            # :hover, ::before and the like
+                matchable = False            # :hover, :focus, :target and the like
+            position = end
+            continue
         position = match.end()
     return compound, matchable
 
@@ -210,7 +252,7 @@ def parse_selector(text: str) -> Selector | None:
     text = text.strip()
     if not text:
         return None
-    tokens = re.split(r"\s*([>+~])\s*|\s+", text)
+    tokens = _selector_tokens(text)
     parts = []                           # left to right: [compound, combinator, ...]
     matchable = True
     specificity = [0, 0, 0]
@@ -227,9 +269,15 @@ def parse_selector(text: str) -> Selector | None:
             return None
         matchable = matchable and ok
         specificity[0] += bool(compound["id"])
-        specificity[1] += (len(compound["classes"]) + len(compound["attrs"])
-                           + len(compound["pseudo"]))
+        specificity[1] += len(compound["classes"]) + len(compound["attrs"])
         specificity[2] += compound["tag"] != "*"
+        for pseudo in compound["pseudo"]:
+            if isinstance(pseudo, tuple) and pseudo[0] in ("not", "is", "where"):
+                if pseudo[0] != "where" and pseudo[1]:
+                    strongest = max(x.specificity for x in pseudo[1])
+                    specificity = [a + b for a, b in zip(specificity, strongest)]
+            else:
+                specificity[1] += 1
         sequence.append((compound, pending))
         pending = " "
     if not sequence:
@@ -280,6 +328,23 @@ def _matches_compound(compound, element: Element) -> bool:
         parent = element.parent
         siblings = ([c for c in parent.children if isinstance(c, Element)]
                     if parent is not None else [element])
+        if isinstance(pseudo, tuple):
+            kind, argument = pseudo
+            if kind == "not":
+                if any(x.matchable and matches(x, element) for x in argument):
+                    return False
+            elif kind in ("is", "where"):
+                if not any(matches(x, element) for x in argument):
+                    return False
+            else:
+                pool = siblings
+                if kind.endswith("of-type"):
+                    pool = [c for c in siblings if c.tag == element.tag]
+                if kind.startswith("nth-last"):
+                    pool = list(reversed(pool))
+                if not _nth_holds(argument, pool.index(element) + 1):
+                    return False
+            continue
         if pseudo == "first-child" and siblings[0] is not element:
             return False
         if pseudo == "last-child" and siblings[-1] is not element:
@@ -292,7 +357,89 @@ def _matches_compound(compound, element: Element) -> bool:
             return False
         if pseudo == "empty" and element.children:
             return False
+        if pseudo in ("first-of-type", "last-of-type", "only-of-type"):
+            same = [c for c in siblings if c.tag == element.tag]
+            if pseudo == "first-of-type" and same[0] is not element:
+                return False
+            if pseudo == "last-of-type" and same[-1] is not element:
+                return False
+            if pseudo == "only-of-type" and len(same) != 1:
+                return False
+        control = element.tag in ("input", "button", "select", "textarea", "option",
+                                  "optgroup", "fieldset")
+        if pseudo == "disabled" and not (control and "disabled" in element.attrs):
+            return False
+        if pseudo == "enabled" and not (control and "disabled" not in element.attrs):
+            return False
+        if pseudo == "checked" and not (("checked" in element.attrs and element.tag == "input")
+                                        or ("selected" in element.attrs and element.tag == "option")):
+            return False
+        if pseudo == "required" and "required" not in element.attrs:
+            return False
+        if pseudo == "optional" and (not control or "required" in element.attrs):
+            return False
+        if pseudo == "read-only" and control and "readonly" not in element.attrs \
+                and "disabled" not in element.attrs:
+            return False
+        if pseudo == "read-write" and not (control and "readonly" not in element.attrs
+                                           and "disabled" not in element.attrs):
+            return False
     return True
+
+
+def _selector_tokens(text: str) -> list:
+    """A selector split into compounds and combinators, never inside brackets.
+
+    :nth-child(2n + 1) and :not(.a .b) keep their spaces and plus signs.
+    """
+    tokens, current, depth, quote = [], [], 0, ""
+    for character in text:
+        if quote:
+            current.append(character)
+            if character == quote:
+                quote = ""
+            continue
+        if character in "'\"":
+            quote = character
+        elif character in "([":
+            depth += 1
+        elif character in ")]":
+            depth = max(0, depth - 1)
+        if depth == 0 and character in " \t\n>+~":
+            if current:
+                tokens.append("".join(current))
+                current = []
+            if character in ">+~":
+                tokens.append(character)
+            continue
+        current.append(character)
+    if current:
+        tokens.append("".join(current))
+    return tokens
+
+
+def _nth(argument: str):
+    """An+B from :nth-child(): (a, b), or None if it cannot be read."""
+    text = argument.lower().replace(" ", "").split("of")[0]
+    if text == "odd":
+        return (2, 1)
+    if text == "even":
+        return (2, 0)
+    found = re.match(r"^([+-]?\d*)n([+-]\d+)?$", text)
+    if found:
+        a = found.group(1)
+        a = 1 if a in ("", "+") else -1 if a == "-" else int(a)
+        return (a, int(found.group(2) or 0))
+    if re.match(r"^[+-]?\d+$", text):
+        return (0, int(text))
+    return None
+
+
+def _nth_holds(formula, position: int) -> bool:
+    a, b = formula
+    if a == 0:
+        return position == b
+    return (position - b) % a == 0 and (position - b) // a >= 0
 
 
 def matches(selector: Selector, element: Element) -> bool:
@@ -328,12 +475,13 @@ def matches(selector: Selector, element: Element) -> bool:
 
 
 class Rule:
-    __slots__ = ("selector", "declarations", "order")
+    __slots__ = ("selector", "declarations", "order", "media")
 
-    def __init__(self, selector, declarations, order):
+    def __init__(self, selector, declarations, order, media=()):
         self.selector = selector
         self.declarations = declarations
         self.order = order
+        self.media = media          # the @media conditions it sits inside, all to hold
 
 
 def parse_declarations(text: str) -> list:
@@ -373,34 +521,59 @@ def _split_outside(text: str, separator: str) -> list:
     return parts
 
 
-def parse_stylesheet(text: str, start_order: int = 0) -> list:
-    """A stylesheet as rules. @media blocks are read unless meant only for print."""
+def parse_stylesheet(text: str, start_order: int = 0, media: tuple = ()) -> list:
+    """A stylesheet as rules, each keeping the @media conditions around it.
+
+    Whether those conditions hold is decided later, for the window's size, so
+    resizing across a breakpoint only has to choose rules again, not parse.
+    @supports and @layer blocks are read; @container, @font-face, @keyframes
+    and the like are not yet. Statement at-rules such as @import, @charset and
+    @layer a, b; end at their semicolon.
+    """
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
     rules = []
     order = start_order
     position = 0
-    while position < len(text):
+    length = len(text)
+    while position < length:
+        while position < length and text[position] in " \t\r\n":
+            position += 1
+        if position >= length:
+            break
         brace = text.find("{", position)
+        if text.startswith("@", position):
+            semicolon = text.find(";", position)
+            if semicolon >= 0 and (brace < 0 or semicolon < brace):
+                position = semicolon + 1          # @import, @charset, @layer a, b;
+                continue
         if brace < 0:
             break
         prelude = text[position:brace].strip()
         # find the matching close brace
         depth, index = 1, brace + 1
-        while index < len(text) and depth:
-            if text[index] == "{":
+        while index < length and depth:
+            character = text[index]
+            if character == "{":
                 depth += 1
-            elif text[index] == "}":
+            elif character == "}":
                 depth -= 1
             index += 1
         body = text[brace + 1:index - 1]
         position = index
         if prelude.startswith("@"):
             lowered = prelude.lower()
-            if lowered.startswith("@media") and "print" not in lowered.replace("not print", ""):
-                inner = parse_stylesheet(body, order)
-                rules.extend(inner)
-                order += len(inner) + 1
-            # @font-face, @keyframes, @supports and the rest: not yet
+            if lowered.startswith("@media"):
+                inner = parse_stylesheet(body, order, media + (lowered[6:].strip(),))
+            elif lowered.startswith("@supports"):
+                # what is asked about is, in the main, what is supported here
+                inner = [] if lowered[9:].strip().startswith("not") else \
+                    parse_stylesheet(body, order, media)
+            elif lowered.startswith("@layer") or lowered.startswith("@document"):
+                inner = parse_stylesheet(body, order, media)
+            else:
+                inner = []          # @font-face, @keyframes, @container, @page...
+            rules.extend(inner)
+            order += len(inner) + 1
             continue
         declarations = parse_declarations(body)
         if not declarations:
@@ -408,9 +581,178 @@ def parse_stylesheet(text: str, start_order: int = 0) -> list:
         for part in _split_outside(prelude, ","):
             selector = parse_selector(part)
             if selector is not None:
-                rules.append(Rule(selector, declarations, order))
+                rules.append(Rule(selector, declarations, order, media))
                 order += 1
     return rules
+
+
+# Parsed stylesheets, by their text: a site's CSS is parsed once and reused
+# from page to page.
+_PARSED: dict = {}
+
+
+def parsed(text: str) -> list:
+    rules = _PARSED.get(text)
+    if rules is None:
+        rules = parse_stylesheet(text)
+        if len(_PARSED) > 40:
+            _PARSED.pop(next(iter(_PARSED)))
+        _PARSED[text] = rules
+    return rules
+
+
+# ------------------------------------------------------------------- @media
+
+_UNITS = {"px": 1.0, "em": 16.0, "rem": 16.0, "pt": 4 / 3, "cm": 96 / 2.54, "mm": 96 / 25.4,
+          "in": 96.0, "vw": None, "vh": None}
+
+
+def _media_length(text: str, viewport):
+    found = re.match(r"^\s*(-?[\d.]+)\s*([a-z%]*)\s*$", text or "")
+    if not found:
+        return None
+    number, unit = float(found.group(1)), found.group(2) or "px"
+    if unit == "vw":
+        return number * viewport[0] / 100
+    if unit == "vh":
+        return number * viewport[1] / 100
+    factor = _UNITS.get(unit)
+    return number * factor if factor else None
+
+
+def _feature(feature: str, viewport, scheme: str) -> bool:
+    """One media feature in brackets, as width >= 600px or min-width: 40em."""
+    feature = feature.strip().lower()
+    width, height = viewport
+    # range syntax: (width >= 600px), (400px <= width < 900px)
+    ranged = re.match(r"^(?:([^<>=]+?)\s*(<=|>=|<|>|=)\s*)?(width|height|aspect-ratio)"
+                      r"\s*(?:(<=|>=|<|>|=)\s*([^<>=]+))?$", feature)
+    if ranged and (ranged.group(2) or ranged.group(4)):
+        size = width if ranged.group(3) == "width" else height
+        if ranged.group(3) == "aspect-ratio":
+            return True
+        ok = True
+        if ranged.group(1) is not None:
+            limit = _media_length(ranged.group(1), viewport)
+            ok = ok and limit is not None and _compare(limit, ranged.group(2), size)
+        if ranged.group(5) is not None:
+            limit = _media_length(ranged.group(5), viewport)
+            ok = ok and limit is not None and _compare(size, ranged.group(4), limit)
+        return ok
+    name, _colon, value = feature.partition(":")
+    name, value = name.strip(), value.strip()
+    if name in ("min-width", "max-width", "min-height", "max-height",
+                "min-device-width", "max-device-width"):
+        limit = _media_length(value, viewport)
+        if limit is None:
+            return False
+        size = width if "width" in name else height
+        return size >= limit if name.startswith("min") else size <= limit
+    if name == "orientation":
+        return value == ("portrait" if height >= width else "landscape")
+    if name == "prefers-color-scheme":
+        return value == scheme
+    if name == "prefers-reduced-motion":
+        return value == "no-preference"
+    if name == "prefers-contrast":
+        return value == "no-preference"
+    if name in ("hover", "any-hover"):
+        return value in ("hover", "")
+    if name in ("pointer", "any-pointer"):
+        return value in ("fine", "")
+    if name in ("min-resolution", "-webkit-min-device-pixel-ratio", "min--moz-device-pixel-ratio"):
+        number = re.match(r"^([\d.]+)", value)
+        return bool(number) and float(number.group(1)) <= 1.0
+    if name in ("color", "min-color", "monochrome", "display-mode", "scripting",
+                "forced-colors", "inverted-colors", "update", "dynamic-range"):
+        return {"monochrome": False, "forced-colors": value == "none",
+                "inverted-colors": value == "none", "scripting": value == "none",
+                "display-mode": value == "browser", "dynamic-range": value == "standard"}.get(name, True)
+    return False                               # unknown: as browsers, not matched
+
+
+def _compare(a: float, op: str, b: float) -> bool:
+    return {"<": a < b, "<=": a <= b, ">": a > b, ">=": a >= b, "=": a == b}[op]
+
+
+def media_matches(query: str, viewport=(1024, 768), scheme: str = "light") -> bool:
+    """Whether a media query list holds for a screen of this size."""
+    query = query.strip().lower()
+    if not query:
+        return True
+    for part in _split_outside(query, ","):
+        part = part.strip()
+        negate = False
+        if part.startswith("not "):
+            negate, part = True, part[4:].strip()
+        elif part.startswith("only "):
+            part = part[5:].strip()
+        ok = True
+        for piece in re.split(r"\s+and\s+", part):
+            piece = piece.strip()
+            if not piece:
+                continue
+            if piece.startswith("("):
+                inner = piece[1:-1] if piece.endswith(")") else piece[1:]
+                if inner.startswith("not "):
+                    ok = ok and not _feature(inner[4:].strip("() "), viewport, scheme)
+                elif " or " in inner:
+                    ok = ok and any(_feature(x.strip("() "), viewport, scheme)
+                                    for x in inner.split(" or "))
+                else:
+                    ok = ok and _feature(inner, viewport, scheme)
+            else:
+                ok = ok and piece in ("all", "screen")
+        if ok != negate:
+            return True
+    return False
+
+
+def _var(value: str, custom: dict, depth: int = 0):
+    """value with each var(--name, fallback) replaced; None if one cannot be.
+
+    A custom property may itself use var(); a loop or a missing name with no
+    fallback makes the whole value invalid, as the standard says, and the
+    property then takes its inherited or initial value.
+    """
+    if "var(" not in value:
+        return value
+    if depth > 24:
+        return None
+    out = []
+    position = 0
+    while True:
+        start = value.find("var(", position)
+        if start < 0:
+            out.append(value[position:])
+            break
+        out.append(value[position:start])
+        depth_here, index = 1, start + 4
+        while index < len(value) and depth_here:
+            if value[index] == "(":
+                depth_here += 1
+            elif value[index] == ")":
+                depth_here -= 1
+            index += 1
+        inside = value[start + 4:index - 1]
+        name, comma, fallback = inside.partition(",")
+        name = name.strip()
+        found = custom.get(name)
+        if found is not None and found.strip():
+            # a variable that cannot itself be resolved, as in a loop, counts as
+            # missing: the fallback, if there is one, stands in
+            found = _var(found, custom, depth + 1)
+        else:
+            found = None
+        if found is None:
+            if not comma:
+                return None
+            found = _var(fallback.strip(), custom, depth + 1)
+            if found is None:
+                return None
+        out.append(found)
+        position = index
+    return "".join(out)
 
 
 # ---------------------------------------------------------------- cascade
@@ -476,27 +818,55 @@ class Styler:
     """Matches a document's rules to its elements and computes their styles."""
 
     def __init__(self, document: Document, author_css: list[str] | None = None,
-                 viewport=(1024, 768), extra_css: str = ""):
+                 viewport=(1024, 768), extra_css: str = "", scheme: str = "light"):
         self.document = document
         self.viewport = viewport
-        author = []
-        order = 100000
-        for text in (author_css if author_css is not None else document.stylesheets()):
-            parsed = parse_stylesheet(text, order)
-            author.extend(parsed)
-            order += len(parsed) + 1
+        self.scheme = scheme
+        # each stylesheet's rules, with where in the cascade that sheet begins
+        self._sheets = []
+        base = 100000
+        texts = list(author_css if author_css is not None else document.stylesheets())
         if extra_css:                          # Merlin's own additions, such as hiding rules
-            author.extend(parse_stylesheet(extra_css, order))
-        self._index = {"default": self._build_index(_DEFAULT_RULES),
-                       "author": self._build_index(author)}
+            texts.append(extra_css)
+        for text in texts:
+            rules = parsed(text)
+            self._sheets.append((base, rules))
+            base += 1000000
+        self._choose()
         self.styles: dict = {}
 
-    @staticmethod
-    def _build_index(rules):
-        index: dict = {}
-        for rule in rules:
-            index.setdefault(rule.selector.key, []).append(rule)
-        return index
+    def _choose(self) -> None:
+        """Index the rules whose @media conditions hold for the viewport now."""
+        self._media = {}
+        author: dict = {}
+        for base, rules in self._sheets:
+            for rule in rules:
+                if rule.media and not all(self._holds(q) for q in rule.media):
+                    continue
+                author.setdefault(rule.selector.key, []).append((rule, base))
+        default: dict = {}
+        for rule in _DEFAULT_RULES:
+            default.setdefault(rule.selector.key, []).append((rule, 0))
+        self._index = {"default": default, "author": author}
+
+    def _holds(self, query: str) -> bool:
+        found = self._media.get(query)
+        if found is None:
+            found = media_matches(query, self.viewport, self.scheme)
+            self._media[query] = found
+        return found
+
+    def media_changed(self, viewport) -> bool:
+        """Whether a window of this size would choose different @media rules."""
+        return any(media_matches(q, viewport, self.scheme) != held
+                   for q, held in self._media.items())
+
+    def restyle(self, viewport) -> dict:
+        """Styles again for a new viewport: the rules are chosen again, not parsed."""
+        self.viewport = viewport
+        self._choose()
+        self.styles = {}
+        return self.compute()
 
     def _candidates(self, index, element: Element):
         keys = [("any", ""), ("tag", element.tag)]
@@ -512,14 +882,15 @@ class Styler:
         self._compute(self.document.root, None, root_size)
         return self.styles
 
-    def _declared(self, element: Element) -> dict:
+    def _declared(self, element: Element) -> list:
+        """Every declaration for the element, weakest first, not yet expanded."""
         found = []   # (layer, specificity, order, name, value)
         for origin, layer_normal, layer_important in (("default", 0, 5), ("author", 1, 4)):
-            for rule in self._candidates(self._index[origin], element):
+            for rule, base in self._candidates(self._index[origin], element):
                 if matches(rule.selector, element):
                     for name, value, important in rule.declarations:
                         found.append((layer_important if important else layer_normal,
-                                      rule.selector.specificity, rule.order, name, value))
+                                      rule.selector.specificity, base + rule.order, name, value))
         for name, value in presentational_hints(element):
             found.append((1, (0, 0, 0), -1, name, value))
         inline = element.attrs.get("style")
@@ -527,16 +898,30 @@ class Styler:
             for name, value, important in parse_declarations(inline):
                 found.append((4 if important else 2, (1, 0, 0), 10 ** 9, name, value))
         found.sort(key=lambda item: (item[0], item[1], item[2]))
-        declared = {}
-        for _layer, _spec, _order, name, value in found:
-            for real_name, real_value in expand_shorthand(name, value):
-                declared[real_name] = real_value
-        return declared
+        return [(name, value) for _layer, _spec, _order, name, value in found]
 
     def _compute(self, element: Element, parent: dict | None, root_size: float) -> None:
-        declared = self._declared(element)
-        style = {}
         parent = parent or {}
+        ordered = self._declared(element)
+        # Custom properties first: inherited, then the element's own, which
+        # any var() below may use. A page that sets none shares its parent's.
+        custom = parent.get("--", {})
+        own = [(n, v) for n, v in ordered if n.startswith("--")]
+        if own:
+            custom = dict(custom)
+            for name, value in own:
+                custom[name] = value
+        declared = {}
+        for name, value in ordered:
+            if name.startswith("--"):
+                continue
+            if "var(" in value:
+                value = _var(value, custom)
+                if value is None:
+                    continue           # invalid once substituted: as if not set
+            for real_name, real_value in expand_shorthand(name, value):
+                declared[real_name] = real_value
+        style = {"--": custom}
         # inherited properties start from the parent's values
         for name in INHERITED:
             if name in parent:
@@ -550,9 +935,13 @@ class Styler:
         for name, value in declared.items():
             if name == "font-size":
                 continue
-            if value.strip().lower() == "inherit":
+            keyword = value.strip().lower()
+            if keyword == "inherit" or (keyword == "unset" and name in INHERITED):
                 if name in parent:
                     style[name] = parent[name]
+                continue
+            if keyword in ("initial", "unset", "revert", "revert-layer"):
+                style.pop(name, None)          # its initial value, set below
                 continue
             style[name] = self._value(name, value, font, root_size, style)
         style.setdefault("display", "inline")

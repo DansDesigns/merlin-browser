@@ -1206,6 +1206,11 @@ class SettingsDialog(QDialog):
             "Chromium. Takes effect at once: every tab opened from now on uses "
             "it, and tabs already open keep the engine they have. Switch it "
             "off to go back to Chromium for new tabs."))
+        layout.addWidget(self._check(
+            "Offer to save passwords when you log in", "offer_save_passwords",
+            "After you log in on a Merlin Engine page, offer to keep the password "
+            "with your other saved logins, or to update it when it has changed. "
+            "Never in private windows."))
         note = QLabel(
             "MerlinEngine is new and partial. It draws text, headings, lists, "
             "links, tables and images, with the page's CSS and Merlin's content "
