@@ -1,9 +1,9 @@
 # Merlin Browser
-![version](https://img.shields.io/badge/version-1.6.97-6f8ff0)
+![version](https://img.shields.io/badge/version-1.6.98-6f8ff0)
 
-### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6.97 Requires a reinstall to enable Merlin Engine. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
+### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6 Requires a reinstall as there has been a fundamental change to the folder structure. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
 
-A Rust-free desktop web browser built with Python and C++, on Qt and the Chromium engine (being replace with a custom Python "Merlin Engine").
+A Rust-free desktop web browser built with Python and C++, on Qt and the Chromium engine.
 
 
 ![Merlin](https://github.com/DansDesigns/merlin-browser/blob/main/Screenshot.png?raw=true)
@@ -154,14 +154,14 @@ python -m merlin.engine https://example.com
 python -m merlin.engine page.html
 ```
 
-It renders text, headings, paragraphs, lists, links, images, tables and
-flexbox layouts, with colours, fonts, margins, padding, borders, rounded
-corners and centring, the CSS cascade, and line breaking by real font
-measurement; Merlin's content blocker applies to it as to Chromium's tabs.
-JavaScript, usable forms, grid, floats and positioning are still to come, so
+It renders text, headings, paragraphs, lists, links, images and tables, with
+flexbox, floats and positioning (relative, absolute and fixed), colours, fonts,
+margins, padding, borders, rounded corners and centring, the CSS cascade, and
+line breaking by real font measurement; Merlin's content blocker applies to it
+as to Chromium's tabs. JavaScript, usable forms and grid are still to come, so
 web apps and many modern sites will not work in it yet.
 
-# Install
+
 
 Download from the [Releases](https://github.com/DansDesigns/merlin-browser/releases) page or build from source by cloning this repo then running:
 

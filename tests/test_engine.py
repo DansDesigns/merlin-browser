@@ -352,6 +352,113 @@ def test_flexbox() -> None:
 
 
 
+def test_floats_and_positioning() -> None:
+    """Floats and positioning, against the positions CSS requires."""
+    from PyQt6.QtGui import QFontMetricsF                          # noqa: F401
+
+    from merlin.engine.css import Styler
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+
+
+    def lay(markup, width=600, viewport=400):
+        doc = parse("<body style='margin:0;font-size:16px'>" + markup)
+        return Layout(doc, Styler(doc, viewport=(width, viewport)).compute(), width,
+                      viewport_height=viewport).run()
+
+
+    def boxes(out, fixed=False):
+        found = {}
+        source = out.fixed if fixed else out
+        for item in (source.items if source else []):
+            subs = item[1] if item and item[0] == "group" else [item]
+            for sub in subs:
+                if sub and sub[0] in ("rect", "rrect"):
+                    r = sub[1]
+                    found[sub[2][:3]] = (round(r.x()), round(r.y()), round(r.width()), round(r.height()))
+        return found
+
+
+    def texts(out):
+        return [(round(i[1]), round(i[2]), i[3]) for i in out.items if i and i[0] == "text"]
+
+
+    R, G, B = (255, 0, 0), (0, 128, 0), (0, 0, 255)
+    words = " ".join(["word"] * 60)
+
+    print("floats")
+    out = lay(f"<div style='float:left;width:100px;height:50px;background:red'></div><p style='margin:0'>{words}</p>")
+    lines = sorted({(x, y) for x, y, _t in texts(out)}, key=lambda p: p[1])
+    first_x = min(x for x, y in lines if y == lines[0][1])
+    late = [x for x, y in lines if y > 60]
+    _flex_check("text beside a left float starts after it", first_x, 100)
+    _flex_check("and returns to the edge below it", min(late) if late else None, 0)
+
+    out = lay(f"<div style='float:right;width:100px;height:50px;background:red'></div><p style='margin:0'>{words}</p>")
+    from PyQt6.QtGui import QFontMetricsF                             # noqa: E402
+    ends = [i[1] + QFontMetricsF(i[4]).horizontalAdvance(i[3]) for i in out.items
+            if i and i[0] == "text" and i[2] < 45]
+    _flex_check("text beside a right float stops before it", max(ends) <= 500.5, True)
+    _flex_check("the right float sits at the right edge", boxes(out).get(R), (500, 0, 100, 50))
+
+    out = lay("<div style='float:left;width:100px;height:40px;background:red'></div>"
+              "<div style='float:left;width:100px;height:40px;background:green'></div>")
+    _flex_check("two left floats sit side by side", [boxes(out).get(R)[:2], boxes(out).get(G)[:2]],
+          [(0, 0), (100, 0)])
+
+    out = lay("<div style='float:left;width:400px;height:40px;background:red'></div>"
+              "<div style='float:left;width:300px;height:40px;background:green'></div>")
+    _flex_check("a float with no room beside drops below", boxes(out).get(G)[:2], (0, 40))
+
+    out = lay("<div style='float:left;width:100px;height:80px;background:red'></div>"
+              "<div style='clear:both;height:10px;background:blue'></div>")
+    _flex_check("clear: both starts below the float", boxes(out).get(B)[1], 80)
+
+    out = lay("<div style='overflow:hidden;background:#010203'>"
+              "<div style='float:left;width:100px;height:90px;background:red'></div></div>")
+    _flex_check("overflow: hidden grows to hold its floats", boxes(out).get((1, 2, 3))[3], 90)
+
+    out = lay("<div style='float:left;width:150px;height:60px;background:red'></div>"
+              "<div style='overflow:hidden;height:60px;background:blue'></div>")
+    _flex_check("a new context sits beside a float: the sidebar layout", boxes(out).get(B)[:3], (150, 0, 450))
+
+    print("positioning")
+    out = lay("<div style='position:relative;top:10px;left:20px;width:50px;height:30px;background:red'></div>"
+              "<div style='width:50px;height:30px;background:green'></div>")
+    _flex_check("relative moves the box", boxes(out).get(R)[:2], (20, 10))
+    _flex_check("but not what follows it", boxes(out).get(G)[:2], (0, 30))
+
+    container = ("<div style='position:relative;width:400px;height:200px;margin-left:50px;"
+                 "margin-top:20px;background:#010203'>{}</div>")
+    out = lay(container.format("<div style='position:absolute;top:0;right:0;width:50px;height:30px;background:red'></div>"))
+    _flex_check("absolute top/right against a positioned parent", boxes(out).get(R)[:2], (400, 20))
+    out = lay(container.format("<div style='position:absolute;bottom:10px;left:10px;width:50px;height:30px;background:red'></div>"))
+    _flex_check("absolute bottom/left", boxes(out).get(R)[:2], (60, 180))
+    out = lay(container.format("<div style='position:absolute;left:10px;right:10px;top:5px;height:20px;background:red'></div>"))
+    _flex_check("left and right stretch it between them", boxes(out).get(R)[:3], (60, 25, 380))
+    out = lay(container.format("<div style='position:absolute;top:0;left:0;bottom:0;width:20px;background:red'></div>"))
+    _flex_check("top and bottom stretch it too", boxes(out).get(R)[3], 200)
+    out = lay(container.format("<p style='margin:0;height:40px'>x</p>"
+                               "<div style='position:absolute;width:30px;height:30px;background:red'></div>"))
+    _flex_check("with no sides given, it stays where it would have been", boxes(out).get(R)[:2], (50, 60))
+    out = lay(container.format("<div style='position:absolute;top:0;left:0;background:red'>short</div>"))
+    _flex_check("with no width, it shrinks to its content", boxes(out).get(R)[2] < 100, True)
+    out = lay(container.format("<div style='position:absolute;left:50%;top:0;width:100px;height:20px;"
+                               "transform:translateX(-50%);background:red'></div>"))
+    _flex_check("left: 50% with translateX(-50%) centres it", boxes(out).get(R)[:2], (200, 20))
+    out = lay("<div style='height:50px'></div><div style='position:absolute;top:5px;left:5px;"
+              "width:20px;height:20px;background:red'></div>")
+    _flex_check("with no positioned ancestor, it goes against the page", boxes(out).get(R)[:2], (5, 5))
+
+    print("fixed")
+    out = lay("<div style='height:2000px'></div><div style='position:fixed;top:0;left:0;right:0;"
+              "height:40px;background:red'></div>")
+    _flex_check("a fixed box is drawn against the window, not the page", boxes(out, fixed=True).get(R),
+          (0, 0, 600, 40))
+    _flex_check("and is not part of the scrolling page", boxes(out).get(R), None)
+
+
+
 def test_view(app) -> None:
     from merlin.engine import MerlinView
 
@@ -420,7 +527,8 @@ def test_view(app) -> None:
 def main() -> int:
     app = QApplication(sys.argv[:1])
     for test in (test_no_chromium, test_without_html_parser, test_parsing, test_cascade, test_layout,
-                 test_body_and_markers, test_tables, test_flexbox):
+                 test_body_and_markers, test_tables, test_flexbox,
+                 test_floats_and_positioning):
         print(test.__name__)
         test()
     print("test_images")

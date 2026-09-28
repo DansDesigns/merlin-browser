@@ -24,6 +24,7 @@ from .dom import Element, Text
 # a word of text is a string, and the word "image" or "anchor" in a page was
 # once taken for one of these.
 _IMAGE, _ANCHOR, _BREAK = object(), object(), object()
+_FLOAT, _ABSOLUTE = object(), object()
 
 BLOCK = {"block", "list-item", "table", "table-row", "table-row-group",
          "table-header-group", "table-footer-group", "flex", "grid", "table-caption",
@@ -40,6 +41,7 @@ class DisplayList:
         self.height = 0.0
         self.width = 0.0
         self.canvas = None               # the page's background colour
+        self.fixed = None                # position: fixed, drawn against the window
 
 
 class _Fonts:
@@ -95,7 +97,11 @@ def _px(value, reference: float = 0.0, auto: float | None = 0.0) -> float | None
 
 class Layout:
     def __init__(self, document, styles: dict, width: float, zoom: float = 1.0,
-                 images: dict | None = None):
+                 images: dict | None = None, viewport_height: float = 768.0):
+        self.viewport_height = viewport_height
+        self._floats: list = []           # floats in the current formatting context
+        self._absolute: list = [[]]       # waiting for their containing block
+        self._fixed: list = []            # waiting for the window
         # src -> QImage once loaded, or False when it will never show
         # (blocked, or failed): such an image takes no room
         self.images = images or {}
@@ -122,7 +128,19 @@ class Layout:
                 self.out.canvas = colour
                 break
         height = self._block(root, root_style, 0.0, 0.0, self.width, root_level=True)
-        self.out.height = height
+        # what is positioned against the page, and then against the window
+        page = QRectF(0.0, 0.0, self.width, self.viewport_height)
+        for element, style, static_x, static_y in self._absolute[0]:
+            self._place_absolute(element, style, page, static_x, static_y)
+        if self._fixed:
+            saved = self.out
+            self.out = DisplayList()
+            for element, style, static_x, static_y in self._fixed:
+                self._place_absolute(element, style, page, static_x, static_y)
+            fixed, self.out = self.out, saved
+            self.out.fixed = fixed
+        bottom = max((_bottom_edge(item) for item in self.out.items), default=0.0)
+        self.out.height = max(height, bottom)
         self.out.width = self.width
         return self.out
 
@@ -196,7 +214,22 @@ class Layout:
 
         # the background goes under the children, so its place is kept now
         background_index = len(self.out.items)
+        links_before = len(self.out.links)
         self.out.items.append(None)
+        position = style.get("position")
+        positioned = position in ("relative", "absolute", "fixed", "sticky")
+        if positioned:
+            self._absolute.append([])        # descendants placed against this box
+        # A block that starts a formatting context keeps its floats to itself,
+        # and grows to hold them
+        display = style.get("display")
+        new_context = (root_level or style.get("_bfc") or style.get("float") in ("left", "right")
+                       or position in ("absolute", "fixed")
+                       or style.get("overflow") not in (None, "", "visible")
+                       or display in ("flow-root", "table", "table-cell", "inline-block",
+                                      "flex", "inline-flex"))
+        if new_context:
+            outer_floats, self._floats = self._floats, []
 
         if style.get("display") == "table":
             if width_value is None:
@@ -218,6 +251,11 @@ class Layout:
         # where this block's first line of text sits, for a list marker outside it
         self._last_baseline = first_baseline
 
+        if new_context:
+            float_bottom = max((f["bottom"] for f in self._floats), default=None)
+            if float_bottom is not None:
+                inner_height = max(inner_height, float_bottom - content_y)
+            self._floats = outer_floats
         if fixed_height is not None:
             inner_height = fixed_height
         if min_height is not None:
@@ -244,6 +282,32 @@ class Layout:
         self.out.items[background_index] = ("group", paint)
         if href is not None:
             self.out.links.append((box, href))
+
+        # position: relative, and translate(), move the box once laid out;
+        # nothing around it moves
+        dx = dy = 0.0
+        if position == "relative":
+            left = self._length(style.get("left"), available)
+            right = self._length(style.get("right"), available)
+            top = self._length(style.get("top"), 0.0, vertical=True)
+            bottom = self._length(style.get("bottom"), 0.0, vertical=True)
+            dx = left if left is not None else (-right if right is not None else 0.0)
+            dy = top if top is not None else (-bottom if bottom is not None else 0.0)
+        translate = style.get("transform")
+        if isinstance(translate, tuple):
+            tx, ty = translate
+            dx += box_width * tx[1] / 100 if isinstance(tx, tuple) else tx * z
+            dy += box_height * ty[1] / 100 if isinstance(ty, tuple) else ty * z
+        if dx or dy:
+            self._shift(background_index, links_before, dy, dx=dx)
+            box = box.translated(dx, dy)
+        if positioned:
+            waiting = self._absolute.pop()
+            inside = QRectF(box.left() + border[3], box.top() + border[0],
+                            box.width() - border[1] - border[3],
+                            box.height() - border[0] - border[2])
+            for child, child_style, static_x, static_y in waiting:
+                self._place_absolute(child, child_style, inside, static_x + dx, static_y + dy)
 
         if style.get("display") == "list-item" and first_baseline is not None:
             self._marker(element, style, content_x, first_baseline)
@@ -290,7 +354,20 @@ class Layout:
 
     # ---------------------------------------------------------- contents
     def _is_block(self, node) -> bool:
-        return isinstance(node, Element) and self.styles[node].get("display") in BLOCK
+        """A block in the normal flow: floats and positioned boxes are not."""
+        if not isinstance(node, Element):
+            return False
+        style = self.styles[node]
+        return (style.get("display") in BLOCK and style.get("float") not in ("left", "right")
+                and style.get("position") not in ("absolute", "fixed"))
+
+    @staticmethod
+    def _out_of_flow(style: dict) -> str:
+        if style.get("position") in ("absolute", "fixed"):
+            return "positioned"
+        if style.get("float") in ("left", "right"):
+            return "float"
+        return ""
 
     def _control_text(self, element: Element, style: dict):
         """What a form control shows, and in what style; None for nothing.
@@ -354,6 +431,14 @@ class Layout:
             run.clear()
 
         for child in children:
+            out_of_flow = self._out_of_flow(self.styles[child]) if isinstance(child, Element) else ""
+            if out_of_flow == "positioned":
+                self._wait_for_placement(child, self.styles[child], x, cursor + pending_margin)
+                continue
+            if out_of_flow == "float" and not any(
+                    not (isinstance(n, Text) and not n.data.strip()) for n in run):
+                self._place_float(child, self.styles[child], x, cursor + pending_margin, width)
+                continue
             if self._is_block(child):
                 flush_run()
                 child_style = self.styles[child]
@@ -362,8 +447,20 @@ class Layout:
                 bottom = margin[2] or 0.0
                 collapsed = max(pending_margin, top)
                 start = cursor + collapsed - top
+                clear = child_style.get("clear")
+                if clear in ("left", "right", "both"):
+                    below = self._floats_bottom(clear)
+                    if below is not None and start + top < below:
+                        start = below - top
+                # a block starting its own context sits beside floats, not under them
+                block_x, block_width = x, width
+                if self._floats and (child_style.get("overflow") not in (None, "", "visible")
+                                     or child_style.get("display") in ("flow-root", "table",
+                                                                       "flex")):
+                    left, right = self._room(start + top, 1.0, x, width)
+                    block_x, block_width = left, right - left
                 self._last_baseline = None
-                used = self._block(child, child_style, x, start, width)
+                used = self._block(child, child_style, block_x, start, block_width)
                 if first_baseline is None:
                     first_baseline = self._last_baseline
                 cursor = start + used - bottom
@@ -403,9 +500,9 @@ class Layout:
                 if child_style.get("display") == "none":
                     continue
                 if child_style.get("position") in ("absolute", "fixed"):
-                    # not a flex item, by the specification: it is placed on
-                    # its own, which waits for positioning; left out, it no
-                    # longer takes a slot in the row it was meant to float over
+                    # not a flex item, by the specification: placed on its own
+                    # once the container is laid out, from the container's start
+                    self._wait_for_placement(child, child_style, *self._flex_origin)
                     continue
                 items.append((child, child_style))
             elif isinstance(child, Text) and child.data.strip():
@@ -444,21 +541,27 @@ class Layout:
         # an item is always laid out as a block, whatever it was
         item["display"] = "flex" if display in ("flex", "inline-flex") else \
             ("table" if display == "table" else "block")
+        item["_bfc"] = True                  # each item keeps its floats to itself
+        item["float"] = None
         return self._block(element, item, x, y, border_width)
 
     def _scratch_height(self, element, style, border_width) -> float:
         """How tall an item would be at a width, without drawing it."""
         saved, saved_runs = self.out, self._runs
+        held = (self._floats, self._absolute, self._fixed)
+        self._floats, self._absolute, self._fixed = [], [[]], []
         self.out = DisplayList()
         self._runs = []
         try:
             return self._item_box(element, style, 0.0, 0.0, border_width)
         finally:
             self.out, self._runs = saved, saved_runs
+            self._floats, self._absolute, self._fixed = held
 
     def _flex(self, element: Element, style: dict, x: float, y: float, width: float,
               room: float | None = None, least: float | None = None):
         """Lay out a flex container's items; returns (height, first baseline)."""
+        self._flex_origin = (x, y)
         items = self._flex_items(element)
         if not items:
             return 0.0, None
@@ -855,9 +958,14 @@ class Layout:
                 inner_width = max(0.0, cell_width - padding[1] - padding[3] - border[1] - border[3])
                 items_before, links_before = len(self.out.items), len(self.out.links)
                 self.out.items.append(None)      # the cell's background and borders
+                outer_floats, self._floats = self._floats, []
                 inner, baseline = self._contents(
                     cell, cell_style, cell_x + border[3] + padding[3],
                     cursor + border[0] + padding[0], inner_width)
+                cell_floats = max((f["bottom"] for f in self._floats), default=None)
+                if cell_floats is not None:
+                    inner = max(inner, cell_floats - (cursor + border[0] + padding[0]))
+                self._floats = outer_floats
                 height = inner + padding[0] + padding[2] + border[0] + border[2]
                 fixed = _px(cell_style.get("height"), 0.0, auto=None) \
                     if not isinstance(cell_style.get("height"), tuple) else None
@@ -900,24 +1008,25 @@ class Layout:
         return cursor - y, first_baseline
 
     def _shift(self, items_from: int, links_from: int, dy: float,
-               items_to: int | None = None, links_to: int | None = None) -> None:
-        """Move a stretch of what was laid out down by dy."""
+               items_to: int | None = None, links_to: int | None = None,
+               dx: float = 0.0) -> None:
+        """Move a stretch of what was laid out by dx across and dy down."""
         def moved(item):
             if item is None:
                 return None
             kind = item[0]
             if kind == "group":
                 return ("group", [moved(sub) for sub in item[1]])
-            if kind in ("rect", "image"):
-                return (kind, item[1].translated(0, dy)) + tuple(item[2:])
+            if kind in ("rect", "image", "rrect", "rborder"):
+                return (kind, item[1].translated(dx, dy)) + tuple(item[2:])
             if kind == "text":
-                return item[:2] + (item[2] + dy,) + item[3:]
+                return (kind, item[1] + dx, item[2] + dy) + item[3:]
             return item
         for index in range(items_from, len(self.out.items) if items_to is None else items_to):
             self.out.items[index] = moved(self.out.items[index])
         for index in range(links_from, len(self.out.links) if links_to is None else links_to):
             rect, href = self.out.links[index]
-            self.out.links[index] = (rect.translated(0, dy), href)
+            self.out.links[index] = (rect.translated(dx, dy), href)
 
     # ------------------------------------------------------------ inline
     def _items(self, nodes, style: dict, link: str | None, out: list) -> None:
@@ -932,6 +1041,11 @@ class Layout:
                     continue
                 if node.tag == "br":
                     out.append(("break", "", node_style, link))
+                    continue
+                kind = self._out_of_flow(node_style)
+                if kind:
+                    out.append(("absolute" if kind == "positioned" else "float",
+                                node, node_style, link))
                     continue
                 if node.tag == "img":
                     out.append(("image", node, node_style, link))
@@ -953,11 +1067,15 @@ class Layout:
                     self._items(node.children, node_style, href, out)
 
     def _inline(self, nodes, block_style: dict, x: float, y: float, width: float):
+        """Lay out inline content, a line at a time; returns (height, first baseline).
+
+        One pass, building each line and placing it before starting the next,
+        because floats make a line's room depend on how far down it sits.
+        """
         items: list = []
         self._items(nodes, block_style, self._link, items)
         pre = block_style.get("white-space") in ("pre", "pre-wrap", "pre-line", "break-spaces")
-        # words and spaces, each with its style
-        pieces = []          # (text, style, link) or ("\n", ...) for breaks, or image
+        pieces = []
         at_line_start = True
         for kind, payload, style, link in items:
             if kind == "anchor":
@@ -970,6 +1088,9 @@ class Layout:
             if kind == "image":
                 pieces.append((_IMAGE, payload, style, link))
                 at_line_start = False
+                continue
+            if kind in ("float", "absolute"):
+                pieces.append((_FLOAT if kind == "float" else _ABSOLUTE, payload, style, link))
                 continue
             text = payload
             if style.get("white-space") in ("pre", "pre-wrap", "break-spaces"):
@@ -986,47 +1107,133 @@ class Layout:
                 pieces.append((token, style, link))
                 at_line_start = False
 
-        lines = []           # each: list of (x, width, text, style, link, ascent, descent, lh, font) or images
+        _font, block_metrics = self.fonts.get(block_style)
+        guess = block_metrics.lineSpacing()
+        align = block_style.get("text-align", "left")
+        state = {"cursor": y, "first": None}
         line: list = []
-        line_width = 0.0
-        anchors_here = []
+        used = 0.0
+        anchors_here: list = []
+        deferred: list = []                 # floats met mid-line, placed after it
+        span = list(self._room(y, guess, x, width))
 
-        def finish(force=False):
-            nonlocal line, line_width
-            while line and line[-1][2] == " ":
-                line_width -= line[-1][1]
+        def emit(force: bool) -> None:
+            nonlocal line, used
+            while line and line[-1][0] == "text" and line[-1][2] == " ":
+                used -= line[-1][1]
                 line.pop()
-            if line or force:
-                lines.append((line, line_width, list(anchors_here)))
+            cursor = state["cursor"]
+            if line:
+                ascent = max(p[5] for p in line)
+                descent = max(p[6] for p in line)
+                line_height = max(max(p[7] for p in line), ascent + descent)
+                baseline = cursor + (line_height - (ascent + descent)) / 2 + ascent
+                if state["first"] is None:
+                    state["first"] = baseline
+                room = span[1] - span[0]
+                # while measuring, alignment would only push text towards the
+                # far end of a very long line and make its content look enormous
+                offset = 0.0 if self._measuring else {
+                    "center": (room - used) / 2, "right": room - used,
+                    "end": room - used}.get(align, 0.0)
+                pen = span[0] + max(0.0, offset)
+                for anchor in anchors_here:
+                    self.out.anchors.setdefault(anchor, cursor)
+                runs = []
+                run = None
+                for part in line:
+                    if part[0] == "image":
+                        _k, w, element, style, link, h, _d, _lh, _f = part
+                        rect = QRectF(pen, baseline - h, w, h)
+                        self.out.items.append(("image", rect, element.attrs.get("src", "").strip(),
+                                               element.attrs.get("alt", "")))
+                        if link:
+                            self.out.links.append((rect, link))
+                        pen += w
+                        run = None
+                        continue
+                    _k, advance, text, style, link, _a, _d, _lh, font = part
+                    if run is not None and run[0] is style and run[1] == link:
+                        run[3] += text
+                        run[4] += advance
+                    else:
+                        run = [style, link, pen, text, advance, font]
+                        runs.append(run)
+                    pen += advance
+                for style, link, start_x, text, advance, font in runs:
+                    # an inline element's own background, behind its text only
+                    background = style.get("background-color")
+                    if background and background[3] > 0 and style is not block_style:
+                        _f, metrics = self.fonts.get(style)
+                        self.out.items.append(("rect", QRectF(
+                            start_x, baseline - metrics.ascent(), advance,
+                            metrics.ascent() + metrics.descent()), background))
+                    self.out.items.append(("text", start_x, baseline, text, font,
+                                           style.get("color", (0, 0, 0, 255)),
+                                           style.get("text-decoration", "none")))
+                    if link:
+                        self.out.links.append((QRectF(start_x, cursor, advance, line_height), link))
+                cursor += line_height
+            elif force:
+                # an empty line from a <br>: as tall as the block's font
+                for anchor in anchors_here:
+                    self.out.anchors.setdefault(anchor, cursor)
+                cursor += guess
+            else:
+                for anchor in anchors_here:
+                    self.out.anchors.setdefault(anchor, cursor)
             anchors_here.clear()
             line = []
-            line_width = 0.0
+            used = 0.0
+            state["cursor"] = cursor
+            for piece in deferred:
+                self._place_float(piece[1], piece[2], x, cursor, width)
+            deferred.clear()
+            span[:] = self._room(cursor, guess, x, width)
 
         for piece in pieces:
-            if piece[0] is _ANCHOR:
+            kind = piece[0]
+            if kind is _ANCHOR:
                 anchors_here.append(piece[1])
                 continue
-            if piece[0] is _BREAK:
-                finish(force=True)
+            if kind is _BREAK:
+                emit(True)
                 continue
-            if piece[0] is _IMAGE:
+            if kind is _FLOAT:
+                if line:
+                    deferred.append(piece)
+                else:
+                    self._place_float(piece[1], piece[2], x, state["cursor"], width)
+                    span[:] = self._room(state["cursor"], guess, x, width)
+                continue
+            if kind is _ABSOLUTE:
+                self._wait_for_placement(piece[1], piece[2], span[0] + used, state["cursor"])
+                continue
+            if kind is _IMAGE:
                 element, style, link = piece[1], piece[2], piece[3]
                 w, h = self._image_size(element, style, width)
                 if w <= 0 or h <= 0:
                     continue
-                if line and line_width + w > width:
-                    finish()
+                if line and used + w > span[1] - span[0]:
+                    emit(False)
                 line.append(("image", w, element, style, link, h, 0.0, h, None))
-                line_width += w
+                used += w
                 continue
             text, style, link = piece
-            font, metrics = self.fonts.get(style)
-            advance = metrics.horizontalAdvance(text)
             if text == " " and not line:
                 continue
-            if (not pre and style.get("white-space") != "nowrap" and text != " "
-                    and line and line_width + advance > width):
-                finish()
+            font, metrics = self.fonts.get(style)
+            advance = metrics.horizontalAdvance(text)
+            wraps = not pre and style.get("white-space") != "nowrap"
+            if wraps and text != " " and line and used + advance > span[1] - span[0]:
+                emit(False)
+            # a word with no room beside floats goes down below them
+            steps = 0
+            while (wraps and not line and advance > span[1] - span[0] + 0.01
+                   and self._floats_beside(state["cursor"], guess, x, width) and steps < 50):
+                state["cursor"] = self._next_float_bottom(state["cursor"], guess, x, width)
+                span[:] = self._room(state["cursor"], guess, x, width)
+                steps += 1
             size = style["font-size"] * self.zoom
             lh = style.get("line-height", ("normal",))
             if lh[0] == "factor":
@@ -1037,70 +1244,148 @@ class Layout:
                 line_height = metrics.lineSpacing()
             line.append(("text", advance, text, style, link, metrics.ascent(),
                          metrics.descent(), line_height, font))
-            line_width += advance
-        finish()
+            used += advance
+        emit(False)
+        return state["cursor"] - y, state["first"]
 
-        align = block_style.get("text-align", "left")
-        cursor = y
-        first_baseline = None
-        for parts, used, anchors in lines:
-            if not parts:
-                # an empty line from a <br>: as tall as the block's font
-                font, metrics = self.fonts.get(block_style)
-                cursor += metrics.lineSpacing()
-                continue
-            ascent = max(p[5] for p in parts)
-            descent = max(p[6] for p in parts)
-            line_height = max(max(p[7] for p in parts), ascent + descent)
-            baseline = cursor + (line_height - (ascent + descent)) / 2 + ascent
-            if first_baseline is None:
-                first_baseline = baseline
-            # while measuring, alignment would only push text towards the far
-            # end of a very long line and make its content look enormous
-            offset = 0.0 if self._measuring else {
-                "center": (width - used) / 2, "right": width - used,
-                "end": width - used}.get(align, 0.0)
-            pen = x + max(0.0, offset)
-            for anchor in anchors:
-                self.out.anchors.setdefault(anchor, cursor)
-            run = None                  # the text run being extended
-            for part in parts:
-                if part[0] == "image":
-                    _k, w, element, style, link, h, _d, _lh, _f = part
-                    rect = QRectF(pen, baseline - h, w, h)
-                    self.out.items.append(("image", rect, element.attrs.get("src", "").strip(),
-                                           element.attrs.get("alt", "")))
-                    if link:
-                        self.out.links.append((rect, link))
-                    pen += w
-                    run = None
-                    continue
-                _k, advance, text, style, link, _a, _d, _lh, font = part
-                if run is not None and run[0] is style and run[1] == link:
-                    run[3] += text
-                    run[4] += advance
+    # ------------------------------------------------------------ floats
+    def _room(self, y: float, height: float, x: float, width: float):
+        """The room left beside the floats, from y for height: (left, right)."""
+        left, right = x, x + width
+        for f in self._floats:
+            if f["top"] < y + height and f["bottom"] > y:
+                if f["side"] == "left":
+                    left = max(left, f["right"])
                 else:
-                    run = [style, link, pen, text, advance, font]
-                    self._runs.append((run, baseline, cursor, line_height))
-                pen += advance
-            for run, run_baseline, top, height in self._runs:
-                style, link, start_x, text, advance, font = run
-                # an inline element's own background, behind its text only
-                background = style.get("background-color")
-                if background and background[3] > 0 and style is not block_style:
-                    _f, metrics = self.fonts.get(style)
-                    self.out.items.append(("rect", QRectF(
-                        start_x, run_baseline - metrics.ascent(), advance,
-                        metrics.ascent() + metrics.descent()), background))
-                self.out.items.append(("text", start_x, run_baseline, text, font,
-                                       style.get("color", (0, 0, 0, 255)),
-                                       style.get("text-decoration", "none")))
-                if link:
-                    self.out.links.append((QRectF(start_x, top, advance, height), link))
-            self._runs = []
-            cursor += line_height
-        return cursor - y, first_baseline
+                    right = min(right, f["left"])
+        return left, max(left, right)
 
+    def _floats_beside(self, y: float, height: float, x: float, width: float) -> bool:
+        return any(f["top"] < y + height and f["bottom"] > y for f in self._floats)
+
+    def _next_float_bottom(self, y: float, height: float, x: float, width: float) -> float:
+        bottoms = [f["bottom"] for f in self._floats
+                   if f["top"] < y + height and f["bottom"] > y]
+        return min(bottoms) if bottoms else y + height
+
+    def _floats_bottom(self, side: str):
+        bottoms = [f["bottom"] for f in self._floats if side == "both" or f["side"] == side]
+        return max(bottoms) if bottoms else None
+
+    def _place_float(self, element: Element, style: dict, x: float, y: float, width: float) -> None:
+        """Place a float against the left or right edge, as high as it fits."""
+        side = style.get("float")
+        margin, padding, border = self._edges(style, width)
+        m_top, m_right, m_bottom, m_left = (m or 0.0 for m in margin)
+        edges = padding[1] + padding[3] + border[1] + border[3]
+        if element.tag == "img":
+            image_w, image_h = self._image_size(element, style, width)
+            if image_w <= 0 or image_h <= 0:
+                return
+            border_width = image_w
+        else:
+            fixed = self._length(style.get("width"), width)
+            if fixed is not None:
+                border_width = fixed + edges
+            else:
+                # as wide as its content, up to the room there is
+                border_width = min(self._natural_width(element, style, False) + edges,
+                                   max(0.0, width - m_left - m_right))
+            low = self._length(style.get("min-width"), width)
+            high = self._length(style.get("max-width"), width)
+            if high is not None:
+                border_width = min(border_width, high + edges)
+            if low is not None:
+                border_width = max(border_width, low + edges)
+        outer = border_width + m_left + m_right
+        top = y
+        for _step in range(100):
+            left, right = self._room(top, 1.0, x, width)
+            if right - left >= outer - 0.01 or not self._floats_beside(top, 1.0, x, width):
+                break
+            top = self._next_float_bottom(top, 1.0, x, width)
+        left, right = self._room(top, 1.0, x, width)
+        box_x = left + m_left if side == "left" else right - m_right - border_width
+        box_y = top + m_top
+        if element.tag == "img":
+            rect = QRectF(box_x, box_y, border_width, image_h)
+            self.out.items.append(("image", rect, element.attrs.get("src", "").strip(),
+                                   element.attrs.get("alt", "")))
+            if self._link:
+                self.out.links.append((rect, self._link))
+            height = image_h
+        else:
+            height = self._item_box(element, style, box_x, box_y, border_width)
+        self._floats.append({"side": side, "top": top, "left": box_x - m_left,
+                             "right": box_x + border_width + m_right,
+                             "bottom": box_y + height + m_bottom})
+
+    # --------------------------------------------------------- positioning
+    def _wait_for_placement(self, element: Element, style: dict, static_x: float,
+                            static_y: float) -> None:
+        """Hold a positioned box until its containing block is laid out."""
+        if style.get("position") == "fixed":
+            self._fixed.append((element, style, static_x, static_y))
+        else:
+            self._absolute[-1].append((element, style, static_x, static_y))
+
+    def _place_absolute(self, element: Element, style: dict, block: QRectF,
+                        static_x: float, static_y: float) -> None:
+        """Place an absolutely positioned box against its containing block."""
+        margin, padding, border = self._edges(style, block.width())
+        m_top, m_right, m_bottom, m_left = (m or 0.0 for m in margin)
+        edges_x = padding[1] + padding[3] + border[1] + border[3]
+        edges_y = padding[0] + padding[2] + border[0] + border[2]
+        left = self._length(style.get("left"), block.width())
+        right = self._length(style.get("right"), block.width())
+        top = self._length(style.get("top"), block.height(), vertical=True)
+        bottom = self._length(style.get("bottom"), block.height(), vertical=True)
+        fixed = self._length(style.get("width"), block.width())
+        if element.tag == "img":
+            image_w, image_h = self._image_size(element, style, block.width())
+            border_width = image_w
+        elif fixed is not None:
+            border_width = fixed + edges_x
+        elif left is not None and right is not None:
+            border_width = max(0.0, block.width() - left - right - m_left - m_right)
+        else:
+            # shrink to fit: as wide as its content, up to the room there is
+            room = block.width() - (left or 0.0) - (right or 0.0) - m_left - m_right
+            border_width = min(self._natural_width(element, style, False) + edges_x,
+                               max(0.0, room))
+        high = self._length(style.get("max-width"), block.width())
+        low = self._length(style.get("min-width"), block.width())
+        if high is not None:
+            border_width = min(border_width, high + edges_x)
+        if low is not None:
+            border_width = max(border_width, low + edges_x)
+        if left is not None:
+            box_x = block.left() + left + m_left
+        elif right is not None:
+            box_x = block.right() - right - m_right - border_width
+        else:
+            box_x = static_x + m_left
+        forced = None
+        fixed_height = self._length(style.get("height"), block.height(), vertical=True)
+        if fixed_height is not None:
+            forced = fixed_height + edges_y
+        elif top is not None and bottom is not None:
+            forced = max(0.0, block.height() - top - bottom - m_top - m_bottom)
+        box_y = block.top() + top + m_top if top is not None else static_y + m_top
+        items_before, links_before = len(self.out.items), len(self.out.links)
+        if element.tag == "img":
+            if image_w <= 0 or image_h <= 0:
+                return
+            rect = QRectF(box_x, box_y, image_w, image_h)
+            self.out.items.append(("image", rect, element.attrs.get("src", "").strip(),
+                                   element.attrs.get("alt", "")))
+            height = image_h
+        else:
+            height = self._item_box(element, style, box_x, box_y, border_width, forced)
+        if top is None and bottom is not None:
+            # held by its bottom edge: now that its height is known, move it there
+            target = block.bottom() - bottom - m_bottom - height
+            self._shift(items_before, links_before, target - box_y)
 
 class _Measure:
     """Lay something out into a scratch display list, to learn how wide it is."""
@@ -1111,6 +1396,8 @@ class _Measure:
     def extent(self, element, style, width: float) -> float:
         saved = self.layout.out
         was_measuring = self.layout._measuring
+        held = (self.layout._floats, self.layout._absolute, self.layout._fixed)
+        self.layout._floats, self.layout._absolute, self.layout._fixed = [], [[]], []
         self.layout.out = DisplayList()
         self.layout._measuring = True
         try:
@@ -1125,6 +1412,19 @@ class _Measure:
         finally:
             self.layout.out = saved
             self.layout._measuring = was_measuring
+            self.layout._floats, self.layout._absolute, self.layout._fixed = held
+
+
+def _bottom_edge(item) -> float:
+    if item is None:
+        return 0.0
+    if item[0] == "group":
+        return max((_bottom_edge(sub) for sub in item[1]), default=0.0)
+    if item[0] in ("rect", "image", "rrect", "rborder"):
+        return item[1].bottom()
+    if item[0] == "text":
+        return item[2] + QFontMetricsF(item[4]).descent()
+    return 0.0
 
 
 def _right_edge(item) -> float:

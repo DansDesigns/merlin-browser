@@ -437,7 +437,8 @@ class MerlinView(QWidget):
         if self._document is None:
             return
         self._display = Layout(self._document, self._styles, self._page_width(), self._zoom,
-                               images=self._images).run()
+                               images=self._images,
+                               viewport_height=float(max(1, self.height()))).run()
         self._update_scrollbar()
         self.update()
 
@@ -516,8 +517,13 @@ class MerlinView(QWidget):
             visible = QRectF(0, self._scroll, self.width(), self.height())
             if self._found_rect is not None:
                 painter.fillRect(self._found_rect.adjusted(-1, -1, 1, 1), QColor(255, 214, 0, 200))
-            paint(painter, self._display, visible,
-                  {k: v for k, v in self._images.items() if v is not False})
+            pictures = {k: v for k, v in self._images.items() if v is not False}
+            paint(painter, self._display, visible, pictures)
+            if self._display.fixed is not None:
+                # position: fixed stays where it is on the window as the page scrolls
+                painter.resetTransform()
+                paint(painter, self._display.fixed,
+                      QRectF(0, 0, self.width(), self.height()), pictures)
         painter.end()
 
     def wheelEvent(self, event) -> None:                      # noqa: N802
@@ -540,6 +546,11 @@ class MerlinView(QWidget):
         if not self._display:
             return ""
         point = position.toPointF() if hasattr(position, "toPointF") else position
+        if self._display.fixed is not None:
+            # fixed boxes sit on top, in window coordinates
+            for rect, href in self._display.fixed.links:
+                if rect.contains(point):
+                    return href
         point = point.__class__(point.x(), point.y() + self._scroll)
         for rect, href in self._display.links:
             if rect.contains(point):

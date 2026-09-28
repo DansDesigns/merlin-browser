@@ -616,8 +616,11 @@ class Styler:
                 return int(float(lowered))
             except ValueError:
                 return 0
+        if name == "transform":
+            return _translation(lowered, font, root_size, self.viewport)
         if name in ("flex-direction", "flex-wrap", "justify-content", "align-items",
-                    "align-self", "align-content", "vertical-align", "border-collapse"):
+                    "align-self", "align-content", "vertical-align", "border-collapse",
+                    "clear"):
             return lowered.split()[-1] if lowered else ""
         if name in ("display", "text-align", "white-space", "font-style",
                     "text-decoration", "list-style-type", "visibility",
@@ -634,6 +637,7 @@ class Styler:
         if (name.startswith(("margin-", "padding-", "border-")) and name.endswith(("width", "top", "right", "bottom", "left"))) \
                 or name in ("width", "max-width", "min-width", "height", "min-height", "max-height",
                             "text-indent", "row-gap", "column-gap", "flex-basis",
+                            "top", "right", "bottom", "left",
                             "border-top-left-radius", "border-top-right-radius",
                             "border-bottom-right-radius", "border-bottom-left-radius"):
             if name.startswith("border-") and name.endswith("-width"):
@@ -742,6 +746,13 @@ def expand_shorthand(name: str, value: str) -> list:
         return found
     if name == "text-decoration-line":
         return [("text-decoration", value)]
+    if name == "inset":
+        values = [v for v in value.split() if v]
+        if not values:
+            return []
+        return [(side, v) for side, v in zip(("top", "right", "bottom", "left"), _sides(values))]
+    if name == "overflow-x" or name == "overflow-y":
+        return [("overflow", value)] if value.strip().lower() not in ("visible", "") else []
     if name == "gap" or name == "grid-gap":
         values = [v for v in value.split() if v]
         if not values:
@@ -881,3 +892,28 @@ def presentational_hints(element: Element) -> list:
         if element.attrs.get("nowrap") is not None:
             found.append(("white-space", "nowrap"))
     return found
+
+
+def _translation(value: str, font: float, root_size: float, viewport):
+    """The translate() parts of a transform, as (x, y) lengths; None if none.
+
+    Only translation is taken: it is how positioned elements are centred
+    (left: 50%; transform: translateX(-50%)). Each part is px, or a
+    percentage of the element's own size, which only layout knows.
+    """
+    x = y = 0.0
+    found = False
+    for kind, body in re.findall(r"(translate[xy]?|translate3d)\(([^)]*)\)", value):
+        parts = [p.strip() for p in body.split(",")]
+        if kind == "translatex":
+            parts = [parts[0], "0"]
+        elif kind == "translatey":
+            parts = ["0", parts[0]]
+        elif len(parts) == 1:
+            parts.append("0")
+        lengths = [parse_length(p, font, root_size, viewport) for p in parts[:2]]
+        if any(length is None or length == "auto" for length in lengths):
+            continue
+        x, y = lengths
+        found = True
+    return (x, y) if found else None

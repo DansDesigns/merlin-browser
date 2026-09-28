@@ -6,6 +6,26 @@ the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
 1.6.98
+  Merlin Engine lays out floats and positioned boxes, the biggest layout
+  gaps left on real sites.
+  Floats: left and right, stacking side by side and dropping below when there
+  is no room; text flows around them and returns to the full width below; clear
+  moves content past them; a block that starts its own context, with overflow:
+  hidden, flow-root, a table or a flex container, grows to hold its floats and
+  sits beside them rather than under, the classic sidebar layout; a floated
+  image in a paragraph has the text wrap around it.
+  Positioning: relative moves a box once laid out without disturbing its
+  neighbours; absolute places a box against its nearest positioned ancestor by
+  top, right, bottom and left, stretching it between two sides given, shrinking
+  it to its content otherwise, and leaving it where it would have been when no
+  side is given; fixed holds a box against the window, so a header stays at
+  the top as the page scrolls; translate() in a transform moves a box, so
+  left: 50% with translateX(-50%) centres it. Also the inset shorthand.
+  Checked against the positions CSS requires, 21 cases, alongside the 56
+  earlier engine checks, which all still pass after the line layout was
+  rewritten to place one line at a time.
+
+1.6.97
   Merlin Engine lays out flexbox, which most modern sites and Merlin's own
   new-tab page are built with: rows and columns, reversed or not, wrapping
   onto more lines; flex-basis, flex-grow sharing out spare room and
@@ -19,8 +39,6 @@ version.txt and nowhere else.
   be clicked anywhere on them, and form fields drawn with their value or
   placeholder, though not yet usable. The new-tab page now looks much as it
   does in Chromium.
-
-1.6.97
   Fixed: 1.6.96 would not start on an existing Merlin.exe, even with Merlin
   Engine switched off ("No module named 'html.parser'"). The browser window
   imported the engine as Merlin started, the engine needs html.parser, and
