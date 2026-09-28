@@ -25,10 +25,13 @@ from .dom import Element, Text
 # once taken for one of these.
 _IMAGE, _ANCHOR, _BREAK = object(), object(), object()
 _FLOAT, _ABSOLUTE = object(), object()
+_BOX = object()                          # an inline-block, or an inline <svg>
+
+INLINE_BOXES = ("inline-block", "inline-flex", "inline-grid", "inline-table")
 
 BLOCK = {"block", "list-item", "table", "table-row", "table-row-group",
          "table-header-group", "table-footer-group", "flex", "grid", "table-caption",
-         "table-cell"}
+         "table-cell", "grid"}
 
 
 class DisplayList:
@@ -227,7 +230,7 @@ class Layout:
                        or position in ("absolute", "fixed")
                        or style.get("overflow") not in (None, "", "visible")
                        or display in ("flow-root", "table", "table-cell", "inline-block",
-                                      "flex", "inline-flex"))
+                                      "flex", "inline-flex", "grid", "inline-grid"))
         if new_context:
             outer_floats, self._floats = self._floats, []
 
@@ -242,6 +245,12 @@ class Layout:
                         box_x += spare / 2
                         content_x += spare / 2
             inner_height, first_baseline = self._table(element, style, content_x, content_y, content_width)
+        elif element.tag == "svg":
+            inner_height, first_baseline = self._svg_block(element, style, content_x,
+                                                           content_y, content_width)
+        elif style.get("display") in ("grid", "inline-grid"):
+            inner_height, first_baseline = self._grid(
+                element, style, content_x, content_y, content_width, room=fixed_height)
         elif style.get("display") in ("flex", "inline-flex"):
             inner_height, first_baseline = self._flex(
                 element, style, content_x, content_y, content_width,
@@ -271,8 +280,13 @@ class Layout:
         radius = self._length(style.get("border-top-left-radius"), box_width) or 0.0
         radius = min(radius, box_width / 2, box_height / 2)
         paint = []
+        hidden = style.get("visibility") in ("hidden", "collapse")
+        if hidden:
+            colour = None                       # keeps its space, draws nothing
         if colour and colour[3] > 0 and not (root_level and self.out.canvas == colour):
             paint.append(("rrect", box, colour, radius) if radius > 0.5 else ("rect", box, colour))
+        if hidden:
+            border = [0.0, 0.0, 0.0, 0.0]
         if radius > 0.5 and len(set(border)) == 1 and border[0] > 0:
             # one border all round, drawn along the rounded edge
             paint.append(("rborder", box, style.get("border-top-color") or style.get("color"),
@@ -521,6 +535,10 @@ class Layout:
 
     def _natural_width(self, element: Element, style: dict, narrowest: bool) -> float:
         """An item's content width with no line breaks, or broken at every chance."""
+        if element.tag == "svg":
+            # an <svg>'s size is its own, from its attributes, not from what
+            # is inside it; measured by contents it came out 0 wide
+            return self._svg_size(element, style, 100000.0)[0]
         return _Measure(self).extent(element, style, 1.0 if narrowest else 100000.0)
 
     def _item_box(self, element: Element, style: dict, x: float, y: float,
@@ -540,6 +558,7 @@ class Layout:
         display = item.get("display")
         # an item is always laid out as a block, whatever it was
         item["display"] = "flex" if display in ("flex", "inline-flex") else \
+            "grid" if display in ("grid", "inline-grid") else \
             ("table" if display == "table" else "block")
         item["_bfc"] = True                  # each item keeps its floats to itself
         item["float"] = None
@@ -807,7 +826,11 @@ class Layout:
         picture = self.images.get(element.attrs.get("src", "").strip())
         if picture is False:
             return 0.0, 0.0                     # blocked, or failed: takes no room
-        natural = (picture.width(), picture.height()) if picture is not None else None
+        # in device-independent pixels: an image drawn at twice its size for
+        # sharpness, as SVG ones are, is still its own size on the page
+        natural = ((picture.width() / picture.devicePixelRatio(),
+                    picture.height() / picture.devicePixelRatio())
+                   if picture is not None else None)
         w = _px(style.get("width"), available, auto=None)
         h = _px(style.get("height"), 0.0, auto=None) \
             if not isinstance(style.get("height"), tuple) else None
@@ -1017,7 +1040,7 @@ class Layout:
             kind = item[0]
             if kind == "group":
                 return ("group", [moved(sub) for sub in item[1]])
-            if kind in ("rect", "image", "rrect", "rborder"):
+            if kind in ("rect", "image", "rrect", "rborder", "svg"):
                 return (kind, item[1].translated(dx, dy)) + tuple(item[2:])
             if kind == "text":
                 return (kind, item[1] + dx, item[2] + dy) + item[3:]
@@ -1049,6 +1072,10 @@ class Layout:
                     continue
                 if node.tag == "img":
                     out.append(("image", node, node_style, link))
+                    continue
+                if node.tag == "svg" or display in INLINE_BOXES:
+                    # laid out as a box of its own, sitting on the line
+                    out.append(("box", node, node_style, link))
                     continue
                 if node.tag in ("input", "textarea", "select"):
                     shown = self._control_text(node, node_style)
@@ -1091,6 +1118,10 @@ class Layout:
                 continue
             if kind in ("float", "absolute"):
                 pieces.append((_FLOAT if kind == "float" else _ABSOLUTE, payload, style, link))
+                continue
+            if kind == "box":
+                pieces.append((_BOX, payload, style, link))
+                at_line_start = False
                 continue
             text = payload
             if style.get("white-space") in ("pre", "pre-wrap", "break-spaces"):
@@ -1142,6 +1173,22 @@ class Layout:
                 runs = []
                 run = None
                 for part in line:
+                    if part[0] == "box":
+                        _k, w, element, style, link, ascent, descent, _lh, extra = part
+                        m_left, m_top, border_width, _m_bottom = extra
+                        top = baseline - ascent + m_top
+                        if element.tag == "svg":
+                            self._svg_item(element, style, QRectF(pen + m_left, top,
+                                                                  border_width,
+                                                                  ascent + descent - m_top - extra[3]))
+                        else:
+                            saved_link = self._link
+                            self._link = link
+                            self._item_box(element, style, pen + m_left, top, border_width)
+                            self._link = saved_link
+                        pen += w
+                        run = None
+                        continue
                     if part[0] == "image":
                         _k, w, element, style, link, h, _d, _lh, _f = part
                         rect = QRectF(pen, baseline - h, w, h)
@@ -1161,6 +1208,8 @@ class Layout:
                         runs.append(run)
                     pen += advance
                 for style, link, start_x, text, advance, font in runs:
+                    if style.get("visibility") in ("hidden", "collapse"):
+                        continue                   # its room is kept, nothing drawn
                     # an inline element's own background, behind its text only
                     background = style.get("background-color")
                     if background and background[3] > 0 and style is not block_style:
@@ -1209,6 +1258,15 @@ class Layout:
             if kind is _ABSOLUTE:
                 self._wait_for_placement(piece[1], piece[2], span[0] + used, state["cursor"])
                 continue
+            if kind is _BOX:
+                part = self._inline_box(piece[1], piece[2], piece[3], width)
+                if part is None:
+                    continue
+                if line and used + part[1] > span[1] - span[0]:
+                    emit(False)
+                line.append(part)
+                used += part[1]
+                continue
             if kind is _IMAGE:
                 element, style, link = piece[1], piece[2], piece[3]
                 w, h = self._image_size(element, style, width)
@@ -1247,6 +1305,458 @@ class Layout:
             used += advance
         emit(False)
         return state["cursor"] - y, state["first"]
+
+    # ------------------------------------------------------- inline boxes
+    def _inline_box(self, element: Element, style: dict, link, available: float):
+        """An inline-block or inline <svg>, sized, as a part of a line.
+
+        Its text baseline sits on the line's baseline, as in browsers; a box
+        with no text sits with its bottom margin edge there.
+        """
+        margin, padding, border = self._edges(style, available)
+        m_top, m_right, m_bottom, m_left = (m or 0.0 for m in margin)
+        edges = padding[1] + padding[3] + border[1] + border[3]
+        if element.tag == "svg":
+            w, h = self._svg_size(element, style, available)
+            if w <= 0 or h <= 0:
+                return None
+            ascent = h + m_top + m_bottom
+            return ("box", w + m_left + m_right, element, style, link, ascent, 0.0, ascent,
+                    (m_left, m_top, w, m_bottom))
+        fixed = self._length(style.get("width"), available)
+        if fixed is not None:
+            border_width = fixed + edges
+        elif element.tag in ("input", "select", "textarea") and \
+                element.attrs.get("type", "text").lower() not in (
+                    "checkbox", "radio", "submit", "button", "reset", "hidden"):
+            # a text field with no width: as browsers, about 20 characters wide
+            try:
+                characters = int(element.attrs.get("size", "20"))
+            except ValueError:
+                characters = 20
+            _font, metrics = self.fonts.get(style)
+            border_width = characters * metrics.averageCharWidth() + edges
+        else:
+            border_width = self._natural_width(element, style, False) + edges
+        border_width = min(border_width, max(1.0, available - m_left - m_right))
+        high = self._length(style.get("max-width"), available)
+        low = self._length(style.get("min-width"), available)
+        if high is not None:
+            border_width = min(border_width, high + edges)
+        if low is not None:
+            border_width = max(border_width, low + edges)
+        saved, saved_runs = self.out, self._runs
+        held = (self._floats, self._absolute, self._fixed)
+        self._floats, self._absolute, self._fixed = [], [[]], []
+        self.out = DisplayList()
+        self._runs = []
+        try:
+            self._last_baseline = None
+            height = self._item_box(element, style, 0.0, 0.0, border_width)
+            baseline = self._last_baseline
+        finally:
+            self.out, self._runs = saved, saved_runs
+            self._floats, self._absolute, self._fixed = held
+        if baseline is None:
+            ascent, descent = height + m_top + m_bottom, 0.0
+        else:
+            ascent, descent = baseline + m_top, height - baseline + m_bottom
+        return ("box", border_width + m_left + m_right, element, style, link, ascent, descent,
+                ascent + descent, (m_left, m_top, border_width, m_bottom))
+
+    # ---------------------------------------------------------------- svg
+    def _svg_size(self, element: Element, style: dict, available: float):
+        """An <svg>'s drawn size: CSS, then its attributes, then its viewBox."""
+        w = self._length(style.get("width"), available)
+        h = self._length(style.get("height"), 0.0, vertical=True)
+
+        def attribute(name):
+            value = element.attrs.get(name, "").strip()
+            try:
+                return float(value.rstrip("px")) * self.zoom if value and not value.endswith("%") else None
+            except ValueError:
+                return None
+
+        w = w if w is not None else attribute("width")
+        h = h if h is not None else attribute("height")
+        box = [float(v) for v in re.split(r"[\s,]+", element.attrs.get("viewbox", "").strip())
+               if re.match(r"^-?[\d.]+$", v)]
+        ratio = box[2] / box[3] if len(box) == 4 and box[3] else None
+        if w is None and h is None:
+            w, h = (300.0 * self.zoom, 150.0 * self.zoom) if not ratio else \
+                (min(available, 300.0 * self.zoom), min(available, 300.0 * self.zoom) / ratio)
+        elif w is None:
+            w = h * ratio if ratio else h
+        elif h is None:
+            h = w / ratio if ratio else w
+        return w, h
+
+    def _svg_item(self, element: Element, style: dict, rect: QRectF) -> None:
+        if style.get("visibility") in ("hidden", "collapse"):
+            return
+        self.out.items.append(("svg", rect, svg_markup(element, style)))
+        if self._link:
+            self.out.links.append((rect, self._link))
+
+    def _svg_block(self, element: Element, style: dict, x: float, y: float, width: float):
+        """An <svg> laid out as a block, a flex or a grid item."""
+        w, h = self._svg_size(element, style, width)
+        fixed_w = self._length(style.get("width"), width)
+        if fixed_w is None and style.get("display") in ("block",) and element.attrs.get("width") is None:
+            w = width
+        self._svg_item(element, style, QRectF(x, y, w, h))
+        return h, None
+
+    # ---------------------------------------------------------------- grid
+    def _grid_items(self, element: Element, x: float, y: float):
+        items = []
+        for child in element.children:
+            if isinstance(child, Element):
+                child_style = self.styles[child]
+                if child_style.get("display") == "none":
+                    continue
+                if child_style.get("position") in ("absolute", "fixed"):
+                    self._wait_for_placement(child, child_style, x, y)
+                    continue
+                items.append((child, child_style))
+            elif isinstance(child, Text) and child.data.strip():
+                anonymous = Element("span")
+                anonymous.append(Text(child.data))
+                anonymous.parent = element
+                inherited = {k: v for k, v in self.styles[element].items()
+                             if k in ("color", "font-family", "font-size", "font-weight",
+                                      "font-style", "line-height", "text-align",
+                                      "white-space", "text-decoration")}
+                inherited["display"] = "block"
+                items.append((anonymous, inherited))
+        return sorted(items, key=lambda pair: pair[1].get("order", 0))
+
+    def _expand_tracks(self, tracks: list, room: float, gap: float):
+        """A track list with repeat(auto-fill / auto-fit, ...) resolved for room."""
+        fixed_room = 0.0
+        repeats = None
+        for track in tracks:
+            if track[0] == "repeat":
+                repeats = track
+            else:
+                fixed_room += self._track_floor(track, room) + gap
+        out = []
+        for track in tracks:
+            if track[0] != "repeat":
+                out.append(track)
+                continue
+            inner = track[2] or [("auto",)]
+            each = sum(max(self._track_floor(t, room), 1.0) for t in inner) + gap * len(inner)
+            count = max(1, int((room - fixed_room + gap) // each)) if each > 0 else 1
+            out.extend(inner * count)
+        return out, (repeats[1] if repeats else "")
+
+    def _track_floor(self, track, room: float) -> float:
+        """The smallest a track can be before content is considered."""
+        kind = track[0]
+        if kind == "px":
+            return track[1] * self.zoom
+        if kind == "pct":
+            return room * track[1] / 100
+        if kind == "minmax":
+            return self._track_floor(track[1], room)
+        return 0.0
+
+    @staticmethod
+    def _grid_line(value) -> tuple:
+        """A placement value: ("line", n), ("span", n), ("name", s) or ("auto",)."""
+        value = (value or "auto").strip()
+        if value in ("auto", ""):
+            return ("auto",)
+        if value.startswith("span"):
+            try:
+                return ("span", max(1, int(value.split()[1])))
+            except (IndexError, ValueError):
+                return ("span", 1)
+        try:
+            return ("line", int(value))
+        except ValueError:
+            return ("name", value)
+
+    def _grid(self, element: Element, style: dict, x: float, y: float, width: float,
+              room: float | None = None):
+        """Lay out a grid container's items; returns (height, first baseline)."""
+        items = self._grid_items(element, x, y)
+        if not items:
+            return 0.0, None
+        column_gap = self._length(style.get("column-gap"), width) or 0.0
+        row_gap = self._length(style.get("row-gap"), width) or 0.0
+        areas = style.get("grid-template-areas") or []
+        column_tracks, fit = self._expand_tracks(style.get("grid-template-columns") or [],
+                                                 width, column_gap)
+        if not column_tracks and areas:
+            column_tracks = [("auto",)] * max(len(r) for r in areas)
+        if not column_tracks:
+            column_tracks = [("auto",)]
+        row_tracks = list(style.get("grid-template-rows") or [])
+        row_tracks = [t for t in row_tracks if t[0] != "repeat"]
+        auto_rows = [t for t in (style.get("grid-auto-rows") or []) if t[0] != "repeat"] or [("auto",)]
+
+        # named areas as (row, column, rows, columns), 0-based
+        named = {}
+        for r, row in enumerate(areas):
+            for c, name in enumerate(row):
+                if name == ".":
+                    continue
+                top, left, bottom, right = named.get(name, (r, c, r, c))
+                named[name] = (min(top, r), min(left, c), max(bottom, r), max(right, c))
+        count = len(column_tracks)
+
+        def resolve(start, end, lines):
+            """Start line and span on one axis; None when left to auto-placement."""
+            a, b = self._grid_line(start), self._grid_line(end)
+
+            def number(line):
+                # 0-based line index; -1 is the last line, which is line
+                # count + 1: in a four-column grid, index 4
+                n = line[1]
+                return n - 1 if n > 0 else max(0, lines + 1 + n)
+
+            if a[0] == "line" and b[0] == "line":
+                first, last = number(a), number(b)
+                if last < first:
+                    first, last = last, first
+                return first, max(1, last - first)
+            if a[0] == "line":
+                return number(a), b[1] if b[0] == "span" else 1
+            if b[0] == "line":
+                span = a[1] if a[0] == "span" else 1
+                return max(0, number(b) - span), span
+            return None, (a[1] if a[0] == "span" else b[1] if b[0] == "span" else 1)
+
+        placed = []                    # (element, style, row, column, rows, columns)
+        taken = set()
+        waiting = []
+        for child, child_style in items:
+            area = child_style.get("grid-area-name")
+            if area in named:
+                top, left, bottom, right = named[area]
+                placed.append((child, child_style, top, left, bottom - top + 1, right - left + 1))
+                continue
+            column, columns = resolve(child_style.get("grid-column-start"),
+                                      child_style.get("grid-column-end"), count)
+            row, rows = resolve(child_style.get("grid-row-start"),
+                                child_style.get("grid-row-end"), len(row_tracks) or 1)
+            columns = min(columns, max(1, count))
+            if column is not None and row is not None:
+                placed.append((child, child_style, row, column, rows, columns))
+            else:
+                waiting.append((child, child_style, row, column, rows, columns))
+        for _c, _s, row, column, rows, columns in placed:
+            for r in range(row, row + rows):
+                for c in range(column, column + columns):
+                    taken.add((r, c))
+        cursor = [0, 0]
+        for child, child_style, row, column, rows, columns in waiting:
+            r, c = (row, 0) if row is not None else tuple(cursor)
+            if column is not None:
+                c = column
+            while True:
+                if c + columns > max(count, columns):
+                    r, c = r + 1, (column if column is not None else 0)
+                    continue
+                if all((rr, cc) not in taken for rr in range(r, r + rows)
+                       for cc in range(c, c + columns)):
+                    break
+                if column is not None:
+                    r += 1
+                else:
+                    c += 1
+            placed.append((child, child_style, r, c, rows, columns))
+            for rr in range(r, r + rows):
+                for cc in range(c, c + columns):
+                    taken.add((rr, cc))
+            if row is None and column is None:
+                cursor = [r, c + columns]
+        count = max(count, max(p[3] + p[5] for p in placed))
+        if fit == "auto-fit":
+            # auto-fit folds away columns no item uses
+            used = max(p[3] + p[5] for p in placed)
+            column_tracks = column_tracks[:max(used, 1)]
+        while len(column_tracks) < count:
+            column_tracks.append(("auto",))
+        row_count = max(p[2] + p[4] for p in placed)
+        while len(row_tracks) < row_count:
+            row_tracks.append(auto_rows[(len(row_tracks)) % len(auto_rows)])
+
+        # ---------- column sizes
+        def content(child, child_style, narrowest):
+            _m, padding, border = self._edges(child_style, width)
+            edges = padding[1] + padding[3] + border[1] + border[3]
+            fixed = self._length(child_style.get("width"), width)
+            if fixed is not None:
+                return fixed + edges
+            if child.tag == "svg":
+                return self._svg_size(child, child_style, width)[0]
+            return self._natural_width(child, child_style, narrowest) + edges
+
+        low = [0.0] * len(column_tracks)
+        high = [0.0] * len(column_tracks)
+        for child, child_style, _r, c, _rows, columns in placed:
+            if columns == 1 and c < len(column_tracks):
+                low[c] = max(low[c], content(child, child_style, True))
+                high[c] = max(high[c], content(child, child_style, False))
+        sizes, flexible = [], {}
+        for index, track in enumerate(column_tracks):
+            kind = track[0]
+            if kind in ("px", "pct"):
+                sizes.append(self._track_floor(track, width))
+            elif kind == "fr":
+                sizes.append(low[index])
+                flexible[index] = (track[1], low[index])
+            elif kind == "minmax":
+                floor = self._track_floor(track[1], width) if track[1][0] in ("px", "pct") \
+                    else (low[index] if track[1][0] in ("auto", "min") else high[index])
+                ceiling = track[2]
+                if ceiling[0] == "fr":
+                    sizes.append(floor)
+                    flexible[index] = (ceiling[1], floor)
+                elif ceiling[0] in ("px", "pct"):
+                    sizes.append(max(floor, min(self._track_floor(ceiling, width),
+                                                max(high[index], floor))))
+                else:
+                    sizes.append(max(floor, high[index]))
+            elif kind == "min":
+                sizes.append(low[index])
+            else:                                   # auto and max-content
+                sizes.append(high[index])
+        gaps = column_gap * (len(sizes) - 1)
+        free = width - sum(sizes) - gaps
+        if flexible and free > 0:
+            # share the room left among the fr tracks, none below its floor
+            active = dict(flexible)
+            room_left = width - gaps - sum(s for i, s in enumerate(sizes) if i not in active)
+            for _round in range(len(active) + 1):
+                total = sum(fr for fr, _floor in active.values()) or 1.0
+                unit = room_left / total
+                small = {i for i, (fr, floor) in active.items() if fr * unit < floor}
+                if not small:
+                    for i, (fr, _floor) in active.items():
+                        sizes[i] = fr * unit
+                    break
+                for i in small:
+                    sizes[i] = active[i][1]
+                    room_left -= active[i][1]
+                    del active[i]
+        elif free > 0 and not flexible:
+            # with no fr track to take it, the room left stretches the auto
+            # tracks, as the specification's last sizing step says
+            stretchy = [i for i, t in enumerate(column_tracks) if t[0] == "auto"]
+            if stretchy and style.get("justify-content", "normal") in ("normal", "stretch", ""):
+                for i in stretchy:
+                    sizes[i] += free / len(stretchy)
+        elif free < 0:
+            # too wide: auto tracks give way, down to their narrowest content
+            give = [(i, sizes[i] - low[i]) for i, t in enumerate(column_tracks)
+                    if t[0] in ("auto", "max") and sizes[i] > low[i]]
+            total = sum(g for _i, g in give)
+            if total > 0:
+                for i, g in give:
+                    sizes[i] -= min(g, -free * g / total)
+        column_x = []
+        pen = x
+        spare = width - sum(sizes) - gaps
+        start, between = self._justify(style.get("justify-content", "start"), spare, len(sizes), False)
+        pen += start
+        for size in sizes:
+            column_x.append(pen)
+            pen += size + column_gap + between
+
+        def area_width(c, columns):
+            return sum(sizes[c:c + columns]) + (column_gap + between) * (columns - 1)
+
+        # ---------- row sizes
+        heights = [0.0] * len(row_tracks)
+        measured = {}
+        for index, (child, child_style, r, c, rows, columns) in enumerate(placed):
+            margin, padding, border = self._edges(child_style, width)
+            cell = area_width(c, columns)
+            justify = child_style.get("justify-self", "auto")
+            if justify in ("auto", "normal", ""):
+                justify = style.get("justify-items", "stretch") or "stretch"
+            fixed = self._length(child_style.get("width"), cell)
+            m_left, m_right = margin[3] or 0.0, margin[1] or 0.0
+            if fixed is not None:
+                border_width = fixed + padding[1] + padding[3] + border[1] + border[3]
+            elif justify in ("stretch", "normal"):
+                border_width = cell - m_left - m_right
+            else:
+                border_width = min(content(child, child_style, False), cell - m_left - m_right)
+            fixed_height = self._length(child_style.get("height"), 0.0, vertical=True)
+            if child.tag == "svg":
+                height = self._svg_size(child, child_style, border_width)[1]
+            elif fixed_height is not None:
+                height = fixed_height
+            else:
+                height = self._scratch_height(child, child_style, border_width)
+            measured[index] = (border_width, height, justify, margin)
+            if rows == 1 and r < len(heights):
+                heights[r] = max(heights[r], height + (margin[0] or 0.0) + (margin[2] or 0.0))
+        for index, track in enumerate(row_tracks):
+            kind = track[0]
+            if kind == "px":
+                heights[index] = track[1] * self.zoom
+            elif kind == "minmax" and track[1][0] == "px":
+                heights[index] = max(heights[index], track[1][1] * self.zoom)
+        # an item spanning rows taller than they are: the last of them grows
+        for index, (child, child_style, r, c, rows, columns) in enumerate(placed):
+            if rows > 1:
+                need = measured[index][1]
+                have = sum(heights[r:r + rows]) + row_gap * (rows - 1)
+                if need > have:
+                    heights[min(r + rows, len(heights)) - 1] += need - have
+        if room is not None:
+            flexible_rows = [i for i, t in enumerate(row_tracks)
+                             if t[0] == "fr" or (t[0] == "minmax" and t[2][0] == "fr")]
+            spare_rows = room - sum(heights) - row_gap * (len(heights) - 1)
+            if flexible_rows and spare_rows > 0:
+                for i in flexible_rows:
+                    heights[i] += spare_rows / len(flexible_rows)
+        row_y = []
+        pen = y
+        for height in heights:
+            row_y.append(pen)
+            pen += height + row_gap
+        total = sum(heights) + row_gap * (len(heights) - 1)
+
+        # ---------- the items, in their areas
+        first_baseline = None
+        for index, (child, child_style, r, c, rows, columns) in enumerate(placed):
+            border_width, height, justify, margin = measured[index]
+            cell_w = area_width(c, columns)
+            cell_h = sum(heights[r:r + rows]) + row_gap * (rows - 1)
+            m_top, m_right, m_bottom, m_left = (m or 0.0 for m in margin)
+            spare_x = cell_w - border_width - m_left - m_right
+            offset_x = {"center": spare_x / 2, "end": spare_x, "flex-end": spare_x,
+                        "right": spare_x}.get(justify, 0.0)
+            align = child_style.get("align-self", "auto")
+            if align in ("auto", "normal", ""):
+                align = style.get("align-items", "stretch") or "stretch"
+            forced = None
+            spare_y = cell_h - height - m_top - m_bottom
+            offset_y = 0.0
+            if align in ("stretch", "normal") and \
+                    self._length(child_style.get("height"), 0.0, vertical=True) is None:
+                forced = max(height, cell_h - m_top - m_bottom)
+            else:
+                offset_y = {"center": spare_y / 2, "end": spare_y,
+                            "flex-end": spare_y}.get(align, 0.0)
+            bx = column_x[c] + m_left + max(0.0, offset_x)
+            by = row_y[r] + m_top + max(0.0, offset_y)
+            if child.tag == "svg":
+                self._svg_item(child, child_style, QRectF(bx, by, border_width,
+                                                          forced if forced else height))
+                continue
+            self._last_baseline = None
+            self._item_box(child, child_style, bx, by, border_width, forced)
+            if first_baseline is None:
+                first_baseline = self._last_baseline
+        return total, first_baseline
 
     # ------------------------------------------------------------ floats
     def _room(self, y: float, height: float, x: float, width: float):
@@ -1403,6 +1913,8 @@ class _Measure:
         try:
             if style.get("display") in ("flex", "inline-flex"):
                 self.layout._flex(element, style, 0.0, 0.0, width)
+            elif style.get("display") in ("grid", "inline-grid"):
+                self.layout._grid(element, style, 0.0, 0.0, width)
             else:
                 self.layout._contents(element, style, 0.0, 0.0, width)
             right = 0.0
@@ -1420,7 +1932,7 @@ def _bottom_edge(item) -> float:
         return 0.0
     if item[0] == "group":
         return max((_bottom_edge(sub) for sub in item[1]), default=0.0)
-    if item[0] in ("rect", "image", "rrect", "rborder"):
+    if item[0] in ("rect", "image", "rrect", "rborder", "svg"):
         return item[1].bottom()
     if item[0] == "text":
         return item[2] + QFontMetricsF(item[4]).descent()
@@ -1432,7 +1944,7 @@ def _right_edge(item) -> float:
         return 0.0
     if item[0] == "group":
         return max((_right_edge(sub) for sub in item[1]), default=0.0)
-    if item[0] in ("rect", "image", "rrect", "rborder"):
+    if item[0] in ("rect", "image", "rrect", "rborder", "svg"):
         return item[1].right()
     if item[0] == "text":
         return item[1] + QFontMetricsF(item[4]).horizontalAdvance(item[3])
@@ -1448,3 +1960,67 @@ def _roman(number: int) -> str:
             out += letters
             number -= value
     return out
+
+
+# ------------------------------------------------------------------- svg
+
+# The HTML parser lowercases names, and SVG's are case-sensitive: viewBox as
+# viewbox is simply ignored by an SVG renderer. These are put back.
+_SVG_NAMES = {n.lower(): n for n in (
+    "viewBox", "preserveAspectRatio", "gradientUnits", "gradientTransform",
+    "patternUnits", "patternContentUnits", "patternTransform", "clipPathUnits",
+    "markerWidth", "markerHeight", "markerUnits", "refX", "refY", "stdDeviation",
+    "textLength", "lengthAdjust", "spreadMethod", "maskUnits", "maskContentUnits",
+    "filterUnits", "primitiveUnits", "baseFrequency", "numOctaves", "pathLength",
+    "startOffset", "attributeName", "repeatCount", "keyTimes", "keySplines",
+    "linearGradient", "radialGradient", "clipPath", "foreignObject", "textPath",
+    "feGaussianBlur", "feOffset", "feBlend", "feColorMatrix", "feComposite",
+    "feFlood", "feMerge", "feMergeNode", "feMorphology", "feTurbulence")}
+
+
+def _svg_escape(text: str) -> str:
+    return (text.replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def svg_markup(element: Element, style: dict) -> str:
+    """An inline <svg> as standalone SVG, for Qt's renderer.
+
+    currentColor takes the colour of the surrounding text, and a fill or
+    stroke the page's CSS gives the <svg> is passed on to it.
+    """
+    colour = style.get("color", (0, 0, 0, 255))
+
+    def attributes(node, root):
+        attrs = dict(node.attrs)
+        if root:
+            attrs.setdefault("xmlns", "http://www.w3.org/2000/svg")
+            attrs["color"] = "#%02x%02x%02x" % colour[:3]
+            for name in ("fill", "stroke"):
+                value = style.get(name)
+                if isinstance(value, str) and value.strip():
+                    attrs[name] = value.strip()
+            if "viewbox" not in attrs and attrs.get("width") and attrs.get("height"):
+                attrs["viewbox"] = f"0 0 {attrs['width']} {attrs['height']}"
+        parts = []
+        for key, value in attrs.items():
+            name = _SVG_NAMES.get(key, key)
+            if name == "style":
+                continue
+            value = (value or "").replace("currentcolor", "currentColor")
+            if value.strip().lower() == "currentcolor":
+                value = "#%02x%02x%02x" % colour[:3]
+            parts.append(f'{name}="{_svg_escape(value)}"')
+        return (" " + " ".join(parts)) if parts else ""
+
+    def render(node, root=False):
+        tag = _SVG_NAMES.get(node.tag, node.tag)
+        inner = []
+        for child in node.children:
+            if isinstance(child, Element):
+                inner.append(render(child))
+            else:
+                inner.append(_svg_escape(child.data))
+        return f"<{tag}{attributes(node, root)}>{''.join(inner)}</{tag}>"
+
+    return render(element, root=True)

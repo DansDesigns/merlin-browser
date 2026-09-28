@@ -458,6 +458,7 @@ th { text-align: center }
 td, th { padding: 1px }
 img { display: inline }
 input, select, textarea, button { display: inline-block }
+input[type="hidden"] { display: none }
 """
 
 _DEFAULT_RULES = parse_stylesheet(DEFAULT_STYLESHEET)
@@ -618,6 +619,18 @@ class Styler:
                 return 0
         if name == "transform":
             return _translation(lowered, font, root_size, self.viewport)
+        if name in ("grid-template-columns", "grid-template-rows",
+                    "grid-auto-columns", "grid-auto-rows"):
+            return parse_tracks(lowered, font, root_size, self.viewport)
+        if name == "grid-template-areas":
+            # each quoted string is one row of area names
+            rows = [a or b for a, b in re.findall(r'"([^"]*)"|\'([^\']*)\'', value)]
+            return [row.split() for row in rows]
+        if name in ("grid-column-start", "grid-column-end", "grid-row-start",
+                    "grid-row-end", "grid-auto-flow"):
+            return lowered.strip()
+        if name in ("justify-items", "justify-self"):
+            return lowered.split()[-1] if lowered else ""
         if name in ("flex-direction", "flex-wrap", "justify-content", "align-items",
                     "align-self", "align-content", "vertical-align", "border-collapse",
                     "clear"):
@@ -790,7 +803,25 @@ def expand_shorthand(name: str, value: str) -> list:
         return [(f"border-{corner}-radius", v) for corner, v in zip(corners, _sides(values))]
     if name in ("place-items",):
         values = value.split()
-        return [("align-items", values[0])] if values else []
+        return ([("align-items", values[0]), ("justify-items", values[-1])]
+                if values else [])
+    if name == "place-self":
+        values = value.split()
+        return ([("align-self", values[0]), ("justify-self", values[-1])]
+                if values else [])
+    if name in ("grid-column", "grid-row"):
+        start, _slash, end = value.partition("/")
+        return [(f"{name}-start", start.strip() or "auto"),
+                (f"{name}-end", end.strip() or "auto")]
+    if name == "grid-area":
+        parts = [p.strip() for p in value.split("/")]
+        if len(parts) == 1 and parts[0] and not re.match(r"^-?\d", parts[0]) \
+                and not parts[0].startswith("span"):
+            # a name from grid-template-areas: all four edges from it
+            return [("grid-area-name", parts[0])]
+        parts += ["auto"] * (4 - len(parts))
+        return [("grid-row-start", parts[0]), ("grid-column-start", parts[1]),
+                ("grid-row-end", parts[2]), ("grid-column-end", parts[3])]
     if name in ("place-content",):
         values = value.split()
         return ([("align-content", values[0]),
@@ -917,3 +948,68 @@ def _translation(value: str, font: float, root_size: float, viewport):
         x, y = lengths
         found = True
     return (x, y) if found else None
+
+
+# ------------------------------------------------------------ grid tracks
+
+
+def _track(token: str, font: float, root_size: float, viewport):
+    """One track size: ("px", n) ("pct", n) ("fr", n) ("auto",) ("min",) ("max",)."""
+    token = token.strip()
+    if token in ("auto", ""):
+        return ("auto",)
+    if token == "min-content":
+        return ("min",)
+    if token == "max-content":
+        return ("max",)
+    if token.endswith("fr"):
+        try:
+            return ("fr", float(token[:-2]))
+        except ValueError:
+            return ("auto",)
+    length = parse_length(token, font, root_size, viewport)
+    if isinstance(length, tuple):
+        return ("pct", length[1])
+    if isinstance(length, float):
+        return ("px", length)
+    return ("auto",)
+
+
+def parse_tracks(value: str, font: float, root_size: float, viewport) -> list:
+    """A grid track list as a list of tracks, repeat() kept for layout.
+
+    minmax(a, b) is ("minmax", a, b), fit-content(x) is treated as
+    minmax(auto, x), and repeat(n | auto-fill | auto-fit, ...) is
+    ("repeat", n, [tracks]), since auto-fill needs the width to resolve.
+    Line names in [brackets] are skipped.
+    """
+    value = re.sub(r"\[[^\]]*\]", " ", value or "").strip()
+    if not value or value == "none":
+        return []
+    tracks = []
+    for token in _split_outside(value, " "):
+        token = token.strip()
+        if not token:
+            continue
+        found = re.match(r"^(repeat|minmax|fit-content)\((.*)\)$", token)
+        if not found:
+            tracks.append(_track(token, font, root_size, viewport))
+            continue
+        kind, inner = found.group(1), found.group(2)
+        args = [a.strip() for a in _split_outside(inner, ",")]
+        if kind == "minmax" and len(args) == 2:
+            tracks.append(("minmax", _track(args[0], font, root_size, viewport),
+                           _track(args[1], font, root_size, viewport)))
+        elif kind == "fit-content" and args:
+            tracks.append(("minmax", ("auto",), _track(args[0], font, root_size, viewport)))
+        elif kind == "repeat" and len(args) == 2:
+            count = args[0]
+            inner_tracks = parse_tracks(args[1], font, root_size, viewport)
+            if count in ("auto-fill", "auto-fit"):
+                tracks.append(("repeat", count, inner_tracks))
+            else:
+                try:
+                    tracks.extend(inner_tracks * max(1, min(1000, int(count))))
+                except ValueError:
+                    pass
+    return tracks

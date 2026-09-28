@@ -459,6 +459,103 @@ def test_floats_and_positioning() -> None:
 
 
 
+def test_grid_svg_inline_block() -> None:
+    """Grid, inline-block, SVG and visibility, against CSS's rules."""
+    from merlin.engine.css import Styler
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+    COLOURS = ["#ff0000", "#008000", "#0000ff", "#ffff00", "#ff00ff", "#00ffff", "#808080"]
+
+
+    def lay(markup, width=600):
+        doc = parse("<body style='margin:0;font-size:16px'>" + markup)
+        return Layout(doc, Styler(doc, viewport=(width, 400)).compute(), width).run()
+
+
+    def rects(out):
+        found = {}
+        for item in out.items:
+            subs = item[1] if item and item[0] == "group" else [item]
+            for sub in subs:
+                if sub and sub[0] in ("rect", "rrect"):
+                    r = sub[1]
+                    found["#%02x%02x%02x" % sub[2][:3]] = (round(r.x()), round(r.y()),
+                                                            round(r.width()), round(r.height()))
+        return found
+
+
+    def grid(style, n, item_style="", extras=None, width=600):
+        extras = extras or [""] * n
+        markup = f"<div style='display:grid;{style}'>" + "".join(
+            f"<div style='background:{COLOURS[i]};height:20px;{item_style};{extras[i]}'></div>"
+            for i in range(n)) + "</div>"
+        found = rects(lay(markup, width))
+        return [found.get(COLOURS[i]) for i in range(n)]
+
+
+    print("grid tracks")
+    b = grid("grid-template-columns:100px 1fr 2fr", 3)
+    _flex_check("100px 1fr 2fr", [(x, w) for x, _y, w, _h in b], [(0, 100), (100, 167), (267, 333)])
+    b = grid("grid-template-columns:repeat(3, 1fr);gap:10px", 3)
+    _flex_check("repeat(3, 1fr) with a 10px gap", [x for x, *_ in b], [0, 203, 407])
+    b = grid("grid-template-columns:repeat(auto-fill, minmax(180px, 1fr));gap:12px", 7)
+    _flex_check("auto-fill minmax(180px, 1fr): three 192px columns",
+          [(x, y, w) for x, y, w, _h in b[:4]], [(0, 0, 192), (204, 0, 192), (408, 0, 192), (0, 32, 192)])
+    b = grid("grid-template-columns:repeat(auto-fit, minmax(150px, 1fr))", 2)
+    _flex_check("auto-fit folds away empty columns: two items share the width", [w for _x, _y, w, _h in b],
+          [300, 300])
+    b = grid("grid-template-columns:repeat(4, 1fr)", 3, extras=["grid-column:1 / -1", "grid-column:span 2", ""])
+    _flex_check("grid-column 1 / -1 spans all; span 2 takes two", [(x, y, w) for x, y, w, _h in b],
+          [(0, 0, 600), (0, 20, 300), (300, 20, 150)])
+    b = grid('grid-template-columns:150px 1fr;grid-template-areas:"head head" "side main"', 3,
+             extras=["grid-area:head", "grid-area:side", "grid-area:main"])
+    _flex_check("named areas: a header over a sidebar and main", [(x, y, w) for x, y, w, _h in b],
+          [(0, 0, 600), (0, 20, 150), (150, 20, 450)])
+    b = grid("grid-template-columns:1fr 1fr", 2, item_style="height:auto",
+             extras=["height:60px", ""])
+    _flex_check("a row is as tall as its tallest item; the other stretches", [h for *_r, h in b], [60, 60])
+    b = grid("grid-template-columns:1fr 1fr;align-items:center", 2, extras=["height:60px", ""])
+    _flex_check("align-items: center", [y for _x, y, _w, _h in b], [0, 20])
+    b = grid("grid-template-columns:200px;justify-items:center", 1, extras=["width:100px"])
+    _flex_check("justify-items: center", b[0][0], 50)
+    b = grid("grid-auto-rows:50px", 2, item_style="height:auto")
+    _flex_check("no columns given: one column, each item its own row; grid-auto-rows",
+          [(x, y, w, h) for x, y, w, h in b], [(0, 0, 600, 50), (0, 50, 600, 50)])
+
+    print("inline-block")
+    found = rects(lay("<div><span style='display:inline-block;width:80px;height:30px;background:#ff0000'></span>"
+                      "<span style='display:inline-block;width:80px;height:30px;background:#008000'></span></div>"))
+    _flex_check("inline-blocks sit side by side on a line", [found.get("#ff0000")[:3], found.get("#008000")[:3]],
+          [(0, 0, 80), (80, 0, 80)])
+    out = lay("<p style='margin:0'>before <span style='display:inline-block;padding:4px 10px;"
+              "background:#0000ff;color:white'>Button</span> after</p>")
+    box = rects(out).get("#0000ff")
+    words = {i[3].strip(): i for i in out.items if i and i[0] == "text"}
+    _flex_check("an inline-block keeps its padding and background, and its text",
+          box is not None and "Button" in words and box[2] > 50, True)
+    _flex_check("its text sits on the same baseline as the words around it",
+          abs(words["Button"][2] - words["before"][2]) < 0.5, True)
+
+    print("svg")
+    out = lay("<p style='color:#cc0000;margin:0'>icon <svg viewbox='0 0 24 24' width=20 height=20>"
+              "<circle cx=12 cy=12 r=10 fill=currentColor /></svg></p>")
+    svgs = [i for i in out.items if i and i[0] == "svg"]
+    _flex_check("an inline svg is laid out at its size", [(round(i[1].width()), round(i[1].height())) for i in svgs],
+          [(20, 20)])
+    _flex_check("viewBox keeps its case, and currentColor takes the text colour",
+          'viewBox="0 0 24 24"' in svgs[0][2] and 'fill="#cc0000"' in svgs[0][2], True)
+    out = lay("<svg viewbox='0 0 100 50' style='width:200px'></svg>")
+    _flex_check("an svg with only a width keeps its viewBox's shape",
+          [(round(i[1].width()), round(i[1].height())) for i in out.items if i and i[0] == "svg"], [(200, 100)])
+
+    print("visibility")
+    out = lay("<p style='margin:0'><span style='visibility:hidden'>hidden words</span> shown</p>")
+    drawn = {i[3].strip(): round(i[1]) for i in out.items if i and i[0] == "text"}
+    _flex_check("hidden text is not drawn, but keeps its room", ("hidden" not in " ".join(drawn))
+          and drawn.get("shown", 0) > 60, True)
+
+
+
 def test_view(app) -> None:
     from merlin.engine import MerlinView
 
@@ -528,7 +625,7 @@ def main() -> int:
     app = QApplication(sys.argv[:1])
     for test in (test_no_chromium, test_without_html_parser, test_parsing, test_cascade, test_layout,
                  test_body_and_markers, test_tables, test_flexbox,
-                 test_floats_and_positioning):
+                 test_floats_and_positioning, test_grid_svg_inline_block):
         print(test.__name__)
         test()
     print("test_images")

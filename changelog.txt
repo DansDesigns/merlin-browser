@@ -5,6 +5,27 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.6.99
+  Merlin Engine lays out CSS grid: track lists in px, percentages, fr, auto,
+  min-content and max-content, minmax(), fit-content(), repeat(), and
+  repeat(auto-fill / auto-fit, ...), the usual pattern for card grids that
+  reflow with the window; items placed by line numbers, negative lines, span,
+  and named areas from grid-template-areas, the rest placed row by row with
+  rows added as needed; fr tracks sharing the room left without going below
+  their narrowest content, and auto tracks stretching when nothing else takes
+  it; justify-items, justify-self, align-items and align-self.
+  SVG: inline <svg> and <img src="...svg">, drawn by Qt's SVG module, which
+  every Merlin.exe already carries for the toolbar icons; currentColor takes
+  the colour of the text around it, and viewBox and the other case-sensitive
+  names the HTML parser lowercased are put back. The new-tab page's
+  microphone icon now appears, in its place inside the search box.
+  inline-block: buttons, badges and navigation links are laid out as boxes on
+  the line, with their padding, backgrounds, borders and rounded corners, text
+  on the same baseline as the words around them; form fields are such boxes,
+  about twenty characters wide when no width is given.
+  visibility: hidden keeps an element's room and draws nothing.
+  Checked against CSS's rules, 16 cases more, 94 engine checks in all.
+
 1.6.98
   Merlin Engine lays out floats and positioned boxes, the biggest layout
   gaps left on real sites.

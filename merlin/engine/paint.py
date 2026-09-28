@@ -11,6 +11,32 @@ from PyQt6.QtGui import QColor, QFontMetricsF, QPen
 from .layout import DisplayList
 
 
+_SVG_CACHE: dict = {}
+
+
+def _svg_renderer(markup: str):
+    """A Qt SVG renderer for the markup, made once; None if SVG cannot draw.
+
+    Qt's SVG module is loaded only when a page has SVG in it, and a failure
+    leaves the picture out rather than the page.
+    """
+    renderer = _SVG_CACHE.get(markup)
+    if renderer is None and markup not in _SVG_CACHE:
+        try:
+            from PyQt6.QtCore import QByteArray
+            from PyQt6.QtSvg import QSvgRenderer
+
+            renderer = QSvgRenderer(QByteArray(markup.encode("utf-8")))
+            if not renderer.isValid():
+                renderer = None
+        except Exception:                                  # noqa: BLE001
+            renderer = None
+        if len(_SVG_CACHE) > 500:
+            _SVG_CACHE.clear()
+        _SVG_CACHE[markup] = renderer
+    return renderer
+
+
 def _colour(rgba) -> QColor:
     return QColor(rgba[0], rgba[1], rgba[2], rgba[3])
 
@@ -34,6 +60,12 @@ def _draw(painter, item, visible: QRectF, images) -> None:
         rect = item[1]
         if rect.intersects(visible):
             painter.fillRect(rect, _colour(item[2]))
+    elif kind == "svg":
+        rect, markup = item[1], item[2]
+        if rect.intersects(visible):
+            renderer = _svg_renderer(markup)
+            if renderer is not None:
+                renderer.render(painter, rect)
     elif kind == "rrect":
         rect, rgba, radius = item[1], item[2], item[3]
         if rect.intersects(visible):

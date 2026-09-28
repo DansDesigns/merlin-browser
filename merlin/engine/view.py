@@ -116,6 +116,29 @@ def _decode(body: bytes, content_type: str) -> str:
         return body.decode("utf-8", "replace")
 
 
+def _svg_image(data: bytes) -> QImage:
+    """An SVG file drawn to an image at its own size, for <img src="...svg">."""
+    try:
+        from PyQt6.QtCore import QByteArray
+        from PyQt6.QtSvg import QSvgRenderer
+    except Exception:                                      # noqa: BLE001
+        return QImage()
+    renderer = QSvgRenderer(QByteArray(data))
+    if not renderer.isValid():
+        return QImage()
+    size = renderer.defaultSize()
+    if size.width() <= 0 or size.height() <= 0:
+        size.setWidth(300)
+        size.setHeight(150)
+    picture = QImage(size.width() * 2, size.height() * 2, QImage.Format.Format_ARGB32)
+    picture.fill(0)
+    painter = QPainter(picture)
+    renderer.render(painter)
+    painter.end()
+    picture.setDevicePixelRatio(2.0)      # drawn at twice the size, for sharpness
+    return picture
+
+
 class _History:
     """Back and forward, as the browser window asks Chromium's history."""
 
@@ -427,6 +450,8 @@ class MerlinView(QWidget):
         if number != self._load_number:
             return
         picture = QImage.fromData(data) if ok and data else QImage()
+        if picture.isNull() and ok and b"<svg" in data[:4096]:
+            picture = _svg_image(data)
         self._images[src] = picture if not picture.isNull() else False
         self._relayout.start()                   # batch several arrivals into one
 
