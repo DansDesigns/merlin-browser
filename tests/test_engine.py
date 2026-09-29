@@ -14,6 +14,7 @@ import os
 import sys
 import tempfile
 import threading
+import urllib.error
 import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -190,9 +191,11 @@ def test_body_and_markers() -> None:
     out = Layout(doc, Styler(doc).compute(), 400).run()
     words = " ".join(i[3] for i in out.items if i and i[0] == "text")
     check("the words image and anchor are just words", "image" in words and "anchor" in words)
-    check("a gradient background falls back to its first colour",
+    # gradients are drawn now; the shorthand keeps them as gradients
+    check("a gradient background is kept as a gradient",
           expand_shorthand("background", "linear-gradient(90deg,#123456,#fff)")
-          == [("background-color", "#123456")])
+          == [("background-image", "linear-gradient(90deg,#123456,#fff)"),
+              ("background-color", "transparent")])
 
 
 def test_tables() -> None:
@@ -992,6 +995,178 @@ def test_deep_nesting_stays_quick() -> None:
     check("without needing the time budget's estimates", took.endswith("simplified=False"), took)
 
 
+def test_gradients() -> None:
+    """Gradients drawn by the CSS geometry, measured in pixels."""
+    from PyQt6.QtCore import QRectF
+    from PyQt6.QtGui import QColor, QImage, QPainter
+
+    from merlin.engine.css import parse_gradients
+    from merlin.engine.paint import fill_gradient
+
+    def sample(css, points, size=(200, 100)):
+        img = QImage(*size, QImage.Format.Format_ARGB32)
+        img.fill(QColor("magenta"))
+        painter = QPainter(img)
+        fill_gradient(painter, QRectF(0, 0, *size), parse_gradients(css)[0])
+        painter.end()
+        return [img.pixelColor(x, y).red() for x, y in points]
+
+    red = sample("linear-gradient(90deg, #000, #fff)", [(0, 50), (100, 50), (199, 50)])
+    check("linear-gradient at 90deg runs left to right", red[0] < 5 and 120 < red[1] < 136 and red[2] > 250, str(red))
+    red = sample("linear-gradient(#000, #fff)", [(100, 0), (100, 99)])
+    check("with no angle, top to bottom", red[0] < 5 and red[1] > 250, str(red))
+    red = sample("linear-gradient(90deg, #000 0%, #fff 45%, #000 100%)", [(90, 50)])
+    check("a stop at 45% is its colour at 45%", red[0] > 250, str(red))
+    red = sample("radial-gradient(circle, #fff, #000)", [(100, 50), (0, 0)])
+    check("radial-gradient: its colour at the centre, the last at the far corner",
+          red[0] > 250 and red[1] < 5, str(red))
+    layers = parse_gradients("radial-gradient(circle at 30% 20%, #33245c 0%, #14121f 68%)")
+    check("the new-tab page's radial background is read whole",
+          layers and layers[0][1] == "circle" and layers[0][3] == (("%", 30.0), ("%", 20.0)), str(layers))
+
+
+def test_clipping_opacity_details_svg(app) -> None:
+    """overflow clipping, opacity, <details> and sharp SVG images, in pixels."""
+    import base64
+
+    from PyQt6.QtTest import QTest
+
+    from merlin.engine import MerlinView
+
+    svg = base64.b64encode(b"<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'>"
+                           b"<rect x='0' y='0' width='8' height='16' fill='#ff0000'/></svg>").decode()
+    page = f"""<body style='margin:0;background:#ffffff'>
+    <h2 style='position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);
+     top:0;left:0;margin:0;font-size:40px;color:#000000'><a href='/hidden'>Navigation Menu</a></h2>
+    <div style='position:absolute;top:0;left:300px;opacity:0;background:#00ff00;width:100px;height:40px'></div>
+    <div style='position:absolute;top:0;left:450px;opacity:0.5;background:#0000ff;width:100px;height:40px'></div>
+    <div style='position:absolute;top:60px;left:0;width:100px;height:40px;overflow:hidden;border-radius:12px'>
+     <div style='width:400px;height:200px;background:#ff00ff'></div></div>
+    <details style='position:absolute;top:120px;left:0;width:200px'>
+     <summary style='height:24px;background:#dddddd'>More</summary>
+     <div style='height:40px;background:#00ffff'></div></details>
+    <img src='data:image/svg+xml;base64,{svg}' style='position:absolute;top:200px;left:0;width:128px;height:128px'>
+    </body>"""
+    view = MerlinView()
+    view.resize(700, 400)
+    view.show()
+    try:
+        view.setHtml(page, QUrl("about:blank"))
+        wait(app, 0.4)
+        shot = view.grab().toImage()
+
+        def at(x, y):
+            return shot.pixelColor(x, y).name()
+
+        check("a screen-reader-only heading, clipped to 1px, is not drawn",
+              all(at(x, y) == "#ffffff" for x in (10, 60, 120) for y in (15, 25)))
+        check("and its link cannot be clicked",
+              not any(h == "/hidden" and r.width() > 2 for r, h in view._display.links))
+        check("opacity: 0 draws nothing", at(350, 20) == "#ffffff", at(350, 20))
+        blue = shot.pixelColor(500, 20)
+        check("opacity: 0.5 draws half-way", abs(blue.red() - 127) < 4 and blue.blue() == 255, blue.name())
+        check("overflow: hidden cuts at the box's edge",
+              at(95, 80) == "#ff00ff" and at(105, 80) == "#ffffff", f"{at(95, 80)} {at(105, 80)}")
+        check("and at its rounded corner", at(1, 61) == "#ffffff", at(1, 61))
+        check("a closed <details> hides all but its summary", at(20, 155) == "#ffffff", at(20, 155))
+        rect = next(r for r, h in view._display.links if h == "summary")
+        QTest.mouseClick(view, Qt.MouseButton.LeftButton,
+                         pos=QPoint(int(rect.center().x()), int(rect.center().y())))
+        wait(app, 0.3)
+        shot = view.grab().toImage()
+        check("clicking its summary opens it", at(20, 155) == "#00ffff", at(20, 155))
+        edge = [at(x, 260) for x in (62, 63, 64, 65)]
+        check("an SVG image drawn 8x its size keeps a clean edge",
+              edge[0] == "#ff0000" and edge[-1] == "#ffffff"
+              and sum(e not in ("#ff0000", "#ffffff") for e in edge) <= 1, str(edge))
+    finally:
+        view.close()
+
+
+def test_browser_headers_and_compression(app) -> None:
+    """Sites refusing what does not look like a browser; compressed responses.
+
+    MerlinEngine/0.1 as its user agent got 403 Forbidden from sites' bot
+    protection. Pages, stylesheets and downloads are also often compressed.
+    """
+    import gzip
+    import json
+    import urllib.request
+
+    from PyQt6.QtCore import QStandardPaths
+
+    from merlin.engine import MerlinView
+
+    seen = []
+
+    class Picky(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _send(self, body, kind):
+            data = gzip.compress(body if isinstance(body, bytes) else body.encode())
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            agent = self.headers.get("User-Agent", "")
+            seen.append((self.path, self.headers.get("Sec-Fetch-Dest"), agent))
+            if self.path == "/seen":
+                body = json.dumps(seen).encode()
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if not ("Mozilla/5.0" in agent and "MerlinEngine" not in agent
+                    and self.headers.get("Accept-Language") and self.headers.get("Sec-Fetch-Mode")):
+                self.send_response(403)
+                self.end_headers()
+                return
+            if self.path == "/style.css":
+                return self._send("h1 { color: rgb(200, 0, 0) }", "text/css")
+            if self.path == "/data.bin":
+                return self._send(bytes(range(256)) * 40, "application/octet-stream")
+            self._send("<title>Picky</title><link rel=stylesheet href=/style.css><h1>In</h1>",
+                       "text/html; charset=utf-8")
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Picky)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    view = MerlinView()
+    view.resize(600, 400)
+    try:
+        try:
+            urllib.request.urlopen(base + "/")
+            refused = False
+        except urllib.error.HTTPError as error:
+            refused = error.code == 403
+        check("the test server refuses what does not look like a browser", refused)
+        view.setUrl(QUrl(base + "/"))
+        wait(app, 1.5)
+        h1 = next((e for e in view._document.root.elements() if e.tag == "h1"), None)
+        check("MerlinEngine is let in", view.title() == "Picky", view.title())
+        check("and its compressed page and stylesheet are read",
+              h1 is not None and view._styles[h1]["color"] == (200, 0, 0, 255))
+        marks = {path: dest for path, dest, _agent in seen}
+        check("the page is asked for as a document, its stylesheet as a style",
+              marks.get("/") == "document" and marks.get("/style.css") == "style", str(marks))
+        view.setUrl(QUrl(base + "/data.bin"))
+        wait(app, 1.5)
+        saved = os.path.join(QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DownloadLocation), "data.bin")
+        check("a compressed download is saved decompressed, byte for byte",
+              os.path.exists(saved) and open(saved, "rb").read() == bytes(range(256)) * 40)
+        if os.path.exists(saved):
+            os.remove(saved)
+    finally:
+        server.shutdown()
+        view.close()
+
+
 def test_view(app) -> None:
     from merlin.engine import MerlinView
 
@@ -1063,11 +1238,15 @@ def main() -> int:
                  test_body_and_markers, test_tables, test_flexbox,
                  test_floats_and_positioning, test_grid_svg_inline_block,
                  test_real_world_css, test_files_ftp_smb, test_no_freeze_on_real_grids,
-                 test_deep_nesting_stays_quick):
+                 test_deep_nesting_stays_quick, test_gradients):
         print(test.__name__)
         test()
     print("test_images")
     test_images(app)
+    print("test_clipping_opacity_details_svg")
+    test_clipping_opacity_details_svg(app)
+    print("test_browser_headers_and_compression")
+    test_browser_headers_and_compression(app)
     print("test_forms")
     test_forms(app)
     print("test_view")

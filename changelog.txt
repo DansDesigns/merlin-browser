@@ -5,6 +5,30 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.7.3.1
+  Merlin Engine no longer freezes the window while a big site loads. Parsing
+  its stylesheets and styling the page, over a second for a GitHub-sized page
+  and longer on slower machines, now happen on the loading thread; the window
+  is held up only for the layout itself, about a third as long.
+  Sites that refused Merlin Engine with 403 Forbidden, as the New York Times
+  did: it called itself MerlinEngine/0.1, which bot protection refuses on
+  sight. It now sends Merlin's own user agent, the one Chromium's tabs send,
+  and the other headers a browser sends with a request, and accepts
+  compressed pages, stylesheets and downloads, which also makes them quicker
+  to load. Some sites check more than any headers can show, and may still
+  refuse.
+  Gradients are drawn: linear and radial, at any angle or position, with
+  their colour stops placed as CSS places them, as backgrounds of boxes and of
+  the whole page. The new-tab page's gradient backgrounds are back.
+  overflow: hidden clips what is inside a box, round corners included, and
+  what can be clicked with it. That hides what sites hide for screen readers
+  only, such as GitHub's "Navigation Menu" and the long columns of text beside
+  its pictures. opacity is drawn, 0 included, which many sites use to keep
+  menus hidden until they are wanted, as is the older clip: rect(0 0 0 0).
+  <details> keeps its content hidden until its <summary> is clicked.
+  SVG images, such as Codeberg's logos, are drawn sharp at any size, rather
+  than enlarged from a small picture.
+
 1.7.3
   Fixed: 1.7.2 could still freeze on some websites in a Merlin Engine tab.
   The freeze recorder added in 1.7.2 showed where: flexbox measuring flexbox.

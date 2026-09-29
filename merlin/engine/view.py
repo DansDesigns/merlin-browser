@@ -25,7 +25,71 @@ from .css import Styler
 from .layout import Layout
 from .paint import paint
 
-USER_AGENT = "Mozilla/5.0 (compatible; MerlinEngine/0.1)"
+# What a page load says about itself when Merlin's own user agent is not to
+# hand. "MerlinEngine/0.1" was refused outright by sites' bot protection, with
+# 403 Forbidden, so it now reads as the browser it is.
+USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
+
+
+def _body(response, limit: int) -> bytes:
+    """A response's body, decompressed as the server's Content-Encoding says."""
+    import zlib
+
+    data = response.read(limit)
+    encoding = (response.headers.get("Content-Encoding", "") or "").strip().lower()
+    try:
+        if encoding in ("gzip", "x-gzip"):
+            return zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(data)
+        if encoding == "deflate":
+            try:
+                return zlib.decompressobj().decompress(data)
+            except zlib.error:
+                return zlib.decompressobj(-zlib.MAX_WBITS).decompress(data)
+    except zlib.error:
+        pass
+    return data
+
+
+def _reader(response):
+    """read(n) for a download, decompressing as it streams when need be."""
+    import zlib
+
+    encoding = (response.headers.get("Content-Encoding", "") or "").strip().lower()
+    if encoding not in ("gzip", "x-gzip", "deflate"):
+        return response.read
+    unpack = zlib.decompressobj(16 + zlib.MAX_WBITS if encoding != "deflate" else zlib.MAX_WBITS)
+
+    def read(n: int) -> bytes:
+        while True:
+            chunk = response.read(n)
+            if not chunk:
+                return unpack.flush()
+            out = unpack.decompress(chunk)
+            if out:
+                return out
+    return read
+
+
+def _subresource(headers: dict, destination: str) -> None:
+    """Mark a request as a stylesheet's or an image's, not a page load's."""
+    headers["Sec-Fetch-Dest"] = destination
+    headers["Sec-Fetch-Mode"] = "no-cors"
+    headers["Sec-Fetch-Site"] = "same-origin"
+    headers.pop("Sec-Fetch-User", None)
+    headers.pop("Upgrade-Insecure-Requests", None)
+
+
+def page_headers(user_agent: str = "") -> dict:
+    """What a browser sends when it asks for a page."""
+    return {"User-Agent": user_agent or USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                      "image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-GB,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none", "Sec-Fetch-User": "?1"}
 
 
 def _open(request, timeout: int, opener=None):
@@ -103,7 +167,7 @@ def fetch_bytes(url: str, headers: dict | None = None, timeout: int = 20,
             sent.update(headers or {})
             request = urllib.request.Request(url, headers=sent)
             with _open(request, timeout, opener) as response:
-                return (True, response.geturl(), response.read(limit),
+                return (True, response.geturl(), _body(response, limit),
                         response.headers.get("Content-Type", ""))
         return False, url, f"MerlinEngine cannot open {scheme}: addresses yet.".encode(), ""
     except Exception as exc:                              # noqa: BLE001
@@ -145,7 +209,7 @@ def fetch(url: str, timeout: int = 20, headers: dict | None = None,
             request = urllib.request.Request(url, data=data, headers=sent,
                                              method="POST" if data is not None else "GET")
             with _open(request, timeout, opener) as response:
-                body = response.read(8 * 1024 * 1024)
+                body = _body(response, 8 * 1024 * 1024)
                 kind = response.headers.get("Content-Type", "")
                 text = _decode(body, kind)
                 if "html" not in kind and kind and not kind.startswith("text/"):
@@ -210,9 +274,9 @@ def fetch_page(url: str, headers: dict | None = None, data: bytes | None = None,
             attachment = disposition.lower().startswith("attachment")
             shown = remote.shown_type(kind, "" if kind else name)
             if not attachment and shown == "html":
-                return True, final, _decode(response.read(8 * 1024 * 1024), kind), ""
+                return True, final, _decode(_body(response, 8 * 1024 * 1024), kind), ""
             if not attachment and shown == "text":
-                body = response.read(8 * 1024 * 1024)
+                body = _body(response, 8 * 1024 * 1024)
                 return True, final, remote.text_page(name, body), ""
             if not attachment and kind.lower().startswith("image/"):
                 import html as escape
@@ -223,7 +287,9 @@ def fetch_page(url: str, headers: dict | None = None, data: bytes | None = None,
             if not download_dir:
                 return False, final, f"This is {kind.split(';')[0] or 'a file'}, not a page.", ""
             total = int(response.headers.get("Content-Length", "0") or 0)
-            path, size = remote.save_stream(response.read, download_dir, name, progress, total)
+            if (response.headers.get("Content-Encoding", "") or "").strip():
+                total = 0                  # the length given is of the compressed body
+            path, size = remote.save_stream(_reader(response), download_dir, name, progress, total)
             return True, final, remote.download_page(path, size), path
     except Exception as exc:                              # noqa: BLE001
         return False, url, str(exc), ""
@@ -239,6 +305,19 @@ def _download_name(disposition: str, url: str) -> str:
         return found.group(1).strip()
     tail = urllib.parse.unquote(urllib.parse.urlsplit(url).path.rstrip("/").split("/")[-1])
     return tail or "download"
+
+
+def _svg_picture(data: bytes):
+    """An SVG file as an SvgPicture, drawn sharp at the size it is shown."""
+    try:
+        from PyQt6.QtCore import QByteArray
+        from PyQt6.QtSvg import QSvgRenderer
+
+        from .paint import SvgPicture
+    except Exception:                                      # noqa: BLE001
+        return None
+    renderer = QSvgRenderer(QByteArray(data))
+    return SvgPicture(renderer) if renderer.isValid() else None
 
 
 def _svg_image(data: bytes) -> QImage:
@@ -398,15 +477,28 @@ class MerlinView(QWidget):
         return getattr(self._host, "interceptor", None)
 
     def _headers(self) -> dict:
+        """What every request from this tab sends: a browser's headers, Merlin's
+        user agent, and Do Not Track when that is switched on."""
+        agent = ""
+        profile = self._page.profile() if self._page is not None else None
+        try:
+            agent = profile.httpUserAgent() if profile is not None else ""
+        except Exception:                                  # noqa: BLE001
+            agent = ""
         settings = getattr(self._host, "settings", None)
+        if not agent and settings is not None:
+            agent = settings.get("user_agent") or ""
+        headers = page_headers(agent)
         if settings is not None and settings.get("send_do_not_track"):
-            return {"DNT": "1", "Sec-GPC": "1"}
-        return {}
+            headers.update({"DNT": "1", "Sec-GPC": "1"})
+        return headers
 
     def _hiding_css(self) -> str:
         """The content blocker's hiding rules for this site, as CSS."""
+        return self._hiding_css_for(self._url.host())
+
+    def _hiding_css_for(self, host: str) -> str:
         finder = getattr(self._host, "cosmetic_css_for", None)
-        host = self._url.host()
         if finder is None or not host:
             return ""
         try:
@@ -517,6 +609,10 @@ class MerlinView(QWidget):
                 | QUrl.UrlFormattingOption.RemoveFragment).toString()
         opener = cookie_opener(self._cookies())
         host_name = url.host()
+        # what styling needs, taken here on the UI thread: the loading thread
+        # then parses the CSS and runs the cascade without touching the window
+        viewport = (self._page_width(), float(max(1, self.height())))
+        hiding = self._hiding_css_for(host_name)
         from PyQt6.QtCore import QStandardPaths
 
         download_dir = QStandardPaths.writableLocation(
@@ -544,7 +640,8 @@ class MerlinView(QWidget):
                 if ok:
                     # parsed here, off the UI thread, with its stylesheets
                     # fetched before the page is shown, as browsers do
-                    prepared = self._prepare(text, final, headers, opener, host_name)
+                    prepared = self._prepare(text, final, headers, opener, host_name,
+                                             viewport, hiding)
                     if saved:
                         prepared["download"] = saved
             except Exception as exc:                  # noqa: BLE001
@@ -567,7 +664,8 @@ class MerlinView(QWidget):
                 pass
         return cache
 
-    def _prepare(self, markup: str, page_url: str, headers: dict, opener, host_name: str):
+    def _prepare(self, markup: str, page_url: str, headers: dict, opener, host_name: str,
+                 viewport=None, hiding: str = ""):
         """The page parsed, and its linked stylesheets fetched, in order.
 
         Runs on the loading thread. Each stylesheet is checked with the
@@ -581,11 +679,12 @@ class MerlinView(QWidget):
         sources = document.stylesheet_sources()
         links = [s for s in sources if s[0] == "link"]
         if not links:
-            return {"document": document, "sheets": [s[1] for s in sources]}
+            return self._styled(document, [s[1] for s in sources], viewport, hiding)
         cache = self._stylesheet_cache()
         page_site = _registrable(host_name)
         sheet_headers = dict(headers)
         sheet_headers["Accept"] = "text/css,*/*;q=0.1"
+        _subresource(sheet_headers, "style")
         sheet_headers["Referer"] = page_url
 
         def get(url: str, depth: int = 0) -> str:
@@ -620,7 +719,23 @@ class MerlinView(QWidget):
             text = fetched.get(urllib.parse.urljoin(page_url, source[1]), "")
             media = source[2]
             sheets.append(f"@media {media} {{{text}}}" if media and media != "all" else text)
-        return {"document": document, "sheets": sheets}
+        return self._styled(document, sheets, viewport, hiding)
+
+    @staticmethod
+    def _styled(document, sheets, viewport, hiding) -> dict:
+        """Parse the CSS and run the cascade, here on the loading thread.
+
+        Parsing megabytes of CSS and styling thousands of elements took over a
+        second on the UI thread for a GitHub-sized page, freezing the window;
+        neither needs Qt, so both happen before the page is handed over.
+        """
+        prepared = {"document": document, "sheets": sheets}
+        if viewport is None:
+            return prepared
+        styler = Styler(document, author_css=sheets, viewport=viewport, extra_css=hiding)
+        prepared["styler"] = styler
+        prepared["styles"] = styler.compute()
+        return prepared
 
     def _on_fetched(self, number: int, ok: bool, final: str, text: str,
                     prepared=None) -> None:
@@ -662,10 +777,16 @@ class MerlinView(QWidget):
         self._images = {}
         self._find = ("", -1)
         self._found_rect = None
-        self._styler = Styler(self._document, author_css=self._sheets,
-                              viewport=(self._page_width(), self.height()),
-                              extra_css=self._hiding_css())
-        self._styles = self._styler.compute()
+        if prepared is not None and prepared.get("styler") is not None:
+            # styled on the loading thread; a window resized meanwhile is
+            # caught by _layout, which chooses @media rules again
+            self._styler = prepared["styler"]
+            self._styles = prepared["styles"]
+        else:
+            self._styler = Styler(self._document, author_css=self._sheets,
+                                  viewport=(self._page_width(), self.height()),
+                                  extra_css=self._hiding_css())
+            self._styles = self._styler.compute()
         title = self._document.title or self._url.toString()
         if title != self._title:
             self._title = title
@@ -685,6 +806,7 @@ class MerlinView(QWidget):
         number = self._load_number
         headers = dict(self._headers())
         headers["Accept"] = "image/avif,image/webp,image/png,image/*;q=0.8,*/*;q=0.5"
+        _subresource(headers, "image")
         page = self._url.toString()
         if page.startswith(("http://", "https://")):
             headers["Referer"] = page
@@ -726,9 +848,11 @@ class MerlinView(QWidget):
     def _on_image(self, number: int, src: str, data: bytes, ok: bool) -> None:
         if number != self._load_number:
             return
-        picture = QImage.fromData(data) if ok and data else QImage()
-        if picture.isNull() and ok and b"<svg" in data[:4096]:
-            picture = _svg_image(data)
+        picture = QImage()
+        if ok and data and b"<svg" in data[:4096]:
+            picture = _svg_picture(data)       # kept as vectors: sharp at any size
+        if (picture is None or picture.isNull()) and ok and data:
+            picture = QImage.fromData(data)
         self._images[src] = picture if not picture.isNull() else False
         self._relayout.start()                   # batch several arrivals into one
 
@@ -1174,6 +1298,13 @@ class MerlinView(QWidget):
             painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
             painter.translate(0, -self._scroll)
             visible = QRectF(0, self._scroll, self.width(), self.height())
+            if self._display.canvas_gradients:
+                # a gradient on <html> or <body> spans the whole page
+                from .paint import fill_gradient
+
+                page = QRectF(0, 0, self.width(), max(float(self.height()), self._display.height))
+                for gradient in reversed(self._display.canvas_gradients):
+                    fill_gradient(painter, page, gradient)
             if self._found_rect is not None:
                 painter.fillRect(self._found_rect.adjusted(-1, -1, 1, 1), QColor(255, 214, 0, 200))
             pictures = {k: v for k, v in self._images.items() if v is not False}
@@ -1225,8 +1356,12 @@ class MerlinView(QWidget):
         if state != self._hovered:
             self._hovered = state
             pointing = button is not None or (href and not isinstance(href, LabelTarget))
+            from .layout import SummaryTarget
+
+            if isinstance(href, SummaryTarget):
+                pointing = True
             self.setCursor(Qt.CursorShape.PointingHandCursor if pointing else Qt.CursorShape.ArrowCursor)
-            shown = "" if not href or isinstance(href, LabelTarget) else \
+            shown = "" if not href or isinstance(href, LabelTarget) or href == "summary" else \
                 self._url.resolved(QUrl(href)).toString()
             self.linkHovered.emit(shown)
 
@@ -1242,6 +1377,19 @@ class MerlinView(QWidget):
         href = self._link_at(event.position())
         if isinstance(href, LabelTarget):
             self._activate_label(href.element)
+            return
+        from .layout import SummaryTarget
+
+        if isinstance(href, SummaryTarget):
+            details = href.element.parent
+            if details is not None and details.tag == "details":
+                if "open" in details.attrs:
+                    del details.attrs["open"]
+                else:
+                    details.attrs["open"] = ""
+                self._styler.styles = {}
+                self._styles = self._styler.compute()
+                self._layout()
             return
         if not href or href.lower().startswith("javascript:"):
             return

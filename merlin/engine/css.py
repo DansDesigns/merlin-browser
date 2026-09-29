@@ -809,6 +809,8 @@ button, input[type="submit"], input[type="button"], input[type="reset"] {
 input[type="checkbox"], input[type="radio"] { border: none; padding: 0; background-color: transparent;
   margin: 3px 3px 3px 4px }
 input[type="hidden"] { display: none }
+summary { display: block; cursor: pointer }
+details:not([open]) > :not(summary) { display: none }
 """
 
 _DEFAULT_RULES = parse_stylesheet(DEFAULT_STYLESHEET)
@@ -1016,6 +1018,14 @@ class Styler:
                 return 0
         if name == "transform":
             return _translation(lowered, font, root_size, self.viewport)
+        if name == "opacity":
+            try:
+                number = float(lowered[:-1]) / 100 if lowered.endswith("%") else float(lowered)
+                return max(0.0, min(1.0, number))
+            except ValueError:
+                return 1.0
+        if name == "background-image":
+            return parse_gradients(value, font, root_size, self.viewport, style.get("color"))
         if name in ("grid-template-columns", "grid-template-rows",
                     "grid-auto-columns", "grid-auto-rows"):
             return parse_tracks(lowered, font, root_size, self.viewport)
@@ -1114,18 +1124,18 @@ def expand_shorthand(name: str, value: str) -> list:
         values = [v for v in _split_outside(value, " ") if v.strip()]
         return [(f"border-{side}-{kind}", v) for side, v in zip(sides, _sides(values))]
     if name in ("background", "background-image") and "gradient(" in value.lower():
-        # Gradients are not drawn yet: their first colour stands in, so a page
-        # with light text on a dark gradient stays readable rather than
-        # falling back to white.
-        for token in re.findall(r"#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)|\b[a-zA-Z]+\b", value):
-            if token.lower() not in ("linear", "radial", "conic", "gradient", "to", "deg",
-                                     "left", "right", "top", "bottom", "repeating", "in",
-                                     "circle", "ellipse", "at", "center", "closest",
-                                     "farthest", "side", "corner", "srgb", "oklab"):
-                colour = parse_colour(token)
-                if colour is not None:
-                    return [("background-color", token)]
-        return []
+        layers = _split_outside(value, ",")
+        images = [layer.strip() for layer in layers if "gradient(" in layer.lower()]
+        found = [("background-image", ", ".join(images))]
+        if name == "background":
+            # the shorthand sets the colour too: a colour in its last layer, or none
+            colour = "transparent"
+            last = re.sub(r"[a-z-]*gradient\((?:[^()]|\([^()]*\))*\)", " ", layers[-1], flags=re.I)
+            for token in _split_outside(last, " "):
+                if token.strip() and parse_colour(token) is not None:
+                    colour = token.strip()
+            found.append(("background-color", colour))
+        return found
     if name == "background":
         for token in reversed(_split_outside(value, " ")):
             if parse_colour(token) is not None:
@@ -1410,3 +1420,98 @@ def parse_tracks(value: str, font: float, root_size: float, viewport) -> list:
                 except ValueError:
                     pass
     return tracks
+
+
+# ------------------------------------------------------------------ gradients
+
+_SIDES = {"top": 0.0, "right": 90.0, "bottom": 180.0, "left": 270.0,
+          "top right": 45.0, "right top": 45.0, "bottom right": 135.0, "right bottom": 135.0,
+          "bottom left": 225.0, "left bottom": 225.0, "top left": 315.0, "left top": 315.0}
+
+
+def _angle(text: str):
+    found = re.match(r"^(-?[\d.]+)(deg|turn|rad|grad)$", text.strip().lower())
+    if not found:
+        return None
+    number, unit = float(found.group(1)), found.group(2)
+    return {"deg": number, "turn": number * 360, "rad": number * 57.29577951308232,
+            "grad": number * 0.9}[unit]
+
+
+def _stops(arguments: list, font: float, root_size: float, viewport, current) -> list:
+    """Colour stops: [(rgba, position or None)], a position ("%", n) or px."""
+    stops = []
+    for argument in arguments:
+        tokens = [t for t in _split_outside(argument.strip(), " ") if t.strip()]
+        if not tokens:
+            continue
+        colour = parse_colour(tokens[0], current or (0, 0, 0, 255))
+        if colour is None:
+            continue                  # a colour hint on its own, which is not drawn yet
+        positions = [parse_length(t, font, root_size, viewport) for t in tokens[1:3]]
+        positions = [p for p in positions if isinstance(p, (float, tuple))]
+        if not positions:
+            stops.append((colour, None))
+        for position in positions:
+            stops.append((colour, position))
+    return stops
+
+
+def parse_gradients(value: str, font: float = 16.0, root_size: float = 16.0,
+                    viewport=(1024, 768), current=None) -> list:
+    """The gradient layers of a background, top layer first.
+
+    ("linear", angle in degrees, stops) and
+    ("radial", shape, size, (x, y), stops), each position px or ("%", n).
+    """
+    layers = []
+    for layer in _split_outside(value or "", ","):
+        found = re.match(r"^\s*(?:repeating-)?(linear|radial)-gradient\((.*)\)\s*$", layer,
+                         re.S | re.I)
+        if not found:
+            continue
+        kind = found.group(1).lower()
+        arguments = [a.strip() for a in _split_outside(found.group(2), ",")]
+        if not arguments:
+            continue
+        first = arguments[0].lower()
+        if kind == "linear":
+            angle = 180.0
+            if _angle(first) is not None:
+                angle = _angle(first)
+                arguments = arguments[1:]
+            elif first.startswith("to "):
+                angle = _SIDES.get(" ".join(first[3:].split()), 180.0)
+                arguments = arguments[1:]
+            stops = _stops(arguments, font, root_size, viewport, current)
+            if len(stops) >= 1:
+                layers.append(("linear", angle, stops))
+            continue
+        shape, size, position = "ellipse", "farthest-corner", (("%", 50.0), ("%", 50.0))
+        head = arguments[0].split()
+        if head and parse_colour(head[0]) is None:
+            arguments = arguments[1:]
+            words = first.split(" at ")
+            for word in words[0].split():
+                if word in ("circle", "ellipse"):
+                    shape = word
+                elif word in ("closest-side", "farthest-side", "closest-corner", "farthest-corner"):
+                    size = word
+                else:
+                    length = parse_length(word, font, root_size, viewport)
+                    if isinstance(length, float):
+                        size = length
+            if len(words) > 1:
+                where = words[1].split()
+                keyword = {"left": ("%", 0.0), "center": ("%", 50.0), "right": ("%", 100.0),
+                           "top": ("%", 0.0), "bottom": ("%", 100.0)}
+                parts = [keyword.get(w) or parse_length(w, font, root_size, viewport) for w in where]
+                parts = [p if isinstance(p, (float, tuple)) else ("%", 50.0) for p in parts]
+                if len(where) == 1 and where[0] in ("top", "bottom"):
+                    parts = [("%", 50.0), parts[0]]
+                if parts:
+                    position = (parts[0], parts[1] if len(parts) > 1 else ("%", 50.0))
+        stops = _stops(arguments, font, root_size, viewport, current)
+        if stops:
+            layers.append(("radial", shape, size, position, stops))
+    return layers

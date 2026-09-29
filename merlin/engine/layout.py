@@ -47,6 +47,26 @@ class LabelTarget(str):
 LAYOUT_BUDGET = 6.0         # seconds a layout pass measures precisely
 
 
+class SummaryTarget(str):
+    """A <summary> in the links list: clicking it opens or closes its <details>."""
+
+    def __new__(cls, element):
+        made = super().__new__(cls, "summary")
+        made.element = element
+        return made
+
+
+def _visually_hidden(style: dict) -> bool:
+    """clip: rect(0 0 0 0) or clip-path: inset(50%): hidden, though laid out."""
+    clip = str(style.get("clip", "")).replace(",", " ").split()
+    if clip and clip[0].startswith("rect(") and all(
+            re.sub(r"[^0-9.]", "", c or "0") in ("", "0", "0.") for c in
+            " ".join(clip).replace("rect(", "").replace(")", "").split()):
+        return True
+    path = str(style.get("clip-path", "")).replace(" ", "").lower()
+    return path in ("inset(50%)", "inset(100%)", "polygon(0000)")
+
+
 class DisplayList:
     """Drawing instructions in page coordinates, in painting order."""
 
@@ -59,6 +79,7 @@ class DisplayList:
         self.canvas = None               # the page's background colour
         self.fixed = None                # position: fixed, drawn against the window
         self.simplified = False          # the time budget ran out: estimates used
+        self.canvas_gradients = []       # a gradient on <html> or <body>: the whole page
 
 
 class _Fonts:
@@ -157,11 +178,18 @@ class Layout:
         root = self.document.root
         root_style = self.styles[root]
         body = self.document.body
-        # the root's background, or else the body's, paints the whole canvas
+        # the root's background, or else the body's, paints the whole canvas,
+        # colour and gradients both, and that element no longer paints its own
+        self._canvas_owner = None
         for element in (root, body):
-            colour = self.styles.get(element, {}).get("background-color")
-            if colour and colour[3] > 0:
-                self.out.canvas = colour
+            element_style = self.styles.get(element, {})
+            colour = element_style.get("background-color")
+            gradients = element_style.get("background-image")
+            if (colour and colour[3] > 0) or gradients:
+                if colour and colour[3] > 0:
+                    self.out.canvas = colour
+                self.out.canvas_gradients = list(gradients or [])
+                self._canvas_owner = element
                 break
         height = self._block(root, root_style, 0.0, 0.0, self.width, root_level=True)
         # what is positioned against the page, and then against the window
@@ -242,6 +270,8 @@ class Layout:
         # a link laid out as a block: everything inside it leads there, and so
         # does the whole box, so a tile can be clicked anywhere on it
         href = element.attrs.get("href") if element.tag == "a" and "href" in element.attrs else None
+        if href is None and element.tag == "summary" and self.live_controls:
+            href = SummaryTarget(element)
         enclosing_link = self._link
         if href is not None:
             self._link = href
@@ -249,10 +279,27 @@ class Layout:
         max_height = self._length(style.get("max-height"), 0.0, vertical=True)
         fixed_height = self._length(style.get("height"), 0.0, vertical=True)
 
+        # opacity covers the box and all inside it; hidden by clip or clip-path
+        # counts as opacity 0, drawn as nothing but still taking its room
+        opacity = style.get("opacity", 1.0)
+        if not isinstance(opacity, float):
+            opacity = 1.0
+        if _visually_hidden(style):
+            opacity = 0.0
+        if opacity < 0.999 and not self._measuring:
+            self.out.items.append(("opacity_push", opacity))
         # the background goes under the children, so its place is kept now
         background_index = len(self.out.items)
         links_before = len(self.out.links)
         self.out.items.append(None)
+        overflow = style.get("overflow")
+        clips = (overflow in ("hidden", "clip", "auto", "scroll") and not root_level
+                 and element is not self.document.body and not self._measuring)
+        clip_index = None
+        if clips:
+            clip_index = len(self.out.items)
+            self.out.items.append(None)          # ("clip_push", rect, radius), once known
+            clip_links = len(self.out.links)
         position = style.get("position")
         positioned = position in ("relative", "absolute", "fixed", "sticky")
         if positioned:
@@ -317,8 +364,14 @@ class Layout:
         hidden = style.get("visibility") in ("hidden", "collapse")
         if hidden:
             colour = None                       # keeps its space, draws nothing
-        if colour and colour[3] > 0 and not (root_level and self.out.canvas == colour):
+        owns_canvas = element is getattr(self, "_canvas_owner", None)
+        if colour and colour[3] > 0 and not owns_canvas \
+                and not (root_level and self.out.canvas == colour):
             paint.append(("rrect", box, colour, radius) if radius > 0.5 else ("rect", box, colour))
+        gradients = style.get("background-image")
+        if gradients and not hidden and not owns_canvas:
+            for gradient in reversed(gradients):          # the first layer is on top
+                paint.append(("gradient", box, gradient, radius))
         if hidden:
             border = [0.0, 0.0, 0.0, 0.0]
         if radius > 0.5 and len(set(border)) == 1 and border[0] > 0:
@@ -359,6 +412,23 @@ class Layout:
                             box.height() - border[0] - border[2])
             for child, child_style, static_x, static_y in waiting:
                 self._place_absolute(child, child_style, inside, static_x + dx, static_y + dy)
+        if clip_index is not None:
+            # overflow: hidden clips what is inside to the padding box, and
+            # what can be clicked with it: a hidden link is not clickable
+            area = QRectF(box.left() + border[3], box.top() + border[0],
+                          max(0.0, box.width() - border[1] - border[3]),
+                          max(0.0, box.height() - border[0] - border[2]))
+            self.out.items[clip_index] = ("clip_push", area, max(0.0, radius - max(border)))
+            self.out.items.append(("clip_pop",))
+            kept = []
+            for rect, target in self.out.links[clip_links:]:
+                inside_rect = rect.intersected(area)
+                if not inside_rect.isEmpty():
+                    kept.append((inside_rect, target))
+            del self.out.links[clip_links:]
+            self.out.links.extend(kept)
+        if opacity < 0.999 and not self._measuring:
+            self.out.items.append(("opacity_pop",))
 
         if style.get("display") == "list-item" and first_baseline is not None:
             self._marker(element, style, content_x, first_baseline)
@@ -1120,7 +1190,8 @@ class Layout:
             kind = item[0]
             if kind == "group":
                 return ("group", [moved(sub) for sub in item[1]])
-            if kind in ("rect", "image", "rrect", "rborder", "svg", "control", "button"):
+            if kind in ("rect", "image", "rrect", "rborder", "svg", "control", "button",
+                        "gradient", "clip_push"):
                 return (kind, item[1].translated(dx, dy)) + tuple(item[2:])
             if kind == "text":
                 return (kind, item[1] + dx, item[2] + dy) + item[3:]
@@ -1165,6 +1236,8 @@ class Layout:
                 href = node.attrs.get("href") if node.tag == "a" and "href" in node.attrs else link
                 if node.tag == "label" and self.live_controls and href is None:
                     href = LabelTarget(node)
+                if node.tag == "summary" and self.live_controls and href is None:
+                    href = SummaryTarget(node)
                 if node.id:
                     out.append(("anchor", node.id, node_style, href))
                 if display in BLOCK:
@@ -2044,7 +2117,7 @@ def _bottom_edge(item) -> float:
         return 0.0
     if item[0] == "group":
         return max((_bottom_edge(sub) for sub in item[1]), default=0.0)
-    if item[0] in ("rect", "image", "rrect", "rborder", "svg"):
+    if item[0] in ("rect", "image", "rrect", "rborder", "svg", "gradient"):
         return item[1].bottom()
     if item[0] == "text":
         return item[2] + QFontMetricsF(item[4]).descent()
@@ -2056,7 +2129,7 @@ def _right_edge(item) -> float:
         return 0.0
     if item[0] == "group":
         return max((_right_edge(sub) for sub in item[1]), default=0.0)
-    if item[0] in ("rect", "image", "rrect", "rborder", "svg"):
+    if item[0] in ("rect", "image", "rrect", "rborder", "svg", "gradient"):
         return item[1].right()
     if item[0] == "text":
         return item[1] + QFontMetricsF(item[4]).horizontalAdvance(item[3])
