@@ -1399,6 +1399,95 @@ def test_script_sites_and_debug_save(app) -> None:
         window.close()
 
 
+def test_source_and_save_page_as(app) -> None:
+    """View page source to select and copy, and Save page as, in each form."""
+    import http.server
+    import tempfile
+    import threading
+    import zipfile
+
+    from PyQt6.QtGui import QGuiApplication, QImage
+    from PyQt6.QtWidgets import QFileDialog
+
+    from merlin import savepage
+    from merlin.savepage import SourceViewer
+
+    folder = tempfile.mkdtemp(prefix="merlin-save-")
+    open(os.path.join(folder, "page.html"), "w").write(
+        "<title>Saving test</title><link rel='stylesheet' href='/style.css'>"
+        "<h1>Saving pages</h1><p>First paragraph.</p><div style='height:1400px'></div><p>Last.</p>")
+    open(os.path.join(folder, "style.css"), "w").write("h1 { color: rgb(200, 0, 0) }")
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    address = f"http://127.0.0.1:{server.server_address[1]}/page.html"
+    out = tempfile.mkdtemp(prefix="merlin-saved-")
+    window, settings, _ = make_window(app, "t-save-as")
+    real_dialog = QFileDialog.getSaveFileName
+    asked = []
+
+    def answer(path, label):
+        def fake(*a, **k):
+            asked.append(1)
+            filters = a[3].split(";;") if len(a) > 3 else []
+            return path, next((f for f in filters if f.startswith(label)), "")
+        return staticmethod(fake)
+
+    try:
+        for engine in (True, False):
+            name = "Merlin Engine" if engine else "Chromium"
+            settings.set("merlin_engine", engine, save=False)
+            view = window.new_tab(address)
+            wait(app, 3.0)
+            viewer = SourceViewer(window, view)
+            viewer.show()
+            wait(app, 1.5)
+            viewer.copy_all()
+            check(f"{name}: the page source can be selected and copied",
+                  "<h1>Saving pages</h1>" in QGuiApplication.clipboard().text()
+                  and bool(viewer.text.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse))
+            if engine:
+                check("and a Merlin Engine page's stylesheets are there too",
+                      viewer.which.count() == 2 and "style.css" in viewer.which.itemText(1))
+            viewer.close()
+            results = {}
+            for kind, label in savepage.FORMATS:
+                ext = {"complete": "html" if engine else "mhtml"}.get(kind, kind)
+                path = os.path.join(out, f"{name[:3]}-{kind}.{ext}")
+                QFileDialog.getSaveFileName = answer(path, label.split(" (")[0])
+                asked.clear()
+                savepage.save_page_as(window)
+                wait(app, 3.0)
+                results[kind] = (path, len(asked))
+            read = lambda k: open(results[k][0], "rb").read() if os.path.exists(results[k][0]) else b""  # noqa: E731
+            check(f"{name}: saves as HTML", b"<h1>Saving pages</h1>" in read("html"))
+            if engine:
+                check("  complete, with its stylesheet written in",
+                      b"rgb(200, 0, 0)" in read("complete") and b"stylesheet" not in read("complete"))
+            else:
+                check("  complete, as MHTML, asked where only once",
+                      b"MIME-Version" in read("complete")[:500] and results["complete"][1] == 1)
+            check(f"{name}: saves as PDF", read("pdf").startswith(b"%PDF"))
+            text = read("txt").decode("utf-8", "replace")
+            check(f"{name}: saves as text, in reading order",
+                  0 <= text.find("Saving pages") < text.find("First paragraph") < text.find("Last."))
+            check(f"{name}: saves as a picture", not QImage(results["png"][0]).isNull())
+            check(f"{name}: saves as a zip for debugging",
+                  "page.html" in zipfile.ZipFile(results["zip"][0]).namelist())
+    finally:
+        QFileDialog.getSaveFileName = real_dialog
+        settings.set("merlin_engine", False, save=False)
+        server.shutdown()
+        window.close()
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -1429,7 +1518,7 @@ def main() -> int:
                  test_merlin_engine_tabs, test_merlin_engine_typing,
                  test_mouse_back_forward, test_merlin_engine_passwords,
                  test_ftp_opens_in_merlin_engine, test_merlin_engine_tab_icon,
-                 test_script_sites_and_debug_save):
+                 test_script_sites_and_debug_save, test_source_and_save_page_as):
         print(f"\n{test.__name__}")
         try:
             test(app)

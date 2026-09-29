@@ -5,6 +5,22 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.7.3.4
+  View page source (Ctrl+U) opens the source in a window of its own, as plain
+  text to select and copy: any part, or all of it with Copy all. It works for
+  either kind of tab. A Merlin Engine tab has the page exactly as it came, and
+  every stylesheet it loaded, each named; a Chromium tab has the page as it is
+  now. Merlin Engine's own view of a page's source could not be selected. The
+  source in a tab, as before, is a button away: Open in a tab.
+  Save page as... (Ctrl+S) in the main menu, for either kind of tab, as:
+  HTML only; the complete page (from Chromium an MHTML file, from Merlin
+  Engine one HTML file with its stylesheets written into it); PDF; plain text,
+  in reading order; a picture of the page (from Merlin Engine the whole page,
+  from Chromium what the window shows); or the page and its stylesheets zipped,
+  for debugging. The zip replaces Settings > Merlin Engine's "Save the current
+  page for debugging" button. Saving a complete page from Chromium asks where
+  once, not twice.
+
 1.7.3.3
   Loading or refreshing a big page in Merlin Engine no longer holds Merlin up
   while its pictures arrive. Each picture arriving laid the whole page out

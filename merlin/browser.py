@@ -733,6 +733,7 @@ class BrowserWindow(QMainWindow):
         add("History", self.show_history, "Ctrl+H")
         add("Bookmarks", self.show_bookmarks, "Ctrl+Shift+O")
         add("View page source", self.view_source, "Ctrl+U")
+        add("Save page as...", self.save_page_as, "Ctrl+S")
         menu.addSeparator()
         add("Settings", self.show_settings, "Ctrl+,")
         add("About Merlin", self.show_about)
@@ -763,6 +764,7 @@ class BrowserWindow(QMainWindow):
             ("Ctrl+H", self.show_history),
             ("Ctrl+Shift+P", lambda: self.open_in_player()),
             ("Ctrl+U", self.view_source),
+            ("Ctrl+S", self.save_page_as),
             ("Ctrl+,", self.show_settings),
             ("Alt+Left", lambda: self._current_do("back")),
             ("Alt+Right", lambda: self._current_do("forward")),
@@ -1715,7 +1717,7 @@ class BrowserWindow(QMainWindow):
             self.notice_bar.show_notice(f"Save the password for {who}?", "Save")
 
     def save_engine_page(self) -> None:
-        """Settings > Merlin Engine: the current page, zipped, to send for a look."""
+        """The current page, zipped, to send for a look (Save page as... does this too)."""
         view = self.current()
         if not _is_merlin_view(view):
             self.status_label.setText("The current tab is not a Merlin Engine tab")
@@ -2384,9 +2386,20 @@ class BrowserWindow(QMainWindow):
         view.findText(text, flags)
 
     def view_source(self) -> None:
+        """The page's source in a window, to select and copy; either engine."""
         view = self.current()
-        if view:
-            self.new_tab("view-source:" + view.url().toString())
+        if not view:
+            return
+        from .savepage import SourceViewer
+
+        viewer = SourceViewer(self, view)
+        viewer.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        viewer.show()
+
+    def save_page_as(self) -> None:
+        from .savepage import save_page_as
+
+        save_page_as(self)
 
     def show_history(self) -> None:
         rows = self.history.recent(500)
@@ -2939,6 +2952,17 @@ class BrowserWindow(QMainWindow):
         self.btn_downloads.showMenu()
 
     def handle_download(self, download) -> None:
+        chosen = getattr(self, "_saving_page_path", "")
+        saving_page = getattr(download, "isSavePageDownload", lambda: False)()
+        if chosen and saving_page:
+            # Save page as... has asked where already: not asked twice
+            self._saving_page_path = ""
+            download.setDownloadDirectory(os.path.dirname(chosen))
+            download.setDownloadFileName(os.path.basename(chosen))
+            download.accept()
+            download.isFinishedChanged.connect(
+                lambda: self.status_label.setText(f"Saved {os.path.basename(chosen)}"))
+            return
         default_dir = QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.DownloadLocation) or os.path.expanduser("~")
         suggested = download.downloadFileName()

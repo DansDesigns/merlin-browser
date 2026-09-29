@@ -1511,6 +1511,119 @@ class MerlinView(QWidget):
             bundle.writestr("manifest.json", json.dumps(manifest, indent=2))
         return path
 
+    # ------------------------------------------------------ saving the page
+    def html_with_stylesheets(self) -> str:
+        """The page with each linked stylesheet written into it, one file."""
+        markup = self._markup or ""
+        if self._document is None or not self._sheets:
+            return markup
+        sources = self._document.stylesheet_sources()
+        texts = iter(zip(sources, self._sheets))
+        linked = {}
+        for (kind, *rest), text in texts:
+            if kind == "link":
+                linked[rest[0]] = (text, rest[1])
+
+        def inline(match):
+            href = re.search(r"""href\s*=\s*["']?([^"'\s>]+)""", match.group(0), re.I)
+            found = linked.get(href.group(1).strip()) if href else None
+            if not found:
+                return match.group(0)
+            text, media = found
+            media_attr = f' media="{media}"' if media and media != "all" else ""
+            return f"<style{media_attr}>\n{text}\n</style>"
+
+        return re.sub(r"<link\b[^>]*rel\s*=\s*[\"']?[^>]*stylesheet[^>]*>", inline, markup, flags=re.I)
+
+    def page_text(self) -> str:
+        """The page's words in reading order, a line for each line drawn."""
+        if self._display is None:
+            return ""
+        lines, current, last = [], [], None
+        for item in self._display.items:
+            subs = item[1] if item and item[0] == "group" else [item]
+            for sub in subs:
+                if not sub or sub[0] != "text":
+                    continue
+                baseline = round(sub[2])
+                if last is not None and abs(baseline - last) > 2:
+                    lines.append(("".join(current).strip(), last))
+                    current = []
+                current.append(sub[3])
+                last = baseline
+        if current:
+            lines.append(("".join(current).strip(), last))
+        out, previous = [], None
+        for text, baseline in lines:
+            if previous is not None and baseline - previous > 40:
+                out.append("")                          # a gap between blocks
+            out.append(text)
+            previous = baseline
+        return "\n".join(out).strip() + "\n"
+
+    def _paint_page(self, painter, top: float, height: float) -> None:
+        """The page from top, for height, as it would be drawn scrolled there."""
+        from .paint import fill_gradient
+
+        width = self._page_width()
+        area = QRectF(0, top, width, height)
+        canvas = self._display.canvas or (255, 255, 255, 255)
+        painter.fillRect(area, QColor(*canvas))
+        for gradient in reversed(self._display.canvas_gradients or []):
+            fill_gradient(painter, QRectF(0, 0, width, max(height, self._display.height)), gradient)
+        paint(painter, self._display, area,
+              {k: v for k, v in self._images.items() if v is not False})
+
+    def save_picture(self, path: str, limit: int = 32000) -> None:
+        """The whole page as one picture, not just what the window shows."""
+        if self._display is None:
+            self.grab().save(path, "PNG")
+            return
+        width = int(self._page_width())
+        height = int(min(max(self._display.height, 1), limit))
+        picture = QImage(width, height, QImage.Format.Format_ARGB32)
+        picture.fill(QColor("white"))
+        painter = QPainter(picture)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        self._paint_page(painter, 0.0, float(height))
+        painter.end()
+        picture.save(path, "PNG")
+
+    def save_pdf(self, path: str) -> None:
+        """The page on A4 pages, fitted to the width, one after another."""
+        from PyQt6.QtCore import QMarginsF
+        from PyQt6.QtGui import QPageLayout, QPageSize, QPdfWriter
+
+        if self._display is None:
+            return
+        writer = QPdfWriter(path)
+        writer.setResolution(96)
+        writer.setPageLayout(QPageLayout(QPageSize(QPageSize.PageSizeId.A4),
+                                         QPageLayout.Orientation.Portrait,
+                                         QMarginsF(10, 10, 10, 10), QPageLayout.Unit.Millimeter))
+        writer.setTitle(self._title or self._url.toString())
+        painter = QPainter(writer)
+        area = writer.pageLayout().paintRectPixels(96)
+        width = self._page_width()
+        scale = area.width() / width if width else 1.0
+        slice_height = area.height() / scale
+        top = 0.0
+        total = max(self._display.height, 1.0)
+        first = True
+        while top < total:
+            if not first:
+                writer.newPage()
+            first = False
+            painter.save()
+            painter.scale(scale, scale)
+            painter.translate(0, -top)
+            painter.setClipRect(QRectF(0, top, width, slice_height))
+            self._paint_page(painter, top, slice_height)
+            painter.restore()
+            top += slice_height
+        painter.end()
+
     # ------------------------------------------------------ find in page
     def findText(self, text: str, flags=None, callback=None) -> None:     # noqa: N802
         """Find text on the page, the next match on each call, and scroll to it."""
