@@ -153,6 +153,7 @@ DEFAULTS = {
     "merlin_engine": False,            # new tabs drawn by MerlinEngine, not Chromium
     "offer_save_passwords": True,      # after a login in a Merlin Engine tab
     "chromium_sites": [],              # sites needing JavaScript: always in Chromium
+    "ui_scale": 1.0,                   # interface size, 1.0 = 100%: applied at start
     "swipe_distance": 520,             # px of travel to complete a swipe
     # --- updates ---
     "check_updates_on_start": True,

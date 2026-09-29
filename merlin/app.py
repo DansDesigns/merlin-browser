@@ -297,6 +297,23 @@ def build_chromium_flags(settings: cfg.Settings, args=None) -> str:
     return " ".join(flags)
 
 
+def apply_interface_size(settings) -> None:
+    """Settings > Appearance > Interface size: everything drawn larger or smaller.
+
+    Qt's own scale factor enlarges the whole of Merlin alike, icons, text,
+    toolbars, menus and the pages in both engines. It has to be set before
+    Qt starts, so a change takes effect the next time Merlin starts. A
+    QT_SCALE_FACTOR already set by the user is left alone.
+    """
+    try:
+        scale = float(settings.get("ui_scale", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        return
+    if "QT_SCALE_FACTOR" in os.environ or abs(scale - 1.0) < 0.01:
+        return
+    os.environ["QT_SCALE_FACTOR"] = f"{max(0.5, min(3.0, scale)):g}"
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     # A probe child, started to check a newly swapped engine plays H.264. It
@@ -402,6 +419,7 @@ def main(argv: list[str] | None = None) -> int:
         _log.note(f"codec engine: applying failed, left as it was: {exc}")
 
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = build_chromium_flags(settings, args)
+    apply_interface_size(settings)
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
 
     from PyQt6.QtCore import QCoreApplication, QTimer

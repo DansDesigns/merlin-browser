@@ -837,6 +837,30 @@ class SettingsDialog(QDialog):
         page = QWidget()
         layout = QVBoxLayout(page)
 
+        # Interface size: everything, icons, text, toolbars and pages, enlarged alike
+        size_row = QHBoxLayout()
+        size_row.addWidget(QLabel("Interface size", page))
+        size_box = QComboBox(page)
+        sizes = [0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0]
+        for size in sizes:
+            size_box.addItem(f"{round(size * 100)}%", size)
+        current = float(self.settings.get("ui_scale", 1.0) or 1.0)
+        size_box.setCurrentIndex(min(range(len(sizes)), key=lambda i: abs(sizes[i] - current)))
+        size_row.addWidget(size_box)
+        size_row.addStretch(1)
+        layout.addLayout(size_row)
+        size_note = QLabel("Makes all of Merlin larger or smaller alike: icons, text, toolbars, "
+                           "menus and pages. Takes effect the next time Merlin starts.", page)
+        size_note.setWordWrap(True)
+        size_note.setStyleSheet("color:#9a9ba1; font-size:12px;")
+        layout.addWidget(size_note)
+
+        def size_chosen(index):
+            self.settings.set("ui_scale", size_box.itemData(index))
+            size_note.setText("Saved. Close and reopen Merlin to see it at this size.")
+
+        size_box.currentIndexChanged.connect(size_chosen)
+
         decorations = QCheckBox("Hide window decorations (frameless window)", page)
         # shows the state of the window this was opened from
         decorations.setChecked(bool(getattr(self.window_ref, "_frameless",

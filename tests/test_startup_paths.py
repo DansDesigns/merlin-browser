@@ -444,6 +444,24 @@ check("the freeze recorder watches the event loop",
       and "def watch_for_freezes(app)" in open(os.path.join(root, "merlin", "crashlog.py"),
                                               encoding="utf-8").read())
 
+# Settings > Appearance > Interface size: Qt's own scale factor, set before
+# Qt starts, so everything is enlarged alike; a user's own setting is kept.
+import subprocess as _sub
+_scale = _sub.run([sys.executable, "-c",
+    "import os, sys; sys.path.insert(0, %r); os.environ.pop('QT_SCALE_FACTOR', None)\n"
+    "from merlin.app import apply_interface_size\n"
+    "class S:\n    def get(self, k, d=None): return 1.5\n"
+    "apply_interface_size(S()); print(os.environ.get('QT_SCALE_FACTOR'))" % root],
+    capture_output=True, text=True).stdout.strip()
+_kept = _sub.run([sys.executable, "-c",
+    "import os, sys; sys.path.insert(0, %r); os.environ['QT_SCALE_FACTOR'] = '1.2'\n"
+    "from merlin.app import apply_interface_size\n"
+    "class S:\n    def get(self, k, d=None): return 2.0\n"
+    "apply_interface_size(S()); print(os.environ.get('QT_SCALE_FACTOR'))" % root],
+    capture_output=True, text=True).stdout.strip()
+check("interface size sets Qt's scale factor before Qt starts", _scale == "1.5", _scale)
+check("and a QT_SCALE_FACTOR set by the user is kept", _kept == "1.2", _kept)
+
 # --- batch quoting hazards --------------------------------------------------
 # A PowerShell call with \" escapes inside a for /f broke install.bat twice:
 # cmd has no backslash escape, so the quotes ended the string early and the

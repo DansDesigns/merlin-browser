@@ -98,11 +98,51 @@ def _open(request, timeout: int, opener=None):
         else urllib.request.urlopen(request, timeout=timeout)
 
 
-def cookie_opener(jar):
-    """An opener that keeps and sends cookies in jar; None without one."""
-    if jar is None:
-        return None
-    return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+_LENIENT: dict = {}
+
+
+def lenient_context(level: str):
+    """A TLS context for a site whose certificate problems were allowed.
+
+    "dates" checks the certificate fully, chain and name, and sets aside only
+    its dates: a computer whose clock is behind sees every new certificate as
+    not yet valid. "any" trusts the site's certificate as it is, as clicking
+    through in Chromium does, for a router's self-signed one say.
+    """
+    import ssl
+
+    context = _LENIENT.get(level)
+    if context is None:
+        context = ssl.create_default_context()
+        if level == "dates":
+            context.verify_flags |= 0x200000          # X509_V_FLAG_NO_CHECK_TIME
+        else:
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+        _LENIENT[level] = context
+    return context
+
+
+def cookie_opener(jar, lenient: str = ""):
+    """An opener keeping cookies in jar, and lenient with an allowed site's
+    certificate; None when neither is wanted."""
+    handlers = []
+    if jar is not None:
+        handlers.append(urllib.request.HTTPCookieProcessor(jar))
+    if lenient:
+        handlers.append(urllib.request.HTTPSHandler(context=lenient_context(lenient)))
+    return urllib.request.build_opener(*handlers) if handlers else None
+
+
+def certificate_failure(text) -> str:
+    """The certificate problem in a failure's message, or "" if it is not one."""
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", "replace")
+    text = text or ""
+    if "CERTIFICATE_VERIFY_FAILED" not in text:
+        return ""
+    found = re.search(r"certificate verify failed: ([^(]+)", text)
+    return (found.group(1).strip() if found else "certificate verify failed")
 
 
 def new_cookie_jar():
@@ -343,6 +383,18 @@ def needs_javascript(document) -> bool:
     return visible < 200 and (scripts >= 3 or script_size > 20000)
 
 
+def _skew_for(host: str, problem: str):
+    """For a date problem, how far off this computer's clock is; else None."""
+    from ..clock import clock_skew, is_date_problem
+
+    if not host or not is_date_problem(problem):
+        return None
+    try:
+        return clock_skew(host)
+    except Exception:                                      # noqa: BLE001
+        return None
+
+
 def _svg_picture(data: bytes):
     """An SVG file as an SvgPicture, drawn sharp at the size it is shown."""
     try:
@@ -454,6 +506,7 @@ class MerlinView(QWidget):
     _image_fetched = pyqtSignal(int, str, object, bool)  # load number, src, image or data, ok
     loginSubmitted = pyqtSignal(str, str, str)       # page, username, password
     downloadFinished = pyqtSignal(str)               # the saved file
+    certTrouble = pyqtSignal(str, str)               # host, certificate problem
     _restyled = pyqtSignal(int, object)              # load number, the worker's answer
     _icon_fetched = pyqtSignal(int, bytes)           # load number, the icon's data
     needsScript = pyqtSignal(str)                    # a page built by JavaScript: its address
@@ -469,6 +522,8 @@ class MerlinView(QWidget):
         self._places: dict = {}        # form control element -> (rect, fixed)
         self._buttons: list = []       # (rect, element, fixed) for buttons
         self._focused_once = False
+        self.cert_troubles: list = []  # items held back for certificate problems
+        self._cert_failed_url = None   # the page a certificate stopped
         self._sheets = None            # the page's stylesheets, linked and inline
         self._styler = None
         self._markup = ""              # the page as it came, for styling it again
@@ -607,6 +662,21 @@ class MerlinView(QWidget):
         self._load_number += 1                    # a fetch still running is ignored
 
     # ------------------------------------------------------- navigation
+    def _leniency(self, host: str) -> str:
+        allowed = getattr(self._host, "certificate_allowed", None)
+        return allowed(_registrable(host)) if allowed is not None and host else ""
+
+    def _cert_trouble(self, url: str, problem: str) -> None:
+        """Something the page pulls in, held back for its certificate."""
+        host = QUrl(url).host()
+        if len(self.cert_troubles) < 500:
+            self.cert_troubles.append({"url": url, "host": host, "description": problem,
+                                       "kind": "", "main": False})
+        try:
+            self.certTrouble.emit(host, problem)
+        except RuntimeError:
+            pass
+
     def _cookies(self):
         """This window's cookie jar: private windows keep theirs apart."""
         owner = self._host if self._host is not None else MerlinView
@@ -625,6 +695,16 @@ class MerlinView(QWidget):
         scheme = url.scheme().lower()
         if scheme == "merlin":
             # Merlin's own addresses, handled by the window as for Chromium's tabs
+            if url.host() == "allow-certificate":
+                site = url.path().strip("/")
+                level = "dates" if "level=dates" in url.query() else "any"
+                allow = getattr(self._host, "allow_certificate_site", None)
+                if allow is not None and site:
+                    allow(site, level)
+                    self.cert_troubles = []
+                    if self._cert_failed_url is not None:
+                        self._navigate(QUrl(self._cert_failed_url), record=False)
+                return
             action = {"listen": "start_dictation", "addtile": "add_start_tile"}.get(url.host())
             handler = getattr(self._host, action, None) if action else None
             if handler is not None:
@@ -658,8 +738,11 @@ class MerlinView(QWidget):
             headers["Origin"] = self._url.adjusted(
                 QUrl.UrlFormattingOption.RemovePath | QUrl.UrlFormattingOption.RemoveQuery
                 | QUrl.UrlFormattingOption.RemoveFragment).toString()
-        opener = cookie_opener(self._cookies())
         host_name = url.host()
+        lenient = self._leniency(host_name)
+        opener = cookie_opener(self._cookies(), lenient)
+        plain_opener = cookie_opener(None, lenient)
+        self.cert_troubles = []
         # what styling needs, taken here on the UI thread: the loading thread
         # then parses the CSS and runs the cascade without touching the window
         viewport = (self._page_width(), float(max(1, self.height())))
@@ -692,9 +775,12 @@ class MerlinView(QWidget):
                     # parsed here, off the UI thread, with its stylesheets
                     # fetched before the page is shown, as browsers do
                     prepared = self._prepare(text, final, headers, opener, host_name,
-                                             viewport, hiding)
+                                             viewport, hiding, plain_opener)
                     if saved:
                         prepared["download"] = saved
+                problem = "" if ok else certificate_failure(text)
+                if problem:
+                    prepared = {"certificate": problem, "skew": _skew_for(url.host(), problem)}
             except Exception as exc:                  # noqa: BLE001
                 ok, final, text = False, target, f"MerlinEngine failed loading it: {exc}"
             try:
@@ -703,6 +789,43 @@ class MerlinView(QWidget):
                 pass                     # the tab was closed while this loaded
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _certificate_page(self, problem: str, skew) -> str:
+        """Why a page could not be opened, for its certificate, and a way on."""
+        import html
+
+        from ..clock import describe_skew, is_date_problem
+
+        self._cert_failed_url = self._url.toString()
+        host = self._url.host()
+        site = _registrable(host)
+        self.cert_troubles = [{"url": self._url.toString(), "host": host,
+                               "description": problem, "kind": "", "main": True}]
+        try:
+            self.certTrouble.emit(host, problem)
+        except RuntimeError:
+            pass
+        dates = is_date_problem(problem)
+        why = describe_skew(skew) if (dates and skew is not None) else (
+            "A certificate that is not valid yet, or has expired, usually means this "
+            "computer's clock is wrong." if dates else
+            "The site's certificate is not one this computer trusts: a router's or a "
+            "device's own, say, or one standing in for the real site.")
+        level = "dates" if dates else "any"
+        going_on = ("Merlin Engine still checks the certificate is the site's own and "
+                    "properly signed, and sets aside only its dates."
+                    if dates else "Merlin Engine will trust the certificate it is shown.")
+        return (f"<title>Certificate problem</title><body style='font-family:sans-serif;"
+                f"margin:40px;color:#1d2030;max-width:720px'>"
+                f"<h2>{html.escape(host)}'s certificate could not be trusted</h2>"
+                f"<p style='color:#555'>{html.escape(problem)}</p>"
+                f"<p style='line-height:1.5'>{html.escape(why)}</p>"
+                f"<p style='line-height:1.5;color:#555'>Continuing is for this session only. "
+                f"{html.escape(going_on)}</p>"
+                f"<p><a href='merlin://allow-certificate/{html.escape(site)}?level={level}' "
+                f"style='display:inline-block;padding:8px 16px;background:#3a5bd9;color:white;"
+                f"border-radius:6px;text-decoration:none'>Continue to {html.escape(site)}</a></p>"
+                f"</body>")
 
     def _stylesheet_cache(self) -> dict:
         owner = self._host if self._host is not None else MerlinView
@@ -716,7 +839,7 @@ class MerlinView(QWidget):
         return cache
 
     def _prepare(self, markup: str, page_url: str, headers: dict, opener, host_name: str,
-                 viewport=None, hiding: str = ""):
+                 viewport=None, hiding: str = "", plain_opener=None):
         """The page parsed, and its linked stylesheets fetched, in order.
 
         Runs on the loading thread. Each stylesheet is checked with the
@@ -749,8 +872,11 @@ class MerlinView(QWidget):
             same = _registrable(QUrl(url).host()) == page_site
             ok, final, data, _kind = fetch_bytes(url, sheet_headers, timeout=12,
                                                  limit=4 * 1024 * 1024,
-                                                 opener=opener if same else None)
+                                                 opener=opener if same else plain_opener)
             if not ok:
+                problem = certificate_failure(data)
+                if problem:
+                    self._cert_trouble(url, problem)
                 return ""
             text = data.decode("utf-8", "replace")
             if depth < 3 and "@import" in text:
@@ -811,7 +937,10 @@ class MerlinView(QWidget):
                 final_url.setFragment(self._pending_fragment)
             self._url = final_url
             self.urlChanged.emit(self.url())
-        if not ok:
+        if not ok and prepared and prepared.get("certificate"):
+            text = self._certificate_page(prepared["certificate"], prepared.get("skew"))
+            prepared = None
+        elif not ok:
             import html
 
             text = (f"<title>Could not open this page</title><body style='font-family:"
@@ -899,14 +1028,20 @@ class MerlinView(QWidget):
             return
 
         page_site = _registrable(self._url.host())
-        own_opener = cookie_opener(self._cookies())
+        lenient = self._leniency(self._url.host())
+        own_opener = cookie_opener(self._cookies(), lenient)
+        plain_opener = cookie_opener(None, lenient)
 
         def work(src, address):
             # cookies go only to the page's own site: another site's images
             # never learn who is looking
             same = _registrable(QUrl(address).host()) == page_site
             ok, _final, data, _kind = fetch_bytes(address, headers,
-                                                  opener=own_opener if same else None)
+                                                  opener=own_opener if same else plain_opener)
+            if not ok:
+                problem = certificate_failure(data)
+                if problem:
+                    self._cert_trouble(address, problem)
             # decoded here, off the UI thread; an SVG is left to the UI thread
             decoded = None
             if ok and data and b"<svg" not in data[:4096]:
@@ -959,7 +1094,8 @@ class MerlinView(QWidget):
         headers["Accept"] = "image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5"
         _subresource(headers, "image")
         same = _registrable(QUrl(address).host()) == _registrable(self._url.host())
-        opener = cookie_opener(self._cookies()) if same else None
+        lenient = self._leniency(self._url.host())
+        opener = cookie_opener(self._cookies() if same else None, lenient)
 
         def work():
             ok, _final, data, _kind = fetch_bytes(address, headers, timeout=10,

@@ -1368,6 +1368,123 @@ def test_images_do_not_relayout(app) -> None:
         view.close()
 
 
+def _test_certificates(folder: str, start_in_hours: float = 2.0, name: str = "localhost"):
+    """A test authority, and a certificate from it starting later: as every
+    certificate looks on a computer whose clock is behind. None without the
+    cryptography library, which only these tests need."""
+    try:
+        import datetime
+        import ipaddress
+
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+    except ImportError:
+        return None
+    now = datetime.datetime.now(datetime.timezone.utc)
+    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Merlin Test CA")])
+    ca = (x509.CertificateBuilder().subject_name(ca_name).issuer_name(ca_name)
+          .public_key(ca_key.public_key()).serial_number(1)
+          .not_valid_before(now - datetime.timedelta(days=1))
+          .not_valid_after(now + datetime.timedelta(days=60))
+          .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+          .sign(ca_key, hashes.SHA256()))
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    names = [x509.DNSName(name)] + ([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]
+                                    if name == "localhost" else [])
+    cert = (x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)]))
+            .issuer_name(ca_name).public_key(key.public_key()).serial_number(2)
+            .not_valid_before(now + datetime.timedelta(hours=start_in_hours))
+            .not_valid_after(now + datetime.timedelta(days=30))
+            .add_extension(x509.SubjectAlternativeName(names), critical=False)
+            .sign(ca_key, hashes.SHA256()))
+    paths = {k: os.path.join(folder, f"{k}.pem") for k in ("ca", "cert", "key")}
+    open(paths["ca"], "wb").write(ca.public_bytes(serialization.Encoding.PEM))
+    open(paths["cert"], "wb").write(cert.public_bytes(serialization.Encoding.PEM))
+    open(paths["key"], "wb").write(key.private_bytes(serialization.Encoding.PEM,
+                                                     serialization.PrivateFormat.TraditionalOpenSSL,
+                                                     serialization.NoEncryption()))
+    return paths
+
+
+def test_certificate_leniency() -> None:
+    """An allowed site's certificate: only the dates set aside, all else checked."""
+    import ssl
+    import urllib.request
+
+    from merlin.clock import describe_skew, is_date_problem
+    from merlin.engine.view import certificate_failure, lenient_context
+
+    check("a certificate failure is read from the message",
+          certificate_failure("<urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify "
+                              "failed: certificate is not yet valid (_ssl.c:1029)>")
+          == "certificate is not yet valid")
+    check("and a date problem told apart", is_date_problem("certificate is not yet valid")
+          and not is_date_problem("unable to get local issuer certificate"))
+    check("a clock behind is described", "1 hour 2 minutes behind" in describe_skew(3720))
+    folder = tempfile.mkdtemp(prefix="merlin-tls-")
+    good = _test_certificates(folder)
+    if good is None:
+        print("  skip  certificates: the cryptography library is not installed")
+        return
+    other = _test_certificates(tempfile.mkdtemp(prefix="merlin-tls-"), name="elsewhere.test")
+
+    def serve(paths):
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(paths["cert"], paths["key"])
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+
+    def opens(server, context, ca):
+        context.load_verify_locations(ca)
+        try:
+            urllib.request.urlopen(f"https://localhost:{server.server_address[1]}/",
+                                   context=context, timeout=5).read(1)
+            return "opened"
+        except Exception as exc:                            # noqa: BLE001
+            return str(getattr(exc, "reason", exc))
+
+    right, wrong = serve(good), serve(other)
+    try:
+        check("normally, a certificate not valid yet is refused",
+              "not yet valid" in opens(right, ssl.create_default_context(), good["ca"]))
+        dates = lenient_context("dates")
+        fresh = ssl.create_default_context()
+        fresh.verify_flags = dates.verify_flags
+        check("allowed for dates, it opens", opens(right, fresh, good["ca"]) == "opened")
+        fresh = ssl.create_default_context()
+        fresh.verify_flags = dates.verify_flags
+        check("but a certificate for another name is still refused",
+              "match" in opens(wrong, fresh, other["ca"]).lower()
+              or "mismatch" in opens(wrong, fresh, other["ca"]).lower())
+        fresh = ssl.create_default_context()
+        fresh.verify_flags = dates.verify_flags
+        refusals = []
+        for trust in (other["ca"], None):          # another authority; the system's list only
+            fresh = ssl.create_default_context()
+            fresh.verify_flags = dates.verify_flags
+            if trust:
+                refusals.append(opens(right, fresh, trust))
+            else:
+                try:
+                    urllib.request.urlopen(f"https://localhost:{right.server_address[1]}/",
+                                           context=fresh, timeout=5).read(1)
+                    refusals.append("opened")
+                except Exception as exc:                    # noqa: BLE001
+                    refusals.append(str(getattr(exc, "reason", exc)))
+        # what matters is the refusal, whatever OpenSSL calls it
+        check("and one from an authority not trusted is still refused",
+              all(r != "opened" and "CERTIFICATE_VERIFY_FAILED" in r for r in refusals), str(refusals))
+    finally:
+        right.shutdown()
+        wrong.shutdown()
+
+
 def test_view(app) -> None:
     from merlin.engine import MerlinView
 
@@ -1440,7 +1557,7 @@ def main() -> int:
                  test_floats_and_positioning, test_grid_svg_inline_block,
                  test_real_world_css, test_files_ftp_smb, test_no_freeze_on_real_grids,
                  test_deep_nesting_stays_quick, test_gradients, test_worker_processes,
-                 test_all_and_script_pages):
+                 test_all_and_script_pages, test_certificate_leniency):
         print(test.__name__)
         test()
     print("test_images")

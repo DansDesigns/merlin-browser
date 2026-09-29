@@ -37,6 +37,10 @@ PATHS = {
                   'L9.7 9.4 Z" fill="{c}" stroke="{c}" stroke-width="1.6" '
                   'stroke-linejoin="round"/>'),
     "bookmarks": ('<path d="M6 4 H18 V20 L12 15.5 L6 20 Z" ' + _STROKE + '/>'),
+    "padlock_warning": ('<rect x="5" y="10.5" width="14" height="10" rx="2" ' + _STROKE + '/>'
+                        '<path d="M8 10.5 V7.5 C8 5.3 9.8 3.5 12 3.5 C14.2 3.5 16 5.3 16 7.5 '
+                        'V10.5" ' + _STROKE + '/>'
+                        '<path d="M12 13 V16.2 M12 18.2 V18.3" ' + _STROKE + '/>'),
     "shield":   ('<path d="M12 3.5 L19 6.2 V11.5 C19 15.6 16 18.8 12 20.5 '
                  'C8 18.8 5 15.6 5 11.5 V6.2 Z" ' + _STROKE + '/>'),
     "shield_off": ('<path d="M12 3.5 L19 6.2 V11.5 C19 15.6 16 18.8 12 20.5 '

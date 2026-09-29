@@ -1488,6 +1488,118 @@ def test_source_and_save_page_as(app) -> None:
         window.close()
 
 
+def test_certificate_padlock(app) -> None:
+    """Certificate problems: held back behind a padlock, not asked one by one;
+    the page itself asked once; continuing opens it; Merlin Engine too."""
+    import http.server
+    import ssl
+    import tempfile
+    import threading
+
+    from PyQt6.QtGui import QColor, QImage
+    from PyQt6.QtWidgets import QMessageBox
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from test_engine import _test_certificates
+
+    from merlin import certs
+
+    paths = _test_certificates(tempfile.mkdtemp(prefix="merlin-tls-"))
+    if paths is None:
+        print("  skip  certificate padlock: the cryptography library is not installed")
+        return
+    saved_env = os.environ.get("SSL_CERT_FILE")
+    os.environ["SSL_CERT_FILE"] = paths["ca"]      # Merlin Engine trusts the test authority
+    questions = []
+    real_warning = QMessageBox.warning
+    QMessageBox.warning = staticmethod(lambda *a, **k: (questions.append(1),
+                                                        QMessageBox.StandardButton.No)[1])
+    folder = tempfile.mkdtemp(prefix="merlin-tls-site-")
+    open(os.path.join(folder, "index.html"), "w").write("<title>Secure page</title><h1>Secure</h1>")
+    picture = QImage(20, 20, QImage.Format.Format_RGB32)
+    picture.fill(QColor("orange"))
+    for i in range(5):
+        picture.save(os.path.join(folder, f"p{i}.png"))
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+    secure = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(paths["cert"], paths["key"])
+    secure.socket = context.wrap_socket(secure.socket, server_side=True)
+    threading.Thread(target=secure.serve_forever, daemon=True).start()
+    port = secure.server_address[1]
+    plain_folder = tempfile.mkdtemp(prefix="merlin-tls-plain-")
+    open(os.path.join(plain_folder, "index.html"), "w").write(
+        "<title>Pictures</title><p>pictures:" + "".join(
+            f"<img src='https://localhost:{port}/p{i}.png' width=20 height=20>" for i in range(5)))
+
+    class Plain(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=plain_folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+    plain = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Plain)
+    threading.Thread(target=plain.serve_forever, daemon=True).start()
+    window, settings, _ = make_window(app, "t-certs")
+    certs.ALLOWED.clear()
+    try:
+        # Merlin Engine: the page itself, then pictures from it
+        settings.set("merlin_engine", True, save=False)
+        view = window.new_tab(f"https://localhost:{port}/index.html")
+        wait(app, 4.0)
+        text = view._document.body.text() if view._document else ""
+        check("Merlin Engine: a page whose certificate is not yet valid explains why",
+              "could not be trusted" in text and "not yet valid" in text, text[:120])
+        check("  and offers to continue, setting aside only the dates",
+              any("level=dates" in h for _r, h in view._display.links))
+        check("  and the padlock shows", window.act_cert.isVisible())
+        link = next(h for _r, h in view._display.links if "allow-certificate" in h)
+        view.setUrl(view.url().resolved(QUrl(link)))
+        wait(app, 3.0)
+        check("  continuing opens it, allowed for dates only",
+              view.title() == "Secure page" and certs.ALLOWED.get("localhost") == "dates",
+              f"{view.title()} {certs.ALLOWED}")
+        certs.ALLOWED.clear()
+        view.setUrl(QUrl(f"http://127.0.0.1:{plain.server_address[1]}/index.html"))
+        wait(app, 4.0)
+        check("Merlin Engine: pictures with bad certificates are held back behind the padlock",
+              len(view.cert_troubles) == 5 and window.act_cert.isVisible() and not questions,
+              f"{len(view.cert_troubles)} {questions}")
+        # Chromium: pictures, then the page itself
+        settings.set("merlin_engine", False, save=False)
+        chromium = window.new_tab(f"http://127.0.0.1:{plain.server_address[1]}/index.html")
+        wait(app, 5.0)
+        check("Chromium: pictures with certificate problems are held back, not asked about",
+              len(getattr(chromium, "cert_troubles", [])) >= 1 and window.act_cert.isVisible()
+              and not questions, f"{len(getattr(chromium, 'cert_troubles', []))} {questions}")
+        page = window.new_tab(f"https://localhost:{port}/index.html")
+        wait(app, 5.0)
+        check("Chromium: the page itself is asked about once, in the notice bar",
+              window.notice_bar.isVisible() and not questions)
+        window._notice_accepted()
+        wait(app, 4.0)
+        check("  continuing opens it", page.title() == "Secure page", page.title())
+    finally:
+        QMessageBox.warning = real_warning
+        if saved_env is None:
+            os.environ.pop("SSL_CERT_FILE", None)
+        else:
+            os.environ["SSL_CERT_FILE"] = saved_env
+        certs.ALLOWED.clear()
+        settings.set("merlin_engine", False, save=False)
+        window.close()
+        secure.shutdown()
+        plain.shutdown()
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -1518,7 +1630,8 @@ def main() -> int:
                  test_merlin_engine_tabs, test_merlin_engine_typing,
                  test_mouse_back_forward, test_merlin_engine_passwords,
                  test_ftp_opens_in_merlin_engine, test_merlin_engine_tab_icon,
-                 test_script_sites_and_debug_save, test_source_and_save_page_as):
+                 test_script_sites_and_debug_save, test_source_and_save_page_as,
+                 test_certificate_padlock):
         print(f"\n{test.__name__}")
         try:
             test(app)

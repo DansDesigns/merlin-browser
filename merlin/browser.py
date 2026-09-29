@@ -192,6 +192,13 @@ class WebPage(QWebEnginePage):
         return  # keep the terminal quiet
 
     def _on_certificate_error(self, error):
+        # gathered per site behind the address bar's padlock, not asked one by
+        # one: YouTube had asked fifteen times for one page
+        try:
+            if self.window_ref.certificate_problem(self, error):
+                return
+        except Exception:                                   # noqa: BLE001
+            pass
         try:
             description = error.description()
         except AttributeError:
@@ -455,6 +462,14 @@ class BrowserWindow(QMainWindow):
             lambda: self.navigate(self.url_bar.text()))
         # the first click selects the whole address, so typing replaces it
         self.url_bar.installEventFilter(self)
+        # a warning padlock, shown while the tab has certificate problems
+        self.act_cert = self.url_bar.addAction(
+            icons.coloured_icon("padlock_warning", "#e0a030"),
+            QLineEdit.ActionPosition.LeadingPosition)
+        self.act_cert.setToolTip("Certificate problems on this page: click for details")
+        self.act_cert.setVisible(False)
+        self.act_cert.triggered.connect(self.show_certificate_problems)
+        self._cert_pending: list = []
         # the mouse's back and forward buttons, anywhere in this window
         self._mouse_navigation = _MouseNavigation(self)
         QApplication.instance().installEventFilter(self._mouse_navigation)
@@ -1119,6 +1134,7 @@ class BrowserWindow(QMainWindow):
             # The window's content blocker and settings apply to it as well.
             view = engine_view(self, host=self, profile=self.profile)
             view.loginSubmitted.connect(self._offer_to_save_login)
+            view.certTrouble.connect(lambda host, text, v=view: self._engine_cert_trouble(v, host, text))
             view.needsScript.connect(lambda url, v=view: self._offer_chromium(v, url))
             view.downloadFinished.connect(
                 lambda path: self.status_label.setText(
@@ -1695,6 +1711,13 @@ class BrowserWindow(QMainWindow):
         self.notice_bar.setVisible(False)
         self._notice_page = ""
         self._notice_action = None
+        # a page waiting on its certificate question: not continued
+        for error in getattr(self, "_cert_pending", []):
+            try:
+                error.rejectCertificate()
+            except Exception:                              # noqa: BLE001
+                pass
+        self._cert_pending = []
 
     def _offer_to_save_login(self, url: str, username: str, password: str) -> None:
         """After a login in a Merlin Engine tab: offer to save, or update, it."""
@@ -1737,6 +1760,165 @@ class BrowserWindow(QMainWindow):
         count = len(self.settings.get("chromium_sites", []) or [])
         self.settings.set("chromium_sites", [])
         return count
+
+    # ------------------------------------------------ certificate problems
+    def certificate_allowed(self, site: str) -> str:
+        """How far the site's certificate problems are allowed: "", "dates" or "any"."""
+        from . import certs
+
+        return certs.ALLOWED.get(site, "") if site else ""
+
+    def allow_certificate_site(self, site: str, level: str = "any") -> None:
+        from . import certs
+
+        certs.allow(site, level)
+
+    def certificate_problem(self, page, error) -> bool:
+        """A certificate problem from a Chromium page; True once handled.
+
+        What a page pulls in is held back and counted behind the padlock; the
+        page itself is asked about once, in the notice bar; a site allowed
+        this session goes ahead. A problem Chromium says cannot be overridden
+        is refused, as before.
+        """
+        from . import certs
+        from .clock import is_date_problem
+
+        url = error.url()
+        main = error.isMainFrame() if hasattr(error, "isMainFrame") else url == page.url()
+        site = certs.site_of(url if main else page.url())
+        try:
+            description = error.description()
+        except Exception:                                  # noqa: BLE001
+            description = "Certificate problem"
+        kind = str(getattr(error.type(), "name", error.type())) if hasattr(error, "type") else ""
+        # the page's tab: Qt 6 finds it with forPage; each page's parent is its view too
+        view = QWebEngineView.forPage(page) if hasattr(QWebEngineView, "forPage") else None
+        if view is None:
+            view = page.parent()
+        if view is None:
+            return False
+        trouble = {"url": url.toString(), "host": url.host(), "description": description,
+                   "kind": kind, "main": main}
+        if is_date_problem(description) or "Date" in kind:
+            self._check_clock_once(url.host())
+        if error.isOverridable() and self.certificate_allowed(site):
+            error.acceptCertificate()
+            return True
+        if not error.isOverridable():
+            error.rejectCertificate()
+            self._note_cert_trouble(view, trouble)
+            return True
+        if not main:
+            error.rejectCertificate()             # held back, quietly, and counted
+            self._note_cert_trouble(view, trouble)
+            return True
+        # the page itself: one question, in the notice bar, while it waits
+        error.defer()
+        # a copy is kept: the object the signal hands over lives only while the
+        # handler runs, and accepting it later reached nothing, so the page
+        # never went on; a copy shares the decision Chromium waits on
+        try:
+            kept = type(error)(error)
+        except Exception:                                  # noqa: BLE001
+            kept = error
+        self._cert_pending.append(kept)
+        self._note_cert_trouble(view, trouble)
+
+        def go_on():
+            self.allow_certificate_site(site, certs.level_for([description]))
+            for waiting in self._cert_pending:
+                try:
+                    waiting.acceptCertificate()
+                except Exception:                          # noqa: BLE001
+                    pass
+            self._cert_pending = []
+            view.cert_troubles = []
+            self._update_cert_indicator()
+
+        self._notice_page = ""
+        self._notice_action = go_on
+        self.notice_bar.show_notice(
+            f"{url.host()}: {description}. Continue to {site} anyway? "
+            f"(for this session; the padlock says more)", "Continue")
+        return True
+
+    def _engine_cert_trouble(self, view, host: str, text: str) -> None:
+        from .clock import is_date_problem
+
+        if is_date_problem(text):
+            self._check_clock_once(host)
+        if view is self.current():
+            self._update_cert_indicator()
+
+    def _note_cert_trouble(self, view, trouble: dict) -> None:
+        troubles = getattr(view, "cert_troubles", None)
+        if troubles is None:
+            troubles = view.cert_troubles = []
+        if len(troubles) < 500:
+            troubles.append(trouble)
+        if view is self.current():
+            self._update_cert_indicator()
+
+    def _update_cert_indicator(self) -> None:
+        view = self.current()
+        troubles = getattr(view, "cert_troubles", None) if view is not None else None
+        shown = bool(troubles)
+        self.act_cert.setVisible(shown)
+        if shown:
+            self.act_cert.setToolTip(f"{len(troubles)} item{'s' if len(troubles) != 1 else ''} "
+                                     f"held back for certificate problems: click for details")
+
+    def show_certificate_problems(self) -> None:
+        from . import certs
+
+        view = self.current()
+        troubles = list(getattr(view, "cert_troubles", []) or [])
+        if view is None or not troubles:
+            return
+        site = certs.site_of(view.url())
+        window = certs.CertificateWindow(self, view, site, troubles)
+        window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        window.show()
+
+    def _check_clock_once(self, host: str) -> None:
+        """On the first date problem this session: is the clock wrong? Say so."""
+        from . import certs
+
+        if certs.CLOCK_CHECKED or not host:
+            return
+        certs.CLOCK_CHECKED = True
+        import threading
+
+        from .clock import clock_skew, describe_skew
+
+        found = {}
+
+        def work():
+            try:
+                found["skew"] = clock_skew(host)
+            except Exception:                              # noqa: BLE001
+                found["skew"] = None
+            found["done"] = True
+
+        threading.Thread(target=work, daemon=True).start()
+
+        def report():
+            if not found.get("done"):
+                QTimer.singleShot(250, report)
+                return
+            skew = found.get("skew")
+            if skew is None or abs(skew) < 120:
+                return
+            certs.CLOCK_SKEW = skew
+            self.status_label.setText(describe_skew(skew).split(". ")[0] + ". Secure sites "
+                                      "will keep failing until it is set right.")
+            if not self.notice_bar.isVisible():
+                self._notice_page = ""
+                self._notice_action = self.show_certificate_problems
+                self.notice_bar.show_notice(describe_skew(skew).split(". Setting")[0] + ".",
+                                            "Details")
+        QTimer.singleShot(250, report)
 
     # ------------------------------------------------ sites needing JavaScript
     def _chromium_site(self, url: QUrl) -> bool:
@@ -2090,6 +2272,10 @@ class BrowserWindow(QMainWindow):
         return True
 
     def _on_load_state(self, view: WebView, loading: bool, ok: bool = True) -> None:
+        if loading and isinstance(view, WebView):
+            view.cert_troubles = []             # a new page: its problems start afresh
+            if view is self.current():
+                self._update_cert_indicator()
         view._loading = loading
         if not loading and ok:
             # Also look once a page has loaded, not only when the address
@@ -2133,6 +2319,7 @@ class BrowserWindow(QMainWindow):
     def _on_tab_changed(self, index: int) -> None:
         if hasattr(self, "notice_bar") and self._notice_page:
             self._notice_dismissed()
+        self._update_cert_indicator()
         view = self.current()
         if not view:
             return

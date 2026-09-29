@@ -5,6 +5,34 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.7.3.5
+  Certificate problems no longer ask one question after another. Merlin asked
+  about each one in a box to click through, one for every picture and video:
+  fifteen for one YouTube page. Now what a page pulls in with a certificate
+  problem is held back quietly and counted, and a warning padlock shows at the
+  start of the address bar. Clicking it says what was held back and from where,
+  and offers to allow the site for this session, which reloads the page. A
+  problem with the page itself is asked about once, in the notice bar rather
+  than a box, and continuing goes on to the page. Both engines work this way.
+  "Not yet valid" nearly always means the computer's clock is behind: new
+  certificates then look as if they start in the future, on every secure site,
+  in Chromium and Merlin Engine alike. On the first such problem Merlin asks a
+  server for its time and, if the clock is out, says by how much and how to
+  set it right; the padlock's window says so too. On Linux a clock kept right
+  by 'timedatectl set-ntp true' fixes it for every site; a computer that also
+  runs Windows may need 'timedatectl set-local-rtc 1' as well.
+  Merlin Engine showed only "could not open this page" with Python's error
+  for every secure site when the clock was out. It now explains the problem,
+  with the clock's reading, and offers to continue. When the problem is only
+  the dates, continuing still checks the certificate is the site's own and
+  properly signed, and sets aside only its dates; for anything else, such as a
+  router's own certificate, it trusts the certificate shown, as clicking
+  through in Chromium does. Allowing lasts until Merlin closes.
+  Settings > Appearance > Interface size, from 80% to 200%: all of Merlin
+  larger or smaller alike, icons, text, toolbars, menus and the pages in both
+  engines. It takes effect the next time Merlin starts. A QT_SCALE_FACTOR set
+  by the user is left alone.
+
 1.7.3.4
   View page source (Ctrl+U) opens the source in a window of its own, as plain
   text to select and copy: any part, or all of it with Copy all. It works for
