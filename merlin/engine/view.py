@@ -750,6 +750,11 @@ class MerlinView(QWidget):
         self._update_scrollbar()
         self._sync_controls()
         self.update()
+        if self._display.simplified:
+            label = getattr(self._host, "status_label", None)
+            if label is not None:
+                label.setText("This page is too complex for Merlin Engine to lay out fully; "
+                              "parts of it are approximate")
 
     def _update_scrollbar(self) -> None:
         total = self._display.height if self._display else 0.0

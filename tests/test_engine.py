@@ -958,6 +958,40 @@ def test_no_freeze_on_real_grids() -> None:
           f"{placed} {other}")
 
 
+def test_deep_nesting_stays_quick() -> None:
+    """Flex nested many deep: 1.7.2 took minutes, measuring the same items over
+    and over, and froze on real sites. In a separate process, under a limit."""
+    import subprocess
+
+    script = (
+        "import os, sys, time\n"
+        "os.environ['QT_QPA_PLATFORM'] = 'offscreen'\n"
+        f"sys.path.insert(0, {ROOT!r})\n"
+        "from PyQt6.QtWidgets import QApplication\n"
+        "app = QApplication([])\n"
+        "from merlin.engine.html import parse\n"
+        "from merlin.engine.css import Styler\n"
+        "from merlin.engine.layout import Layout\n"
+        "inner = '<span>label</span><span>more text here</span>'\n"
+        "for _ in range(12):\n"
+        "    inner = f\"<div style='display:flex;gap:4px'><div>{inner}</div><div>side</div></div>\"\n"
+        "doc = parse(inner)\n"
+        "styles = Styler(doc).compute()\n"
+        "start = time.perf_counter()\n"
+        "out = Layout(doc, styles, 1000).run()\n"
+        "print(f'{time.perf_counter() - start:.2f} simplified={out.simplified}')\n")
+    try:
+        done = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                              timeout=30)
+        took = done.stdout.strip()
+    except subprocess.TimeoutExpired:
+        took = ""
+    seconds = float(took.split()[0]) if took else None
+    check("flex nested 12 deep lays out in well under a second",
+          seconds is not None and seconds < 1.0, took or "still running after 30 seconds")
+    check("without needing the time budget's estimates", took.endswith("simplified=False"), took)
+
+
 def test_view(app) -> None:
     from merlin.engine import MerlinView
 
@@ -1028,7 +1062,8 @@ def main() -> int:
     for test in (test_no_chromium, test_without_html_parser, test_parsing, test_cascade, test_layout,
                  test_body_and_markers, test_tables, test_flexbox,
                  test_floats_and_positioning, test_grid_svg_inline_block,
-                 test_real_world_css, test_files_ftp_smb, test_no_freeze_on_real_grids):
+                 test_real_world_css, test_files_ftp_smb, test_no_freeze_on_real_grids,
+                 test_deep_nesting_stays_quick):
         print(test.__name__)
         test()
     print("test_images")

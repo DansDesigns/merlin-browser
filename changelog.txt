@@ -5,6 +5,19 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.7.3
+  Fixed: 1.7.2 could still freeze on some websites in a Merlin Engine tab.
+  The freeze recorder added in 1.7.2 showed where: flexbox measuring flexbox.
+  To size a flex item Merlin Engine measures it several ways, and an item that
+  is itself a flex container measures its own items again, so the work
+  multiplied with every level of nesting: two seconds at seven levels, over two
+  minutes at ten, and real sites nest deeper. Measurements are now remembered
+  for the rest of a layout pass, so nothing is measured twice: ten levels now
+  take a hundredth of a second, and pages come out pixel for pixel as before.
+  As a safety net, a layout pass has a six-second budget: past it, measuring
+  gives way to quick estimates, the page shows, and the status bar says parts
+  of it are approximate. No page can hold the window up for long.
+
 1.7.2
   Fixed: 1.7.1 could freeze on some websites in a Merlin Engine tab, and had to
   be ended, leaving nothing in the log. A CSS grid item placed in a column past

@@ -44,6 +44,9 @@ class LabelTarget(str):
         return made
 
 
+LAYOUT_BUDGET = 6.0         # seconds a layout pass measures precisely
+
+
 class DisplayList:
     """Drawing instructions in page coordinates, in painting order."""
 
@@ -55,6 +58,7 @@ class DisplayList:
         self.width = 0.0
         self.canvas = None               # the page's background colour
         self.fixed = None                # position: fixed, drawn against the window
+        self.simplified = False          # the time budget ran out: estimates used
 
 
 class _Fonts:
@@ -126,6 +130,21 @@ class Layout:
         self._last_baseline = None
         self._measuring = False
         self._link = None                 # the href of an enclosing block-level link
+        # Measurements, remembered for this pass. Flex and grid measure an item
+        # several ways to size it, and an item that is itself a flex container
+        # measures its own items again: without remembering, the work
+        # multiplied with every level of nesting, and a page nested ten deep
+        # took minutes (1.7.2 froze on such sites). Each entry keeps its element
+        # and style alive, so their ids cannot be reused by other objects
+        # within the pass and give a wrong answer.
+        self._measured: dict = {}
+        # A time budget for the pass: past it, measuring gives way to quick
+        # estimates, so no page can hold the window up for long
+        import time as _time
+
+        self._clock = _time.monotonic
+        self._deadline = self._clock() + LAYOUT_BUDGET
+        self.simplified = False
         self.document = document
         self.styles = styles
         self.zoom = zoom
@@ -156,6 +175,7 @@ class Layout:
                 self._place_absolute(element, style, page, static_x, static_y)
             fixed, self.out = self.out, saved
             self.out.fixed = fixed
+        self.out.simplified = self.simplified
         bottom = max((_bottom_edge(item) for item in self.out.items), default=0.0)
         self.out.height = max(height, bottom)
         self.out.width = self.width
@@ -575,6 +595,13 @@ class Layout:
 
     def _natural_width(self, element: Element, style: dict, narrowest: bool) -> float:
         """An item's content width with no line breaks, or broken at every chance."""
+        if self._clock() > self._deadline:
+            # out of time: a quick estimate from the text alone
+            self.simplified = True
+            if narrowest:
+                return 0.0
+            _font, metrics = self.fonts.get(style)
+            return min(600.0 * self.zoom, metrics.horizontalAdvance(element.text()[:200]))
         if element.tag == "svg":
             # an <svg>'s size is its own, from its attributes, not from what
             # is inside it; measured by contents it came out 0 wide
@@ -606,6 +633,19 @@ class Layout:
 
     def _scratch_height(self, element, style, border_width) -> float:
         """How tall an item would be at a width, without drawing it."""
+        key = ("height", id(element), id(style), round(border_width, 3))
+        found = self._measured.get(key)
+        if found is not None:
+            return found[0]
+        if self._clock() > self._deadline:
+            self.simplified = True
+            _font, metrics = self.fonts.get(style)
+            return metrics.lineSpacing()
+        height = self._scratch_height_now(element, style, border_width)
+        self._measured[key] = (height, element, style)
+        return height
+
+    def _scratch_height_now(self, element, style, border_width) -> float:
         saved, saved_runs = self.out, self._runs
         held = (self._floats, self._absolute, self._fixed)
         self._floats, self._absolute, self._fixed = [], [[]], []
@@ -1966,6 +2006,16 @@ class _Measure:
         self.layout = layout
 
     def extent(self, element, style, width: float) -> float:
+        """The width content takes when laid out in width: remembered per pass."""
+        key = ("extent", id(element), id(style), width)
+        found = self.layout._measured.get(key)
+        if found is not None:
+            return found[0]
+        result = self._extent_now(element, style, width)
+        self.layout._measured[key] = (result, element, style)
+        return result
+
+    def _extent_now(self, element, style, width: float) -> float:
         saved = self.layout.out
         was_measuring = self.layout._measuring
         held = (self.layout._floats, self.layout._absolute, self.layout._fixed)
