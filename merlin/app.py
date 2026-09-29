@@ -32,6 +32,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--persist-decorations", action="store_true",
         help="also write the --decorations/--no-decorations choice to settings",
     )
+    parser.add_argument("--reset-interface-size", action="store_true",
+                        help="put the interface size back to 100%%, for when it is "
+                             "too large to reach the settings")
     parser.add_argument("--private", action="store_true",
                         help="open an off-the-record window")
     parser.add_argument("--tor", action="store_true",
@@ -297,7 +300,10 @@ def build_chromium_flags(settings: cfg.Settings, args=None) -> str:
     return " ".join(flags)
 
 
-def apply_interface_size(settings) -> None:
+MIN_ROOM = (900, 560)      # the least room, in the scaled interface, Merlin needs
+
+
+def apply_interface_size(settings) -> str:
     """Settings > Appearance > Interface size: everything drawn larger or smaller.
 
     Qt's own scale factor enlarges the whole of Merlin alike, icons, text,
@@ -308,10 +314,62 @@ def apply_interface_size(settings) -> None:
     try:
         scale = float(settings.get("ui_scale", 1.0) or 1.0)
     except (TypeError, ValueError):
-        return
-    if "QT_SCALE_FACTOR" in os.environ or abs(scale - 1.0) < 0.01:
-        return
+        return "interface size: the setting could not be read"
+    if "QT_SCALE_FACTOR" in os.environ:
+        return (f"interface size: setting {scale:.0%}, but QT_SCALE_FACTOR="
+                f"{os.environ['QT_SCALE_FACTOR']} was already set outside Merlin, and is kept")
+    if abs(scale - 1.0) < 0.01:
+        return "interface size: 100%"
     os.environ["QT_SCALE_FACTOR"] = f"{max(0.5, min(3.0, scale)):g}"
+    return f"interface size: {scale:.0%}, QT_SCALE_FACTOR={os.environ['QT_SCALE_FACTOR']} set by Merlin"
+
+
+def interface_room_check(app, settings, applied_by_merlin: bool) -> str:
+    """After Qt starts: is there room for Merlin at this interface size?
+
+    At a size too large for the screen the window, the menu and the buttons
+    ran off its edges, and there was no way back from inside Merlin. With too
+    little room, the size goes back to 100% for the next start, and a note says
+    so. Returns the note, or "".
+    """
+    screen = app.primaryScreen()
+    if screen is None:
+        return ""
+    area = screen.availableGeometry()
+    try:
+        from . import crashlog
+
+        crashlog.note(f"screen: {area.width()}x{area.height()} in the interface's units, "
+                      f"device pixel ratio {screen.devicePixelRatio():g}")
+    except Exception:                                      # noqa: BLE001
+        pass
+    if not applied_by_merlin or (area.width() >= MIN_ROOM[0] and area.height() >= MIN_ROOM[1]):
+        return ""
+    size = settings.get("ui_scale", 1.0)
+    settings.set("ui_scale", 1.0)
+    return (f"Interface size {float(size):.0%} leaves too little room on this screen, so it "
+            f"goes back to 100% the next time Merlin starts.")
+
+
+def _keep_dialogs_on_screen(app) -> None:
+    """Every dialog kept wholly on its screen when shown, Settings included."""
+    from PyQt6.QtCore import QEvent, QObject
+    from PyQt6.QtWidgets import QDialog
+
+    from .ui import fit_on_screen
+
+    class OnScreen(QObject):
+        def eventFilter(self, watched, event):             # noqa: N802
+            if event.type() == QEvent.Type.Show and isinstance(watched, QDialog):
+                try:
+                    fit_on_screen(watched)
+                except RuntimeError:
+                    pass
+            return False
+
+    keeper = OnScreen(app)
+    app.installEventFilter(keeper)
+    app.setProperty("merlin_on_screen", keeper)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -419,7 +477,15 @@ def main(argv: list[str] | None = None) -> int:
         _log.note(f"codec engine: applying failed, left as it was: {exc}")
 
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = build_chromium_flags(settings, args)
-    apply_interface_size(settings)
+    if getattr(args, "reset_interface_size", False):
+        settings.set("ui_scale", 1.0)          # the way back, from outside Merlin
+    interface_note = apply_interface_size(settings)
+    try:
+        from . import crashlog
+
+        crashlog.note(interface_note)
+    except Exception:                                      # noqa: BLE001
+        pass
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
 
     from PyQt6.QtCore import QCoreApplication, QTimer
@@ -450,6 +516,8 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication([sys.argv[0]])
     mark("QApplication created")
+    room_note = interface_room_check(app, settings, "set by Merlin" in interface_note)
+    _keep_dialogs_on_screen(app)
     # An installed app keeps the name given on the command line, so its
     # window carries its own WM_CLASS. Overwriting it here put every app back
     # under Merlin's class, and so under Merlin's icon.
@@ -604,6 +672,12 @@ def main(argv: list[str] | None = None) -> int:
             app.setProperty("merlin_instance_server", instance_server)
 
     window.show()
+    from .ui import fit_on_screen
+
+    fit_on_screen(window)          # at a large interface size it could run off the screen
+    if room_note:
+        window._notice_page = ""
+        window.notice_bar.show_notice(room_note, "OK")
 
     # No "if Windows" here on purpose. Gating this on os.name meant the branch
     # never ran during testing, and a NameError inside it shipped: QTimer was

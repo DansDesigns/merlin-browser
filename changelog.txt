@@ -5,6 +5,25 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.7.3.6
+  Fixed: a large interface size could leave Merlin unusable on Windows. The
+  window came back at its saved size, now drawn larger, running off the screen
+  with the menu and the buttons, and there was no way back from inside Merlin.
+  Now the window and every dialog are kept on the screen at any size; when a
+  size leaves too little room to work in, it goes back to 100% for the next
+  start and the notice bar says so; and "Merlin --reset-interface-size" puts
+  it back from outside Merlin. Setting QT_SCALE_FACTOR=1 before starting
+  Merlin also starts it at 100%, as a size set outside Merlin is always kept.
+  The log now says what interface size was applied at start, and whether
+  anything outside Merlin set one: on Linux it had no effect, and this will
+  show why.
+  Merlin Engine paints in CSS's stacking order: a positioned box (relative,
+  absolute, fixed or sticky) is painted after the ordinary content around it,
+  in order of its z-index, those below zero first. Pages were painted simply
+  in document order, so content after a pinned header was painted over it as
+  the page scrolled, and a box meant to lie behind the rest lay on top. The
+  top-most link is the one a click finds.
+
 1.7.3.5
   Certificate problems no longer ask one question after another. Merlin asked
   about each one in a box to click through, one for every picture and video:

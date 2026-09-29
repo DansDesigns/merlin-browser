@@ -1738,3 +1738,31 @@ def user_stylesheet_script(css: str, name: str):
 
 def path_exists(path: str) -> bool:
     return bool(path) and os.path.exists(path)
+
+
+
+def fit_on_screen(widget) -> bool:
+    """Keep a window or dialog wholly on its screen, shrinking it if need be.
+
+    At a large interface size a window restored at its saved size, or a dialog
+    at its own, ran past the screen's edges, taking the menu and the buttons
+    with it. True if it had to be moved or made smaller.
+    """
+    from PyQt6.QtGui import QGuiApplication
+
+    screen = widget.screen() or QGuiApplication.primaryScreen()
+    if screen is None:
+        return False
+    area = screen.availableGeometry()
+    frame, inner = widget.frameGeometry(), widget.geometry()
+    extra_w, extra_h = frame.width() - inner.width(), frame.height() - inner.height()
+    width = min(inner.width(), max(200, area.width() - extra_w))
+    height = min(inner.height(), max(150, area.height() - extra_h))
+    x = min(max(frame.x(), area.x()), area.x() + area.width() - (width + extra_w))
+    y = min(max(frame.y(), area.y()), area.y() + area.height() - (height + extra_h))
+    changed = (width, height) != (inner.width(), inner.height()) or (x, y) != (frame.x(), frame.y())
+    if (width, height) != (inner.width(), inner.height()):
+        widget.resize(width, height)
+    if (x, y) != (frame.x(), frame.y()):
+        widget.move(x, y)
+    return changed

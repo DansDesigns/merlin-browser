@@ -462,6 +462,20 @@ _kept = _sub.run([sys.executable, "-c",
 check("interface size sets Qt's scale factor before Qt starts", _scale == "1.5", _scale)
 check("and a QT_SCALE_FACTOR set by the user is kept", _kept == "1.2", _kept)
 
+# At a size too large for the screen the window ran past it, and nothing in
+# Merlin could be reached to undo it: a way back from outside, and the room
+# checked at start.
+_reset = _sub.run([sys.executable, "-c",
+    "import sys; sys.path.insert(0, %r)\n"
+    "from merlin.app import parse_args\n"
+    "print(parse_args(['--reset-interface-size']).reset_interface_size)" % root],
+    capture_output=True, text=True).stdout.strip()
+check("Merlin --reset-interface-size puts the size back, from outside", _reset == "True", _reset)
+_app_text = open(os.path.join(root, "merlin", "app.py"), encoding="utf-8").read()
+check("the room for the interface is checked as Qt starts, and the window kept on screen",
+      "interface_room_check(app, settings" in _app_text and "fit_on_screen(window)" in _app_text
+      and "_keep_dialogs_on_screen(app)" in _app_text)
+
 # --- batch quoting hazards --------------------------------------------------
 # A PowerShell call with \" escapes inside a for /f broke install.bat twice:
 # cmd has no backslash escape, so the quotes ended the string early and the

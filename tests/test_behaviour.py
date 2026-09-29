@@ -1600,6 +1600,58 @@ def test_certificate_padlock(app) -> None:
         plain.shutdown()
 
 
+def test_interface_too_large(app) -> None:
+    """An interface size too large for the screen: noticed, put back for the
+    next start, and the window and dialogs kept on the screen."""
+    from PyQt6.QtWidgets import QDialog
+
+    from merlin.app import interface_room_check
+    from merlin.ui import fit_on_screen
+
+    window, settings, _ = make_window(app, "t-too-large")
+    try:
+        area = app.primaryScreen().availableGeometry()
+        settings.set("ui_scale", 2.0, save=False)
+        # as if the screen had too little room: the check sees it is Merlin's size
+        real = type(area)
+        small = real(0, 0, 640, 400)
+
+        class Screen:
+            def availableGeometry(self):
+                return small
+
+            def devicePixelRatio(self):
+                return 2.0
+
+        class App:
+            def primaryScreen(self):
+                return Screen()
+
+        note = interface_room_check(App(), settings, True)
+        check("too little room: the size goes back to 100% for the next start",
+              "too little room" in note and settings.get("ui_scale") == 1.0, note)
+        window.resize(area.width() + 600, area.height() + 400)
+        window.move(area.x() + 300, area.y() + 200)
+        window.show()
+        wait(app, 0.2)
+        fit_on_screen(window)
+        wait(app, 0.2)
+        check("a window larger than the screen is brought onto it",
+              area.contains(window.frameGeometry().topLeft()), str(window.frameGeometry()))
+        dialog = QDialog(window)
+        dialog.resize(area.width() + 500, area.height() + 500)
+        dialog.show()
+        wait(app, 0.2)
+        fit_on_screen(dialog)
+        check("and a dialog larger than the screen fits it",
+              dialog.frameGeometry().width() <= area.width() + 2
+              and dialog.frameGeometry().height() <= area.height() + 2, str(dialog.frameGeometry()))
+        dialog.close()
+    finally:
+        settings.set("ui_scale", 1.0, save=False)
+        window.close()
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -1631,7 +1683,7 @@ def main() -> int:
                  test_mouse_back_forward, test_merlin_engine_passwords,
                  test_ftp_opens_in_merlin_engine, test_merlin_engine_tab_icon,
                  test_script_sites_and_debug_save, test_source_and_save_page_as,
-                 test_certificate_padlock):
+                 test_certificate_padlock, test_interface_too_large):
         print(f"\n{test.__name__}")
         try:
             test(app)

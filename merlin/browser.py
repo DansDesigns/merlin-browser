@@ -3007,12 +3007,20 @@ class BrowserWindow(QMainWindow):
     def restore_geometry(self) -> None:
         if not self.settings.get("remember_window_geometry"):
             self.resize(1280, 820)
+            from .ui import fit_on_screen
+
+            fit_on_screen(self)
             return
         geometry = self.settings.get("window_geometry")
         if isinstance(geometry, list) and len(geometry) == 4:
             self.setGeometry(*[int(v) for v in geometry])
         else:
             self.resize(1280, 820)
+        # the saved size, or the default, can be larger than the screen at a
+        # large interface size: kept on it
+        from .ui import fit_on_screen
+
+        fit_on_screen(self)
         if self.settings.get("window_maximized"):
             self.showMaximized()
 

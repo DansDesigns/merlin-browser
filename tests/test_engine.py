@@ -1485,6 +1485,44 @@ def test_certificate_leniency() -> None:
         wrong.shutdown()
 
 
+def test_stacking_order(app) -> None:
+    """Positioned boxes painted in CSS's stacking order, by z-index."""
+    from merlin.engine import MerlinView
+
+    page = """<body style='margin:0;background:#ffffff'>
+    <div style='position:sticky;top:0;z-index:10;height:40px;background:#ff0000'></div>
+    <div style='position:relative;height:300px;background:#00ff00'></div>
+    <div style='position:relative;height:40px'>
+      <div style='position:absolute;z-index:-1;top:0;left:0;width:100px;height:40px;background:#0000ff'></div>
+      <div style='width:50px;height:40px;background:#ffff00'></div></div>
+    <div style='position:relative;overflow:hidden;width:100px;height:40px;background:#eeeeee'>
+      <div style='position:absolute;top:0;left:0;width:400px;height:40px;background:#ff00ff'></div></div>
+    <div style='opacity:0.5'><div style='opacity:0.5;height:40px;background:#000000'></div></div>
+    <div style='height:2000px'></div></body>"""
+    view = MerlinView()
+    view.resize(600, 600)
+    view.show()
+    try:
+        view.setHtml(page, QUrl("about:blank"))
+        wait(app, 0.3)
+        view.scrollbar.setValue(100)
+        wait(app, 0.1)
+        check("a sticky header with a z-index stays above positioned content scrolling under it",
+              view.grab().toImage().pixelColor(300, 20).name() == "#ff0000")
+        view.scrollbar.setValue(0)
+        wait(app, 0.1)
+        shot = view.grab().toImage()
+        at = lambda x, y: shot.pixelColor(x, y)                         # noqa: E731
+        check("a z-index below 0 is behind ordinary content",
+              at(25, 360).name() == "#ffff00" and at(75, 360).name() == "#0000ff")
+        check("a positioned child of overflow: hidden, painted later, is still clipped",
+              at(50, 400).name() == "#ff00ff" and at(150, 400).name() == "#ffffff")
+        check("opacity inside opacity is applied once each (a quarter)",
+              abs(at(300, 440).red() - 191) < 4, str(at(300, 440).red()))
+    finally:
+        view.close()
+
+
 def test_view(app) -> None:
     from merlin.engine import MerlinView
 
@@ -1570,6 +1608,8 @@ def main() -> int:
     test_sticky_and_icons(app)
     print("test_images_do_not_relayout")
     test_images_do_not_relayout(app)
+    print("test_stacking_order")
+    test_stacking_order(app)
     print("test_forms")
     test_forms(app)
     print("test_view")

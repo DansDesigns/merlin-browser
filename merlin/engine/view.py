@@ -1864,7 +1864,8 @@ class MerlinView(QWidget):
                 for rect, href in self._display.links[info["links"]:info.get("links_end", info["links"])]:
                     if rect.translated(0, moved).contains(point):
                         return href
-        for rect, href in self._display.links:
+        # the last laid out is, as a rule, the one on top
+        for rect, href in reversed(self._display.links):
             if rect.contains(point):
                 return href
         return ""

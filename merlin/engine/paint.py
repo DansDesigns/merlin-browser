@@ -71,62 +71,139 @@ def _colour(rgba) -> QColor:
     return QColor(rgba[0], rgba[1], rgba[2], rgba[3])
 
 
-def paint(painter, display: DisplayList, visible: QRectF, images=None) -> None:
-    """Draw the parts of the page inside visible, given in page coordinates."""
-    images = images or {}
-    depth = 0
-    shown = [visible]              # what is visible, as seen from inside sticky boxes
-    for item in display.items:
+_PUSHES = ("clip_push", "opacity_push", "sticky_push")
+_POPS = ("clip_pop", "opacity_pop", "sticky_pop")
+
+
+def _layer_ends(display: DisplayList) -> dict:
+    """Where each layer_push is closed: worked out once for a display list."""
+    ends = getattr(display, "_layer_ends", None)
+    if ends is not None and getattr(display, "_layer_count", -1) == len(display.items):
+        return ends
+    ends, stack = {}, []
+    for index, item in enumerate(display.items):
         if item is None:
             continue
-        kind = item[0]
-        if kind == "sticky_push":
-            moved = display.sticky_offset(item[1], visible.top())
-            painter.save()
-            depth += 1
-            painter.translate(0, moved)
-            shown.append(shown[-1].translated(0, -moved))
-            continue
-        if kind == "sticky_pop":
-            if depth:
-                painter.restore()
-                depth -= 1
-            if len(shown) > 1:
-                shown.pop()
-            continue
-        # clipping and opacity: always followed, whatever is visible, so that
-        # every push meets its pop
-        if kind == "clip_push":
-            painter.save()
-            depth += 1
-            rect, radius = item[1], item[2]
-            if radius > 0.5:
-                from PyQt6.QtGui import QPainterPath
+        if item[0] == "layer_push":
+            stack.append(index)
+        elif item[0] == "layer_pop" and stack:
+            ends[stack.pop()] = index
+    for index in stack:                     # never closed: runs to the end
+        ends[index] = len(display.items)
+    display._layer_ends, display._layer_count = ends, len(display.items)
+    return ends
 
-                path = QPainterPath()
-                path.addRoundedRect(rect, radius, radius)
-                painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
-            else:
-                painter.setClipRect(rect, Qt.ClipOperation.IntersectClip)
+
+def _apply(painter, display: DisplayList, item, shown: list, scroll: float) -> None:
+    """One clip, opacity or sticky offset, after painter.save()."""
+    kind = item[0]
+    if kind == "clip_push":
+        rect, radius = item[1], item[2]
+        if radius > 0.5:
+            from PyQt6.QtGui import QPainterPath
+
+            path = QPainterPath()
+            path.addRoundedRect(rect, radius, radius)
+            painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
+        else:
+            painter.setClipRect(rect, Qt.ClipOperation.IntersectClip)
+        shown.append(shown[-1])
+    elif kind == "opacity_push":
+        painter.setOpacity(painter.opacity() * item[1])
+        shown.append(shown[-1])
+    else:                                   # sticky_push
+        moved = display.sticky_offset(item[1], scroll)
+        painter.translate(0, moved)
+        shown.append(shown[-1].translated(0, -moved))
+
+
+def paint(painter, display: DisplayList, visible: QRectF, images=None) -> None:
+    """Draw the parts of the page inside visible, given in page coordinates.
+
+    In CSS's stacking order, not simply document order: a positioned box
+    (relative, absolute, fixed or sticky) is a layer, painted after the
+    ordinary content around it and ordered by its z-index, negative ones
+    first. A pinned header with a z-index therefore stays above the content
+    scrolling under it, which had been painted over it.
+    """
+    _paint_range(painter, display, 0, len(display.items), [visible], images or {},
+                 _layer_ends(display), visible.top(), [])
+
+
+def _paint_range(painter, display, start, end, shown, images, ends, scroll, active) -> None:
+    items = display.items
+    # the layers at this level, with the clips, opacities and sticky offsets
+    # in force where each begins, to be set again when it is painted later
+    layers, in_force = [], []
+    index = start
+    while index < end:
+        item = items[index]
+        if item is not None:
+            kind = item[0]
+            if kind == "layer_push":
+                close = ends.get(index, end)
+                # only what was set up at this level: whatever encloses this
+                # level is already in force while it paints, and applying it
+                # again doubled opacity and sticky offsets
+                layers.append((item[1], len(layers), index, close, list(in_force)))
+                index = close + 1
+                continue
+            if kind in _PUSHES:
+                in_force.append(item)
+            elif kind in _POPS and in_force:
+                in_force.pop()
+        index += 1
+    below = sorted(l for l in layers if l[0] < 0)
+    above = sorted(l for l in layers if l[0] >= 0)
+    for layer in below:
+        _paint_layer(painter, display, layer, shown, images, ends, scroll)
+    # the content at this level, in document order
+    depth = 0
+    here = [shown[0]] + list(shown[1:])
+    index = start
+    while index < end:
+        item = items[index]
+        if item is None:
+            index += 1
             continue
-        if kind == "opacity_push":
+        kind = item[0]
+        if kind == "layer_push":
+            index = ends.get(index, end) + 1
+            continue
+        if kind in _PUSHES:
             painter.save()
             depth += 1
-            painter.setOpacity(painter.opacity() * item[1])
-            continue
-        if kind in ("clip_pop", "opacity_pop"):
+            _apply(painter, display, item, here, scroll)
+        elif kind in _POPS:
             if depth:
                 painter.restore()
                 depth -= 1
-            continue
-        if kind == "group":
+                if len(here) > 1:
+                    here.pop()
+        elif kind == "group":
             for sub in item[1]:
-                _draw(painter, sub, shown[-1], images)
-        else:
-            _draw(painter, item, shown[-1], images)
+                _draw(painter, sub, here[-1], images)
+        elif kind != "layer_pop":
+            _draw(painter, item, here[-1], images)
+        index += 1
     while depth:
         painter.restore()
         depth -= 1
+    for layer in above:
+        _paint_layer(painter, display, layer, shown, images, ends, scroll)
+
+
+def _paint_layer(painter, display, layer, shown, images, ends, scroll) -> None:
+    _z, _order, start, close, in_force = layer
+    painter.save()
+    here = list(shown)
+    for item in in_force:
+        painter.save()
+        _apply(painter, display, item, here, scroll)
+    _paint_range(painter, display, start + 1, close, here, images, ends, scroll, in_force)
+    for _item in in_force:
+        painter.restore()
+    painter.restore()
 
 
 def _draw(painter, item, visible: QRectF, images) -> None:

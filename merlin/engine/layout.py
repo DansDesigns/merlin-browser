@@ -291,6 +291,14 @@ class Layout:
         max_height = self._length(style.get("max-height"), 0.0, vertical=True)
         fixed_height = self._length(style.get("height"), 0.0, vertical=True)
 
+        layered = style.get("position") in ("relative", "absolute", "fixed", "sticky") \
+            and not self._measuring
+        if layered:
+            try:
+                z_index = int(str(style.get("z-index", "auto")).strip())
+            except ValueError:
+                z_index = 0                       # auto: with the positioned, at 0
+            self.out.items.append(("layer_push", z_index))
         sticky = None
         if style.get("position") == "sticky" and not self._measuring:
             top_offset = self._length(style.get("top"), 0.0, vertical=True)
@@ -461,6 +469,8 @@ class Layout:
         # this box is done: sticky children now know how far they may go
         for info in self._sticky_waiting.pop(element, []):
             info["limit"] = content_y + inner_height
+        if layered:
+            self.out.items.append(("layer_pop",))
 
         if style.get("display") == "list-item" and first_baseline is not None:
             self._marker(element, style, content_x, first_baseline)
