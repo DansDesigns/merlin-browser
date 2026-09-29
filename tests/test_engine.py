@@ -907,6 +907,57 @@ def test_files_ftp_smb() -> None:
             os.kill(int(open(pid).read().strip()), 15)
 
 
+def test_no_freeze_on_real_grids() -> None:
+    """Grid items past the declared columns: 1.7.1 froze Merlin on these.
+
+    Run in a separate process with a time limit, so a hang fails the check
+    rather than stalling every test after it.
+    """
+    import subprocess
+
+    script = (
+        "import os, sys\n"
+        "os.environ['QT_QPA_PLATFORM'] = 'offscreen'\n"
+        f"sys.path.insert(0, {ROOT!r})\n"
+        "from PyQt6.QtWidgets import QApplication\n"
+        "app = QApplication([])\n"
+        "from merlin.engine.html import parse\n"
+        "from merlin.engine.css import Styler\n"
+        "from merlin.engine.layout import Layout\n"
+        "for markup in (\n"
+        "  \"<div style='display:grid;grid-template-columns:100px 100px'>"
+        "<div style='grid-column:4;height:10px;background:#ff0000'></div><div>b</div></div>\",\n"
+        "  \"<div style='display:grid;grid-template-columns:1fr'><div style='grid-column:2 / span 3'>a</div></div>\",\n"
+        "  \"<div style='display:grid'><div style='grid-column:1 / -1'>a</div><div style='grid-column:3'>b</div></div>\"):\n"
+        "    doc = parse(\"<body style='margin:0'>\" + markup)\n"
+        "    out = Layout(doc, Styler(doc).compute(), 800).run()\n"
+        "print('finished')\n")
+    try:
+        done = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                              timeout=30)
+        finished = "finished" in done.stdout
+        detail = (done.stderr or done.stdout)[-160:]
+    except subprocess.TimeoutExpired:
+        finished, detail = False, "still running after 30 seconds: it hangs"
+    check("a grid item past the declared columns does not freeze layout", finished, detail)
+    if not finished:
+        return          # laying it out here would hang these tests too
+    from merlin.engine.css import Styler
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+
+    doc = parse("<body style='margin:0'><div style='display:grid;grid-template-columns:100px 100px'>"
+                "<div style='grid-column:4;height:10px;background:#ff0000'></div>"
+                "<div style='height:10px;background:#00ff00'></div></div>")
+    out = Layout(doc, Styler(doc).compute(), 800).run()
+    rects = {sub[2][:3]: sub[1] for item in out.items if item and item[0] == "group"
+             for sub in item[1] if sub[0] == "rect"}
+    placed, other = rects.get((255, 0, 0)), rects.get((0, 255, 0))
+    check("and the grid gains columns for it, as CSS says",
+          placed is not None and round(placed.x()) == 500 and round(other.x()) == 0,
+          f"{placed} {other}")
+
+
 def test_view(app) -> None:
     from merlin.engine import MerlinView
 
@@ -977,7 +1028,7 @@ def main() -> int:
     for test in (test_no_chromium, test_without_html_parser, test_parsing, test_cascade, test_layout,
                  test_body_and_markers, test_tables, test_flexbox,
                  test_floats_and_positioning, test_grid_svg_inline_block,
-                 test_real_world_css, test_files_ftp_smb):
+                 test_real_world_css, test_files_ftp_smb, test_no_freeze_on_real_grids):
         print(test.__name__)
         test()
     print("test_images")

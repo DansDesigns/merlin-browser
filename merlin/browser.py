@@ -129,10 +129,6 @@ class _LinkCatcher(QWebEnginePage):
         self._done = False
 
     def acceptNavigationRequest(self, url, nav_type, is_main_frame):  # noqa: N802
-        if is_main_frame and url.scheme().lower() in ("ftp", "ftps", "smb"):
-            # Chromium cannot open these; Merlin Engine can, in a tab of its own
-            QTimer.singleShot(0, lambda u=url.toString(): self.window_ref.new_tab(u, engine=True))
-            return False
         if not self._done and is_main_frame and url.scheme() in ("http", "https"):
             self._done = True
             QTimer.singleShot(0, lambda u=url.toString(): self._window.open_in_browser(u))

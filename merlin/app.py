@@ -621,7 +621,10 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:                                    # noqa: BLE001
         pass
     app.aboutToQuit.connect(lambda: _shut_down(app, profile))
+    # should Merlin ever stop responding, the log shows where
+    crashlog.watch_for_freezes(app)
     code = app.exec()
+    crashlog.stop_watching()
     _leave(code, settings, history)
     return code
 

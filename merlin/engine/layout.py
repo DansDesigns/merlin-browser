@@ -1596,6 +1596,11 @@ class Layout:
                 placed.append((child, child_style, row, column, rows, columns))
             else:
                 waiting.append((child, child_style, row, column, rows, columns))
+        # An item placed in columns past those declared adds columns, as CSS
+        # says. Without this, auto-placement looked for ever for room that
+        # never came, and froze Merlin (1.7.1, on real sites' stylesheets).
+        count = max([count] + [c + cs for _e, _s, _r, c, _rs, cs in placed + waiting
+                               if c is not None])
         for _c, _s, row, column, rows, columns in placed:
             for r in range(row, row + rows):
                 for c in range(column, column + columns):
@@ -1605,7 +1610,15 @@ class Layout:
             r, c = (row, 0) if row is not None else tuple(cursor)
             if column is not None:
                 c = column
+            steps = 0
             while True:
+                steps += 1
+                if steps > 100000:
+                    # a second line of defence: never loop without end; the
+                    # item goes on a row of its own below everything
+                    r = max((rr for rr, _cc in taken), default=-1) + 1
+                    c = column if column is not None else 0
+                    break
                 if c + columns > max(count, columns):
                     r, c = r + 1, (column if column is not None else 0)
                     continue

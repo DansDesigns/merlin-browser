@@ -160,3 +160,57 @@ def note(text: str) -> None:
         _HANDLE.flush()
     except Exception:                                    # noqa: BLE001
         pass
+
+
+_WATCH = None
+FREEZE_SECONDS = 20
+
+
+def watch_for_freezes(app) -> None:
+    """Write every thread's stack to the log if Merlin stops responding.
+
+    A freeze leaves no trace otherwise: someone ends Merlin, and the log just
+    stops, as it did for 1.7.1. While the event loop runs, a timer re-arms
+    faulthandler every second; if the loop stalls for FREEZE_SECONDS, the
+    stacks of all threads go into merlin-log.txt, showing where it is stuck.
+    Merlin is not ended, and the stacks are written once for each freeze.
+    """
+    global _WATCH
+    if _HANDLE is None or _WATCH is not None:
+        return
+    try:
+        import faulthandler
+
+        from PyQt6.QtCore import QTimer
+    except Exception:          # noqa: BLE001
+        return
+
+    def rearm() -> None:
+        try:
+            faulthandler.dump_traceback_later(FREEZE_SECONDS, repeat=False, file=_HANDLE,
+                                              exit=False)
+        except Exception:      # noqa: BLE001
+            pass
+
+    _WATCH = QTimer(app)
+    _WATCH.setInterval(1000)
+    _WATCH.timeout.connect(rearm)
+    _WATCH.start()
+    rearm()
+
+
+def stop_watching() -> None:
+    """At shutdown: no freeze report for the time it takes to exit."""
+    global _WATCH
+    try:
+        import faulthandler
+
+        faulthandler.cancel_dump_traceback_later()
+    except Exception:          # noqa: BLE001
+        pass
+    if _WATCH is not None:
+        try:
+            _WATCH.stop()
+        except Exception:      # noqa: BLE001
+            pass
+        _WATCH = None

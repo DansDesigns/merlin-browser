@@ -435,6 +435,15 @@ check("the tab container's events stand aside while it is torn down",
       all("if self._torn_down():" in _container.split(f"    def {h}(self, event)")[1][:260]
           for h in ("showEvent", "moveEvent", "hideEvent", "resizeEvent")))
 
+# 1.7.1 froze on some sites and the log just stopped, with nothing to show
+# where. Should Merlin stop responding, the stacks of all threads are written
+# to the log: the recorder runs for as long as the event loop does.
+_app_src = open(os.path.join(root, "merlin", "app.py"), encoding="utf-8").read()
+check("the freeze recorder watches the event loop",
+      "crashlog.watch_for_freezes(app)\n    code = app.exec()" in _app_src
+      and "def watch_for_freezes(app)" in open(os.path.join(root, "merlin", "crashlog.py"),
+                                              encoding="utf-8").read())
+
 # --- batch quoting hazards --------------------------------------------------
 # A PowerShell call with \" escapes inside a for /f broke install.bat twice:
 # cmd has no backslash escape, so the quotes ended the string early and the

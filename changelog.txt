@@ -5,6 +5,18 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.7.2
+  Fixed: 1.7.1 could freeze on some websites in a Merlin Engine tab, and had to
+  be ended, leaving nothing in the log. A CSS grid item placed in a column past
+  those the grid declares, as in grid-column: 4 in a two-column grid, which
+  real sites do often, sent grid layout looking for ever for room that never
+  came. As CSS says, the grid now gains columns for such items; and the loop
+  that places items can no longer run without end. It showed only once 1.7.1
+  loaded sites' real stylesheets.
+  Should Merlin ever stop responding for 20 seconds, it now writes where every
+  thread is stuck into merlin-log.txt, without ending Merlin, so a freeze no
+  longer leaves the log empty.
+
 1.7.1
   The mouse's back and forward buttons work, in every tab. Chromium embedded
   in Qt leaves them to the browser around it, and Merlin had never handled
