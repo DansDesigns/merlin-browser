@@ -1,5 +1,5 @@
 # Merlin Browser
-![version](https://img.shields.io/badge/version-1.7.3.2-6f8ff0)
+![version](https://img.shields.io/badge/version-1.7.3.3-6f8ff0)
 
 ### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6 Requires a reinstall as there has been a fundamental change to the folder structure. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
 

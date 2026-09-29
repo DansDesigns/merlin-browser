@@ -900,7 +900,8 @@ class Styler:
             for name, value, important in parse_declarations(inline):
                 found.append((4 if important else 2, (1, 0, 0), 10 ** 9, name, value))
         found.sort(key=lambda item: (item[0], item[1], item[2]))
-        return [(name, value) for _layer, _spec, _order, name, value in found]
+        # each with whether it is the default stylesheet's, which all: revert keeps
+        return [(name, value, layer in (0, 5)) for layer, _spec, _order, name, value in found]
 
     def _compute(self, element: Element, parent: dict | None, root_size: float) -> None:
         parent = parent or {}
@@ -908,14 +909,29 @@ class Styler:
         # Custom properties first: inherited, then the element's own, which
         # any var() below may use. A page that sets none shares its parent's.
         custom = parent.get("--", {})
-        own = [(n, v) for n, v in ordered if n.startswith("--")]
+        own = [(n, v) for n, v, _default in ordered if n.startswith("--")]
         if own:
             custom = dict(custom)
             for name, value in own:
                 custom[name] = value
         declared = {}
-        for name, value in ordered:
+        from_default = {}
+        defaults = {}              # the default stylesheet's values, which revert goes back to
+        for name, value, is_default in ordered:
             if name.startswith("--"):
+                continue
+            if name == "all":
+                # all: resets every property set so far; sites use it to strip a
+                # browser's own look from buttons and fields
+                keyword = value.strip().lower()
+                if keyword in ("revert", "revert-layer"):
+                    declared = dict(defaults)
+                elif keyword == "inherit":
+                    declared = {k: "inherit" for k in parent if k != "--"}
+                elif keyword == "initial":
+                    declared = {k: "initial" for k in INHERITED}
+                elif keyword == "unset":
+                    declared = {}
                 continue
             if "var(" in value:
                 value = _var(value, custom)
@@ -923,6 +939,9 @@ class Styler:
                     continue           # invalid once substituted: as if not set
             for real_name, real_value in expand_shorthand(name, value):
                 declared[real_name] = real_value
+                from_default[real_name] = is_default
+                if is_default:
+                    defaults[real_name] = real_value
         style = {"--": custom}
         # inherited properties start from the parent's values
         for name in INHERITED:

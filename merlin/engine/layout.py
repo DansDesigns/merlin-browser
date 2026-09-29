@@ -367,12 +367,16 @@ class Layout:
             if float_bottom is not None:
                 inner_height = max(inner_height, float_bottom - content_y)
             self._floats = outer_floats
+        content_height = inner_height
         if fixed_height is not None:
             inner_height = fixed_height
         if min_height is not None:
             inner_height = max(inner_height, min_height)
         if max_height is not None:
             inner_height = min(inner_height, max_height)
+        if inner_height > content_height + 0.5 and forms.kind_of(element) in forms.BUTTON_KINDS:
+            # a button's content sits in its middle, as browsers draw buttons
+            self._shift(background_index + 1, links_before, (inner_height - content_height) / 2)
         self._link = enclosing_link
         box_height = border[0] + padding[0] + inner_height + padding[2] + border[2]
         box_width = border[3] + padding[3] + content_width + padding[1] + border[1]
@@ -1003,7 +1007,16 @@ class Layout:
         """Width and height for an image: given, natural, or kept in proportion."""
         picture = self.images.get(element.attrs.get("src", "").strip())
         if picture is False:
-            return 0.0, 0.0                     # blocked, or failed: takes no room
+            # blocked, or failed: with a size given it keeps its box, as in
+            # browsers, so a failure never moves the page; without one, no room
+            w = self._length(style.get("width"), available)
+            h = self._length(style.get("height"), 0.0, vertical=True)
+            try:
+                w = w if w is not None else float(element.attrs.get("width", "")) * self.zoom
+                h = h if h is not None else float(element.attrs.get("height", "")) * self.zoom
+            except ValueError:
+                return 0.0, 0.0
+            return (w, h) if w and h else (0.0, 0.0)
         # in device-independent pixels: an image drawn at twice its size for
         # sharpness, as SVG ones are, is still its own size on the page
         natural = ((picture.width() / picture.devicePixelRatio(),

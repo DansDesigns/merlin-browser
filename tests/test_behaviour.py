@@ -1341,6 +1341,64 @@ def test_merlin_engine_tab_icon(app) -> None:
         window.close()
 
 
+def test_script_sites_and_debug_save(app) -> None:
+    """A site needing JavaScript is offered to Chromium, and remembered; and
+    a Merlin Engine page can be saved for debugging."""
+    import json
+    import zipfile
+
+    from PyQt6.QtCore import QStandardPaths
+    from PyQt6.QtWidgets import QLabel
+
+    from merlin.browser import WebView
+    from merlin.engine import MerlinView
+
+    window, settings, _ = make_window(app, "t-script-sites")
+    try:
+        settings.set("merlin_engine", True, save=False)
+        settings.set("chromium_sites", [], save=False)
+        view = window.new_tab("data:text/html,<title>x</title><p>readable")
+        wait(app, 1.5)
+        # a page built by scripts, as if it had come from a site
+        shell = "<title>App</title><div id=app></div>" + "<script>var x='" + "1" * 30000 + "';</script>" * 3
+        view._url = QUrl("https://app.example.com/")
+        view._show(shell)
+        view.needsScript.emit("https://app.example.com/")
+        wait(app, 0.3)
+        message = " ".join(label.text() for label in window.notice_bar.findChildren(QLabel))
+        check("a page needing JavaScript is offered to Chromium",
+              window.notice_bar.isVisible() and "JavaScript" in message, message)
+        window._notice_accepted()
+        wait(app, 1.0)
+        check("accepting opens it in Chromium and remembers the site",
+              isinstance(window.current(), WebView) and settings.get("chromium_sites") == ["example.com"],
+              str(settings.get("chromium_sites")))
+        again = window.new_tab("https://app.example.com/other")
+        check("that site then opens in Chromium from the start", isinstance(again, WebView))
+        engine = window.new_tab("data:text/html,<title>Saved</title><style>p{color:red}</style><p>x")
+        wait(app, 1.5)
+        window.tabs.setCurrentIndex(window.tabs.indexOf(engine))
+        window.save_engine_page()
+        path = window.status_label.text().split("Saved for debugging: ", 1)[-1]
+        names = zipfile.ZipFile(path).namelist() if os.path.exists(path) else []
+        check("a Merlin Engine page saves for debugging",
+              {"page.html", "screenshot.png", "manifest.json", "sheets/000.css"} <= set(names), str(names))
+        if names:
+            manifest = json.loads(zipfile.ZipFile(path).read("manifest.json"))
+            check("with the page, its stylesheets and what it was drawn at",
+                  "<style>" in zipfile.ZipFile(path).read("page.html").decode()
+                  and manifest["sheets"] == 1 and manifest["viewport"][0] > 0, str(manifest))
+            os.remove(path)
+        check("and the saved-page folder is the Downloads folder",
+              os.path.dirname(path) == QStandardPaths.writableLocation(
+                  QStandardPaths.StandardLocation.DownloadLocation))
+        del MerlinView
+    finally:
+        settings.set("merlin_engine", False, save=False)
+        settings.set("chromium_sites", [], save=False)
+        window.close()
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -1370,7 +1428,8 @@ def main() -> int:
                  test_stalled_stream_recovers, test_youtube_cookies_for_ytdlp,
                  test_merlin_engine_tabs, test_merlin_engine_typing,
                  test_mouse_back_forward, test_merlin_engine_passwords,
-                 test_ftp_opens_in_merlin_engine, test_merlin_engine_tab_icon):
+                 test_ftp_opens_in_merlin_engine, test_merlin_engine_tab_icon,
+                 test_script_sites_and_debug_save):
         print(f"\n{test.__name__}")
         try:
             test(app)

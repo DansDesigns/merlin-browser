@@ -1109,12 +1109,15 @@ class BrowserWindow(QMainWindow):
         else until you click them.
         """
         wanted = self.settings.get("merlin_engine", False) if engine is None else engine
+        if wanted and engine is None and url and self._chromium_site(QUrl(url)):
+            wanted = False                  # a site that needs JavaScript: Chromium
         engine_view = _merlin_view_class() if wanted else None
         if engine_view is not None:
             # Merlin's own engine, switched on in Settings > Merlin Engine.
             # The window's content blocker and settings apply to it as well.
             view = engine_view(self, host=self, profile=self.profile)
             view.loginSubmitted.connect(self._offer_to_save_login)
+            view.needsScript.connect(lambda url, v=view: self._offer_chromium(v, url))
             view.downloadFinished.connect(
                 lambda path: self.status_label.setText(
                     f"Downloaded {os.path.basename(path)} to {os.path.dirname(path)}"))
@@ -1710,6 +1713,67 @@ class BrowserWindow(QMainWindow):
             self.notice_bar.show_notice(f"Update the saved password for {who}?", "Update")
         else:
             self.notice_bar.show_notice(f"Save the password for {who}?", "Save")
+
+    def save_engine_page(self) -> None:
+        """Settings > Merlin Engine: the current page, zipped, to send for a look."""
+        view = self.current()
+        if not _is_merlin_view(view):
+            self.status_label.setText("The current tab is not a Merlin Engine tab")
+            return
+        from .updater import APP_VERSION
+
+        folder = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DownloadLocation) or os.path.expanduser("~")
+        try:
+            path = view.save_for_debugging(folder, APP_VERSION)
+        except Exception as exc:                         # noqa: BLE001
+            self.status_label.setText(f"Could not save the page: {exc}")
+            return
+        self.status_label.setText(f"Saved for debugging: {path}")
+
+    def forget_chromium_sites(self) -> int:
+        count = len(self.settings.get("chromium_sites", []) or [])
+        self.settings.set("chromium_sites", [])
+        return count
+
+    # ------------------------------------------------ sites needing JavaScript
+    def _chromium_site(self, url: QUrl) -> bool:
+        from .adblock import _registrable
+
+        host = (url.host() or "").lower()
+        sites = self.settings.get("chromium_sites", []) or []
+        return bool(host) and _registrable(host) in sites
+
+    def route_to_chromium(self, url: QUrl) -> bool:
+        """A Merlin Engine tab going to a site sent to Chromium: open it there."""
+        if not self._chromium_site(url):
+            return False
+        QTimer.singleShot(0, lambda u=url.toString(): self.new_tab(u, engine=False))
+        return True
+
+    def _offer_chromium(self, view, url: str) -> None:
+        """A page Merlin Engine cannot show, as it needs JavaScript: offer Chromium."""
+        from .adblock import _registrable
+
+        if self.current() is not view:
+            return
+        site = _registrable(QUrl(url).host().lower())
+
+        def switch():
+            sites = list(self.settings.get("chromium_sites", []) or [])
+            if site and site not in sites:
+                sites.append(site)
+                self.settings.set("chromium_sites", sites)
+            index = self.tabs.indexOf(view)
+            self.new_tab(url, engine=False)
+            if index >= 0:
+                self.close_tab(index)
+
+        self._notice_page = ""
+        self._notice_action = switch
+        self.notice_bar.show_notice(
+            f"{site or 'This site'} needs JavaScript, which Merlin Engine cannot run yet. "
+            f"Open it in Chromium, and use Chromium for it from now on?", "Open in Chromium")
 
     def _save_login(self, url: str, username: str, password: str) -> None:
         from . import passwords

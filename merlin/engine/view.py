@@ -307,6 +307,42 @@ def _download_name(disposition: str, url: str) -> str:
     return tail or "download"
 
 
+def needs_javascript(document) -> bool:
+    """Whether a page shows little or nothing until scripts build it.
+
+    Such a page, YouTube's among them, arrives as an empty frame and many
+    scripts; Merlin Engine cannot run them yet. A page with plenty of text is
+    fine however many scripts it has, since it shows without them.
+    """
+    if document is None:
+        return False
+    skipped = {"script", "style", "noscript", "template", "head", "title"}
+    text = []
+    scripts = script_size = 0
+
+    def walk(node):
+        nonlocal scripts, script_size
+        for child in node.children:
+            tag = getattr(child, "tag", None)
+            if tag is None:
+                text.append(child.data)
+            elif tag == "script":
+                scripts += 1
+                script_size += len(child.text())
+            elif tag not in skipped:
+                walk(child)
+
+    walk(document.root)
+    visible = len(" ".join("".join(text).split()))
+    asks = any("javascript" in e.text().lower() and ("enable" in e.text().lower()
+                                                    or "turn on" in e.text().lower()
+                                                    or "required" in e.text().lower())
+               for e in document.root.elements() if e.tag == "noscript")
+    if asks and visible < 1500:
+        return True
+    return visible < 200 and (scripts >= 3 or script_size > 20000)
+
+
 def _svg_picture(data: bytes):
     """An SVG file as an SvgPicture, drawn sharp at the size it is shown."""
     try:
@@ -415,11 +451,12 @@ class MerlinView(QWidget):
     loadFinished = pyqtSignal(bool)
     linkHovered = pyqtSignal(str)
     _fetched = pyqtSignal(int, bool, str, str, object)   # number, ok, url, text, prepared
-    _image_fetched = pyqtSignal(int, str, bytes, bool)   # load number, src, data, ok
+    _image_fetched = pyqtSignal(int, str, object, bool)  # load number, src, image or data, ok
     loginSubmitted = pyqtSignal(str, str, str)       # page, username, password
     downloadFinished = pyqtSignal(str)               # the saved file
     _restyled = pyqtSignal(int, object)              # load number, the worker's answer
     _icon_fetched = pyqtSignal(int, bytes)           # load number, the icon's data
+    needsScript = pyqtSignal(str)                    # a page built by JavaScript: its address
 
     def __init__(self, parent=None, host=None, profile=None):
         """host, when given, is Merlin's window: its content blocker and
@@ -460,6 +497,10 @@ class MerlinView(QWidget):
         self._relayout.setSingleShot(True)
         self._relayout.setInterval(60)
         self._relayout.timeout.connect(self._layout)
+        self._image_relayout = QTimer(self)
+        self._image_relayout.setSingleShot(True)
+        self._image_relayout.setInterval(250)
+        self._image_relayout.timeout.connect(self._layout)
         self._fetched.connect(self._on_fetched)
         self._image_fetched.connect(self._on_image)
         self._restyled.connect(self._on_restyled)
@@ -590,6 +631,10 @@ class MerlinView(QWidget):
                 QTimer.singleShot(0, handler)
             return
         if scheme in ("mailto", "tel", "javascript", "sms"):
+            return
+        # a site sent to Chromium before, because it needs JavaScript, goes there
+        route = getattr(self._host, "route_to_chromium", None)
+        if route is not None and route(url):
             return
         same_page = (self._document is not None and url.hasFragment() and body is None
                      and url.adjusted(QUrl.UrlFormattingOption.RemoveFragment)
@@ -818,6 +863,8 @@ class MerlinView(QWidget):
         self._layout()
         self._load_images()
         self._load_icon()
+        if self._url.scheme() in ("http", "https") and needs_javascript(self._document):
+            self.needsScript.emit(self._url.toString())
 
     # ----------------------------------------------------------- images
     def _load_images(self) -> None:
@@ -860,8 +907,13 @@ class MerlinView(QWidget):
             same = _registrable(QUrl(address).host()) == page_site
             ok, _final, data, _kind = fetch_bytes(address, headers,
                                                   opener=own_opener if same else None)
+            # decoded here, off the UI thread; an SVG is left to the UI thread
+            decoded = None
+            if ok and data and b"<svg" not in data[:4096]:
+                decoded = QImage.fromData(data)
             try:
-                self._image_fetched.emit(number, src, data if ok else b"", ok)
+                self._image_fetched.emit(number, src, decoded if decoded is not None
+                                         else (data if ok else b""), ok)
             except RuntimeError:
                 pass                     # the tab was closed while this loaded
 
@@ -942,13 +994,41 @@ class MerlinView(QWidget):
     def _on_image(self, number: int, src: str, data: bytes, ok: bool) -> None:
         if number != self._load_number:
             return
-        picture = QImage()
-        if ok and data and b"<svg" in data[:4096]:
-            picture = _svg_picture(data)       # kept as vectors: sharp at any size
-        if (picture is None or picture.isNull()) and ok and data:
-            picture = QImage.fromData(data)
-        self._images[src] = picture if not picture.isNull() else False
-        self._relayout.start()                   # batch several arrivals into one
+        if isinstance(data, QImage):
+            picture = data                       # decoded on the loading thread
+        else:
+            picture = QImage()
+            if ok and data and b"<svg" in data[:4096]:
+                picture = _svg_picture(data)     # kept as vectors: sharp at any size
+            if (picture is None or picture.isNull()) and ok and data:
+                picture = QImage.fromData(data)
+        self._images[src] = picture if picture is not None and not picture.isNull() else False
+        if self._image_moves_layout(src):
+            # at most one layout for images in a quarter-second, however many
+            # arrive: each had laid the whole page out again
+            if not self._image_relayout.isActive():
+                self._image_relayout.start()
+        else:
+            self.update()                        # its box was already there: just draw it
+
+    def _image_moves_layout(self, src: str) -> bool:
+        """Whether an image arriving changes the layout: only if no size is given.
+
+        An image with a width and height takes its box whether it has loaded
+        or not, so its arrival needs only drawing.
+        """
+        if self._document is None:
+            return False
+        for element in self._document.root.elements():
+            if element.tag != "img" or element.attrs.get("src", "").strip() != src:
+                continue
+            style = self._styles.get(element, {})
+            given = lambda name: (style.get(name) not in (None, "auto")          # noqa: E731
+                                  and not isinstance(style.get(name), tuple)) \
+                or element.attrs.get(name, "").strip().rstrip("px").isdigit()
+            if not (given("width") and given("height")):
+                return True
+        return False
 
     def _restyle(self) -> None:
         """Style the page again, off the UI thread, and lay it out when done."""
@@ -1393,6 +1473,43 @@ class MerlinView(QWidget):
             widget.setChecked(True)
         else:
             widget.setFocus()
+
+    # ------------------------------------------------------ for debugging
+    def save_for_debugging(self, folder: str, version: str = "") -> str:
+        """The page as Merlin Engine has it, zipped, to send for a look.
+
+        The HTML as it came, every stylesheet in the order the cascade reads
+        them, a screenshot of how it was drawn, and what it was drawn at.
+        Returns the zip's path. Nothing is sent anywhere by this.
+        """
+        import json
+        import time
+        import zipfile
+
+        from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
+
+        from .remote import unique_path
+
+        os.makedirs(folder, exist_ok=True)
+        host = (self._url.host() or "page").replace(":", "_")
+        path = unique_path(folder, f"merlin-engine-{host}-{time.strftime('%Y%m%d-%H%M%S')}.zip")
+        shot = QByteArray()
+        buffer = QBuffer(shot)
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        self.grab().toImage().save(buffer, "PNG")
+        sheets = self._sheets if self._sheets is not None else (
+            self._document.stylesheets() if self._document is not None else [])
+        manifest = {"url": self._url.toString(), "version": version,
+                    "viewport": [self._page_width(), self.height()], "zoom": self._zoom,
+                    "scroll": self._scroll, "sheets": len(sheets),
+                    "simplified": bool(self._display and self._display.simplified)}
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as bundle:
+            bundle.writestr("page.html", self._markup or "")
+            for number, text in enumerate(sheets):
+                bundle.writestr(f"sheets/{number:03d}.css", text or "")
+            bundle.writestr("screenshot.png", bytes(shot))
+            bundle.writestr("manifest.json", json.dumps(manifest, indent=2))
+        return path
 
     # ------------------------------------------------------ find in page
     def findText(self, text: str, flags=None, callback=None) -> None:     # noqa: N802

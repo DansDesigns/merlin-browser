@@ -246,8 +246,10 @@ def test_images(app) -> None:
     out = Layout(doc, Styler(doc).compute(), 800, images=images).run()
     sizes = [(round(i[1].width()), round(i[1].height())) for i in out.items if i and i[0] == "image"]
     check("images: natural size, width alone keeps the shape, max-width fits the column",
-          sizes == [(240, 160), (120, 80), (100, 67)], str(sizes))
-    check("a blocked or missing image takes no room", (50, 50) not in sizes)
+          sizes == [(240, 160), (120, 80), (50, 50), (100, 67)], str(sizes))
+    # as in browsers, one with a size given keeps its box, so a failure never
+    # moves the page; one without a size takes no room
+    check("a blocked or missing image with a size keeps its box", (50, 50) in sizes)
 
 
 def _flex_check(label, got, want):
@@ -1277,6 +1279,95 @@ def test_sticky_and_icons(app) -> None:
         server.shutdown()
 
 
+def test_all_and_script_pages() -> None:
+    """all: unset / revert / initial, and telling pages that need JavaScript."""
+    from merlin.engine.css import Styler
+    from merlin.engine.html import parse
+    from merlin.engine.view import needs_javascript
+
+    doc = parse("<style>.u { all: unset } .r { background: red; all: revert } .i { color: red }"
+                " .i2 { all: initial }</style><button id=plain>a</button><button id=u class=u>b</button>"
+                "<button id=r class=r>c</button><div class=i><p id=i2 class=i2>d</p></div>")
+    styles = Styler(doc).compute()
+    e = {x.id: styles[x] for x in doc.root.elements() if x.id}
+    check("all: unset strips a button's default look",
+          e["u"].get("background-color") in (None, (0, 0, 0, 0)) and not e["u"].get("border-top-width"))
+    check("all: revert goes back to it",
+          e["r"]["background-color"] == e["plain"]["background-color"], str(e["r"]["background-color"]))
+    check("all: initial takes initial values, not inherited ones", e["i2"]["color"] == (0, 0, 0, 255))
+    shell = "<body><div id=app></div>" + "<script>var x = '" + "1" * 30000 + "';</script>" * 3 + "</body>"
+    article = "<body><article><p>" + "words " * 400 + "</p></article>" + "<script>a()</script>" * 6
+    asks = "<body><noscript>You need to enable JavaScript to run this app.</noscript><div id=root></div>"
+    login = "<body><form><input type=password><button>Log in</button></form></body>"
+    check("a page built by scripts, like YouTube's, needs JavaScript", needs_javascript(parse(shell)))
+    check("one that asks for it in <noscript> does too", needs_javascript(parse(asks)))
+    check("an article with scripts does not", not needs_javascript(parse(article)))
+    check("nor a login page without scripts", not needs_javascript(parse(login)))
+
+
+def test_images_do_not_relayout(app) -> None:
+    """Images arriving: laid out again only when they change the layout.
+
+    Each arrival had laid the whole page out again, a dozen times and more on
+    a big page, holding up the window while images trickled in.
+    """
+    import base64
+
+    from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
+    from PyQt6.QtGui import QColor, QImage
+
+    from merlin.engine import MerlinView
+
+    picture = QImage(20, 20, QImage.Format.Format_RGB32)
+    picture.fill(QColor("orange"))
+    data = QByteArray()
+    buffer = QBuffer(data)
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    picture.save(buffer, "PNG")
+    png = bytes(data)
+
+    class Slow(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            if self.path.endswith(".png"):
+                time.sleep(0.05 * int(self.path.split("img")[1].split(".")[0]))
+                body, kind = png, "image/png"
+            else:
+                body = ("<p>text" + "".join(f"<img src='/img{i}.png' width=20 height=20>"
+                                            for i in range(20)) + "<img src='/img3.png'>").encode()
+                kind = "text/html"
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Slow)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    view = MerlinView()
+    view.resize(600, 400)
+    view.show()
+    layouts = []
+    real = view._layout
+    view._layout = lambda: (layouts.append(1), real())[1]
+    view._relayout.timeout.disconnect()
+    view._relayout.timeout.connect(view._layout)
+    view._image_relayout.timeout.disconnect()
+    view._image_relayout.timeout.connect(view._layout)
+    try:
+        view.setUrl(QUrl(f"http://127.0.0.1:{server.server_address[1]}/"))
+        wait(app, 2.5)
+        shown = sum(1 for v in view._images.values() if v is not False)
+        check("all the images arrive", shown == 20, str(shown))
+        check("twenty sized images arriving lay the page out only a few times",
+              len(layouts) <= 4, f"{len(layouts)} layouts")
+        del base64
+    finally:
+        server.shutdown()
+        view.close()
+
+
 def test_view(app) -> None:
     from merlin.engine import MerlinView
 
@@ -1348,7 +1439,8 @@ def main() -> int:
                  test_body_and_markers, test_tables, test_flexbox,
                  test_floats_and_positioning, test_grid_svg_inline_block,
                  test_real_world_css, test_files_ftp_smb, test_no_freeze_on_real_grids,
-                 test_deep_nesting_stays_quick, test_gradients, test_worker_processes):
+                 test_deep_nesting_stays_quick, test_gradients, test_worker_processes,
+                 test_all_and_script_pages):
         print(test.__name__)
         test()
     print("test_images")
@@ -1359,6 +1451,8 @@ def main() -> int:
     test_browser_headers_and_compression(app)
     print("test_sticky_and_icons")
     test_sticky_and_icons(app)
+    print("test_images_do_not_relayout")
+    test_images_do_not_relayout(app)
     print("test_forms")
     test_forms(app)
     print("test_view")

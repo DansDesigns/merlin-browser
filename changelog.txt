@@ -5,6 +5,31 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.7.3.3
+  Loading or refreshing a big page in Merlin Engine no longer holds Merlin up
+  while its pictures arrive. Each picture arriving laid the whole page out
+  again on Merlin's main thread, a dozen and more times for one page. Now a
+  picture whose size the page gives, which takes its box whether it has come
+  or not, is only drawn when it comes; only pictures with no size given lay
+  the page out again, and then at most once a quarter-second. Pictures are
+  also decoded off the main thread. A test page with thirty-five pictures
+  arriving over a second and a half: 17 layouts before, 5 now.
+  A picture that fails or is blocked keeps the box its size gives it, as in
+  browsers, so a failure no longer moves the page.
+  Pages built by JavaScript, such as YouTube's, which Merlin Engine cannot run
+  yet: Merlin tells them apart (little to read, many scripts, or a <noscript>
+  asking for JavaScript), and offers to open them in Chromium. Taking the
+  offer remembers the site, so it opens in Chromium from then on; Settings >
+  Merlin Engine can forget those sites.
+  all: unset, initial, revert and inherit, which sites use to strip a browser's
+  own look from their buttons and fields, and which Merlin Engine had ignored,
+  leaving grey default buttons among a site's own. A button's content sits in
+  its middle, as browsers draw buttons.
+  Settings > Merlin Engine > "Save the current page for debugging": the page
+  as Merlin Engine has it, its HTML, every stylesheet in order, a screenshot
+  and what it was drawn at, zipped into the Downloads folder, to send when a
+  page looks wrong. Nothing is sent anywhere by it.
+
 1.7.3.2
   Merlin Engine styles pages in worker processes of their own. Python runs
   one thread at a time, so styling a big page on a background thread, as

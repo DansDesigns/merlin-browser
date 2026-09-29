@@ -1227,6 +1227,26 @@ class SettingsDialog(QDialog):
         compare.clicked.connect(
             lambda: getattr(self.window_ref, "reopen_in_other_engine", lambda: None)())
         layout.addWidget(compare)
+        debug = QPushButton("Save the current page for debugging", page)
+        debug.setToolTip("Zips the page's HTML, its stylesheets and a screenshot into your "
+                         "Downloads folder, to send when a page looks wrong. Nothing is sent "
+                         "anywhere by this.")
+        debug.clicked.connect(
+            lambda: getattr(self.window_ref, "save_engine_page", lambda: None)())
+        layout.addWidget(debug)
+        sites = self.settings.get("chromium_sites", []) or []
+        forget = QPushButton(f"Forget the sites sent to Chromium ({len(sites)})", page)
+        forget.setToolTip("Sites that need JavaScript, which you chose to open in Chromium: "
+                          + (", ".join(sites) if sites else "none yet"))
+        forget.setEnabled(bool(sites))
+
+        def forgotten():
+            getattr(self.window_ref, "forget_chromium_sites", lambda: 0)()
+            forget.setText("Forget the sites sent to Chromium (0)")
+            forget.setEnabled(False)
+
+        forget.clicked.connect(forgotten)
+        layout.addWidget(forget)
         layout.addStretch(1)
         return page
 
