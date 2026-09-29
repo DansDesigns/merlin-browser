@@ -5,6 +5,28 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.7.3.2
+  Merlin Engine styles pages in worker processes of their own. Python runs
+  one thread at a time, so styling a big page on a background thread, as
+  1.7.3.1 did, still took turns with everything else in Merlin and slowed it
+  all while GitHub loaded. A worker is a separate process with its own Python,
+  running on another processor core alongside Merlin: this is how Chromium
+  keeps each tab's work apart too. Merlin's own share of styling a GitHub-sized
+  page falls from about a second to a few hundredths. Two workers run, so two
+  tabs can load at once; each keeps the sites' parsed stylesheets, so a site
+  is quicker the second time. They start when first needed, load no Qt, and
+  close with Merlin. A worker that dies is replaced; if none can start, pages
+  are styled as before, so a worker can make a page slower, never break it.
+  Restyling, when the window is resized past a site's breakpoint, a <details>
+  is opened, or shields are switched, happens there too, in the background.
+  position: sticky works: a sticky header keeps its place until scrolled to,
+  then holds at the top of the window while its section passes, and leaves
+  with it, its links and fields with it. It had been left where it first fell,
+  over whatever came after.
+  Merlin Engine tabs show their site's icon: the page's own, near a tab's
+  size, or the site's /favicon.ico; PNG, ICO and SVG. It is fetched once the
+  page shows, so it never holds the page up.
+
 1.7.3.1
   Merlin Engine no longer freezes the window while a big site loads. Parsing
   its stylesheets and styling the page, over a second for a GitHub-sized page

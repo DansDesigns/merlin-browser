@@ -301,6 +301,13 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     # A probe child, started to check a newly swapped engine plays H.264. It
     # answers and leaves: no window, no single-instance handover, no log.
+    # A Merlin Engine worker: parses and styles pages for Merlin, in a process
+    # of its own. It serves until Merlin closes the pipe, and does nothing else:
+    # no window, no single-instance handover, no log.
+    if argv[:1] == ["--engine-worker"]:
+        from .engine import worker
+
+        return worker.serve()
     if len(argv) >= 2 and argv[0] == "--probe-codecs":
         from . import codecengine
 

@@ -1304,6 +1304,43 @@ def test_ftp_opens_in_merlin_engine(app) -> None:
         window.close()
 
 
+def test_merlin_engine_tab_icon(app) -> None:
+    """A Merlin Engine tab shows its site's icon, as a Chromium tab does."""
+    import http.server
+    import tempfile
+    import threading
+
+    from PyQt6.QtGui import QColor, QImage
+
+    folder = tempfile.mkdtemp(prefix="merlin-tabicon-")
+    picture = QImage(32, 32, QImage.Format.Format_ARGB32)
+    picture.fill(QColor("#ff8800"))
+    picture.save(os.path.join(folder, "favicon.ico"), "ICO")
+    open(os.path.join(folder, "index.html"), "w").write("<title>Iconic</title><p>x")
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    window, settings, _ = make_window(app, "t-tabicon")
+    try:
+        settings.set("merlin_engine", True, save=False)
+        view = window.new_tab(f"http://127.0.0.1:{server.server_address[1]}/index.html")
+        wait(app, 3.0)
+        icon = window.tabs.tabIcon(window.tabs.indexOf(view))
+        shade = icon.pixmap(16, 16).toImage().pixelColor(8, 8).name() if not icon.isNull() else None
+        check("a Merlin Engine tab shows its site's icon", shade == "#ff8800", str(shade))
+    finally:
+        settings.set("merlin_engine", False, save=False)
+        server.shutdown()
+        window.close()
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -1333,7 +1370,7 @@ def main() -> int:
                  test_stalled_stream_recovers, test_youtube_cookies_for_ytdlp,
                  test_merlin_engine_tabs, test_merlin_engine_typing,
                  test_mouse_back_forward, test_merlin_engine_passwords,
-                 test_ftp_opens_in_merlin_engine):
+                 test_ftp_opens_in_merlin_engine, test_merlin_engine_tab_icon):
         print(f"\n{test.__name__}")
         try:
             test(app)

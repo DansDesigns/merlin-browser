@@ -1167,6 +1167,116 @@ def test_browser_headers_and_compression(app) -> None:
         view.close()
 
 
+def test_worker_processes() -> None:
+    """Pages styled in worker processes, alongside Merlin rather than taking
+    turns with it: the same styles as styling here, and a fallback."""
+    from merlin.engine import worker
+    from merlin.engine.css import Styler
+    from merlin.engine.html import parse
+
+    markup = ("<style>@media (max-width: 600px) { p { color: red } } :root { --c: #123456 } "
+              "h1 { color: var(--c) } .a:not(.b) { font-weight: bold }</style>"
+              "<h1>t</h1><p class=a>one</p><details><summary>s</summary><p>in</p></details>")
+    job = {"markup": markup, "url": "", "sheets": None, "viewport": (1000, 700), "want": "document"}
+    pool = worker.Pool(size=1)
+    try:
+        answer = pool.style(job)
+        check("a worker process answers", answer is not None and pool.workers
+              and pool.workers[0].alive())
+        here = parse(markup)
+        local = Styler(here, viewport=(1000, 700)).compute()
+        theirs = [answer["styles"][e] for e in [answer["document"].root] + list(answer["document"].root.elements())]
+        ours = [local[e] for e in [here.root] + list(here.root.elements())]
+        check("and styles the page exactly as styling here would", theirs == ours)
+        narrow = pool.style(dict(job, viewport=(500, 700), want="styles"))
+        elements = [answer["document"].root] + list(answer["document"].root.elements())
+        p_index = next(i for i, e in enumerate(elements) if e.tag == "p")
+        check("restyling for a narrow window chooses the narrow @media rules",
+              narrow["styles"][p_index]["color"] == (255, 0, 0, 255))
+        pool.workers[0].process.kill()
+        check("a worker that dies is replaced", pool.style(job) is not None)
+    finally:
+        pool.stop()
+    broken = worker.Pool(size=1)
+    real = worker.worker_command
+    worker.worker_command = lambda: ["/nonexistent/merlin", "--engine-worker"]
+    try:
+        check("when no worker can start, the caller is told to style it itself",
+              broken.style(job) is None and broken.failed)
+    finally:
+        worker.worker_command = real
+
+
+def test_sticky_and_icons(app) -> None:
+    """position: sticky, by pixels as the page scrolls; and tab icons."""
+    from PyQt6.QtCore import QPointF
+    from PyQt6.QtGui import QColor, QImage
+
+    from merlin.engine import MerlinView
+
+    page = """<body style='margin:0;background:#ffffff'>
+    <div style='height:100px;background:#eeeeee'></div>
+    <section style='height:1200px;background:#ffffff'>
+     <div style='position:sticky;top:0;height:40px;background:#ff0000'><a href='/stuck'>link</a></div>
+     <div style='height:800px'></div></section>
+    <div style='height:1500px;background:#0000ff'></div></body>"""
+    view = MerlinView()
+    view.resize(600, 400)
+    view.show()
+    try:
+        view.setHtml(page, QUrl("http://example.test/"))
+        wait(app, 0.3)
+
+        def at(y):
+            return view.grab().toImage().pixelColor(300, y).name()
+
+        check("a sticky bar sits in its place at first", at(120) == "#ff0000" and at(20) == "#eeeeee")
+        view.scrollbar.setValue(500)
+        wait(app, 0.1)
+        check("scrolled into its section, it holds at the top", at(20) == "#ff0000", at(20))
+        link = next(r for r, h in view._display.links if h == "/stuck")
+        # the link's own middle, as it is drawn now: 100px from its place, held at the top
+        check("and its link is clicked where it is drawn",
+              view._link_at(QPointF(link.center().x(), link.center().y() - 100)) == "/stuck")
+        view.scrollbar.setValue(1500)
+        wait(app, 0.1)
+        check("past its section's end, it leaves with it", at(20) == "#0000ff", at(20))
+    finally:
+        view.close()
+    folder = tempfile.mkdtemp(prefix="merlin-icons-")
+    picture = QImage(32, 32, QImage.Format.Format_ARGB32)
+    picture.fill(QColor("#ff8800"))
+    picture.save(os.path.join(folder, "named.png"))
+    picture.fill(QColor("#00aa44"))
+    picture.save(os.path.join(folder, "favicon.ico"), "ICO")
+    open(os.path.join(folder, "named.html"), "w").write(
+        "<title>Named</title><link rel='shortcut icon' href='/named.png'><p>x")
+    open(os.path.join(folder, "plain.html"), "w").write("<title>Plain</title><p>x")
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        for name, colour in (("named.html", "#ff8800"), ("plain.html", "#00aa44")):
+            view = MerlinView()
+            got = []
+            view.iconChanged.connect(got.append)
+            view.setUrl(QUrl(f"http://127.0.0.1:{server.server_address[1]}/{name}"))
+            wait(app, 2.0)
+            shade = got[0].pixmap(16, 16).toImage().pixelColor(8, 8).name() if got else None
+            check(f"a tab icon: {'the page names one' if 'named' in name else 'the site has /favicon.ico'}",
+                  shade == colour, str(shade))
+            view.close()
+    finally:
+        server.shutdown()
+
+
 def test_view(app) -> None:
     from merlin.engine import MerlinView
 
@@ -1238,7 +1348,7 @@ def main() -> int:
                  test_body_and_markers, test_tables, test_flexbox,
                  test_floats_and_positioning, test_grid_svg_inline_block,
                  test_real_world_css, test_files_ftp_smb, test_no_freeze_on_real_grids,
-                 test_deep_nesting_stays_quick, test_gradients):
+                 test_deep_nesting_stays_quick, test_gradients, test_worker_processes):
         print(test.__name__)
         test()
     print("test_images")
@@ -1247,6 +1357,8 @@ def main() -> int:
     test_clipping_opacity_details_svg(app)
     print("test_browser_headers_and_compression")
     test_browser_headers_and_compression(app)
+    print("test_sticky_and_icons")
+    test_sticky_and_icons(app)
     print("test_forms")
     test_forms(app)
     print("test_view")

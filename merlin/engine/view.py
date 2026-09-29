@@ -21,7 +21,7 @@ from PyQt6.QtGui import QColor, QIcon, QImage, QPainter
 from PyQt6.QtWidgets import QScrollBar, QWidget
 
 from . import html as html_parser
-from .css import Styler
+from .css import Styler, media_matches
 from .layout import Layout
 from .paint import paint
 
@@ -418,6 +418,8 @@ class MerlinView(QWidget):
     _image_fetched = pyqtSignal(int, str, bytes, bool)   # load number, src, data, ok
     loginSubmitted = pyqtSignal(str, str, str)       # page, username, password
     downloadFinished = pyqtSignal(str)               # the saved file
+    _restyled = pyqtSignal(int, object)              # load number, the worker's answer
+    _icon_fetched = pyqtSignal(int, bytes)           # load number, the icon's data
 
     def __init__(self, parent=None, host=None, profile=None):
         """host, when given, is Merlin's window: its content blocker and
@@ -432,6 +434,11 @@ class MerlinView(QWidget):
         self._focused_once = False
         self._sheets = None            # the page's stylesheets, linked and inline
         self._styler = None
+        self._markup = ""              # the page as it came, for styling it again
+        self._patches: dict = {}       # element number -> attributes changed since
+        self._media: dict = {}         # each @media query, and whether it held
+        self._restyling = False
+        self._restyle_again = False
         self._found_rect = None
         self._page = _Page(self, profile)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -455,6 +462,9 @@ class MerlinView(QWidget):
         self._relayout.timeout.connect(self._layout)
         self._fetched.connect(self._on_fetched)
         self._image_fetched.connect(self._on_image)
+        self._restyled.connect(self._on_restyled)
+        self._icon_fetched.connect(self._on_icon)
+        self._icon = QIcon()
 
     # ------------------------------------------------ what Merlin asks for
     def url(self) -> QUrl:
@@ -464,7 +474,7 @@ class MerlinView(QWidget):
         return self._title
 
     def icon(self) -> QIcon:
-        return QIcon()
+        return self._icon
 
     def history(self) -> _History:
         return self._history
@@ -516,11 +526,7 @@ class MerlinView(QWidget):
     def refresh_hiding(self) -> None:
         """Styles again, for when the site's shields were switched."""
         if self._document is not None:
-            self._styler = Styler(self._document, author_css=self._sheets,
-                                  viewport=(self._page_width(), self.height()),
-                                  extra_css=self._hiding_css())
-            self._styles = self._styler.compute()
-            self._layout()
+            self._restyle()
 
     def zoomFactor(self) -> float:                            # noqa: N802
         return self._zoom
@@ -679,7 +685,8 @@ class MerlinView(QWidget):
         sources = document.stylesheet_sources()
         links = [s for s in sources if s[0] == "link"]
         if not links:
-            return self._styled(document, [s[1] for s in sources], viewport, hiding)
+            return self._styled(document, [s[1] for s in sources], viewport, hiding,
+                                markup, page_url)
         cache = self._stylesheet_cache()
         page_site = _registrable(host_name)
         sheet_headers = dict(headers)
@@ -719,22 +726,33 @@ class MerlinView(QWidget):
             text = fetched.get(urllib.parse.urljoin(page_url, source[1]), "")
             media = source[2]
             sheets.append(f"@media {media} {{{text}}}" if media and media != "all" else text)
-        return self._styled(document, sheets, viewport, hiding)
+        return self._styled(document, sheets, viewport, hiding, markup, page_url)
 
     @staticmethod
-    def _styled(document, sheets, viewport, hiding) -> dict:
+    def _styled(document, sheets, viewport, hiding, markup: str = "", url: str = "") -> dict:
         """Parse the CSS and run the cascade, here on the loading thread.
 
         Parsing megabytes of CSS and styling thousands of elements took over a
         second on the UI thread for a GitHub-sized page, freezing the window;
         neither needs Qt, so both happen before the page is handed over.
         """
-        prepared = {"document": document, "sheets": sheets}
+        prepared = {"document": document, "sheets": sheets, "markup": markup}
         if viewport is None:
             return prepared
-        styler = Styler(document, author_css=sheets, viewport=viewport, extra_css=hiding)
-        prepared["styler"] = styler
-        prepared["styles"] = styler.compute()
+        from . import worker
+
+        job = {"markup": markup, "url": url, "sheets": sheets, "viewport": viewport,
+               "hiding": hiding, "want": "document"}
+        # in a worker process, truly alongside the rest of Merlin; if none can
+        # be had, here, as before
+        answer = worker.POOL.style(job) if markup else None
+        if answer is None:
+            answer = worker.style_page(job) if markup else None
+        if answer is None:
+            styler = Styler(document, author_css=sheets, viewport=viewport, extra_css=hiding)
+            answer = {"document": document, "styles": styler.compute(), "media": dict(styler._media)}
+        prepared.update(document=answer["document"], styles=answer["styles"],
+                        media=answer["media"])
         return prepared
 
     def _on_fetched(self, number: int, ok: bool, final: str, text: str,
@@ -775,18 +793,23 @@ class MerlinView(QWidget):
             self._sheets = None                 # the page's own <style> blocks
         self._clear_controls()
         self._images = {}
+        self._icon = QIcon()
         self._find = ("", -1)
         self._found_rect = None
-        if prepared is not None and prepared.get("styler") is not None:
-            # styled on the loading thread; a window resized meanwhile is
-            # caught by _layout, which chooses @media rules again
-            self._styler = prepared["styler"]
+        self._markup = prepared.get("markup", markup) if prepared else markup
+        self._patches = {}
+        if prepared is not None and prepared.get("styles") is not None:
+            # styled off the UI thread, in a worker; a window resized meanwhile
+            # is caught by _layout, which has the page styled again
             self._styles = prepared["styles"]
+            self._media = prepared.get("media", {})
         else:
-            self._styler = Styler(self._document, author_css=self._sheets,
-                                  viewport=(self._page_width(), self.height()),
-                                  extra_css=self._hiding_css())
-            self._styles = self._styler.compute()
+            styler = Styler(self._document, author_css=self._sheets,
+                            viewport=(self._page_width(), self.height()),
+                            extra_css=self._hiding_css())
+            self._styles = styler.compute()
+            self._media = dict(styler._media)
+        self._styler = None
         title = self._document.title or self._url.toString()
         if title != self._title:
             self._title = title
@@ -794,6 +817,7 @@ class MerlinView(QWidget):
         self._scroll = 0.0
         self._layout()
         self._load_images()
+        self._load_icon()
 
     # ----------------------------------------------------------- images
     def _load_images(self) -> None:
@@ -845,6 +869,76 @@ class MerlinView(QWidget):
             address = self._url.resolved(QUrl(src)).toString()
             threading.Thread(target=work, args=(src, address), daemon=True).start()
 
+    def _icon_address(self) -> str:
+        """The page's own icon, near a tab's size, or else the site's /favicon.ico."""
+        if self._document is None or self._url.scheme() not in ("http", "https"):
+            return ""
+        best, best_score = "", None
+        for element in self._document.root.elements():
+            if element.tag != "link" or not element.attrs.get("href"):
+                continue
+            rel = element.attrs.get("rel", "").lower().split()
+            if not ("icon" in rel or "apple-touch-icon" in rel):
+                continue
+            sizes = element.attrs.get("sizes", "").lower()
+            size = 0
+            for part in sizes.split():
+                if "x" in part and part.split("x")[0].isdigit():
+                    size = int(part.split("x")[0])
+            kind = element.attrs.get("type", "").lower()
+            score = abs((size or 32) - 32) + (40 if "apple-touch-icon" in rel else 0) \
+                - (5 if "svg" in kind or element.attrs["href"].lower().endswith(".svg") else 0)
+            if best_score is None or score < best_score:
+                best, best_score = element.attrs["href"].strip(), score
+        if best:
+            return self._url.resolved(QUrl(best)).toString()
+        root = self._url.adjusted(QUrl.UrlFormattingOption.RemovePath
+                                  | QUrl.UrlFormattingOption.RemoveQuery
+                                  | QUrl.UrlFormattingOption.RemoveFragment)
+        return root.toString() + "/favicon.ico"
+
+    def _load_icon(self) -> None:
+        """Fetch the tab's icon, once the page shows, so it never holds the page up."""
+        address = self._icon_address()
+        if not address or self._blocked(address, "image"):
+            return
+        number = self._load_number
+        headers = dict(self._headers())
+        headers["Accept"] = "image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5"
+        _subresource(headers, "image")
+        same = _registrable(QUrl(address).host()) == _registrable(self._url.host())
+        opener = cookie_opener(self._cookies()) if same else None
+
+        def work():
+            ok, _final, data, _kind = fetch_bytes(address, headers, timeout=10,
+                                                  limit=512 * 1024, opener=opener)
+            if ok and data:
+                try:
+                    self._icon_fetched.emit(number, data)
+                except RuntimeError:
+                    pass                             # the tab was closed
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_icon(self, number: int, data: bytes) -> None:
+        from PyQt6.QtGui import QPixmap
+
+        if number != self._load_number:
+            return
+        picture = QImage.fromData(data)
+        if picture.isNull() and b"<svg" in data[:4096]:
+            svg = _svg_picture(data)
+            if svg is not None and not svg.isNull():
+                picture = QImage(32, 32, QImage.Format.Format_ARGB32)
+                picture.fill(0)
+                painter = QPainter(picture)
+                svg.render(painter, QRectF(0, 0, 32, 32))
+                painter.end()
+        if picture.isNull():
+            return
+        self._icon = QIcon(QPixmap.fromImage(picture))
+        self.iconChanged.emit(self._icon)
+
     def _on_image(self, number: int, src: str, data: bytes, ok: bool) -> None:
         if number != self._load_number:
             return
@@ -856,17 +950,62 @@ class MerlinView(QWidget):
         self._images[src] = picture if not picture.isNull() else False
         self._relayout.start()                   # batch several arrivals into one
 
+    def _restyle(self) -> None:
+        """Style the page again, off the UI thread, and lay it out when done."""
+        if self._document is None or not self._markup:
+            return
+        if self._restyling:
+            self._restyle_again = True           # once this one is back
+            return
+        self._restyling = True
+        number = self._load_number
+        job = {"markup": self._markup, "url": self._url.toString(), "sheets": self._sheets,
+               "viewport": (self._page_width(), float(max(1, self.height()))),
+               "hiding": self._hiding_css(), "patches": dict(self._patches),
+               "want": "styles"}
+
+        def work():
+            from . import worker
+
+            answer = worker.POOL.style(job)
+            if answer is None:
+                try:
+                    answer = worker.style_page(job)
+                except Exception:                          # noqa: BLE001
+                    answer = None
+            try:
+                self._restyled.emit(number, answer)
+            except RuntimeError:
+                pass                             # the tab was closed
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_restyled(self, number: int, answer) -> None:
+        self._restyling = False
+        if number == self._load_number and answer is not None and self._document is not None:
+            elements = [self._document.root] + list(self._document.root.elements())
+            styles = answer.get("styles") or []
+            if len(styles) == len(elements):
+                self._styles = {e: st for e, st in zip(elements, styles) if st is not None}
+                self._media = answer.get("media", self._media)
+                self._layout()
+        if self._restyle_again:
+            self._restyle_again = False
+            self._restyle()
+
     def _page_width(self) -> float:
         return max(100.0, float(self.width() - self.scrollbar.sizeHint().width()))
 
     def _layout(self) -> None:
         if self._document is None:
             return
-        # across a breakpoint, the page's @media rules are chosen again
+        # across a breakpoint, the page is styled again, in the background;
+        # until then it keeps its present styles
         viewport = (self._page_width(), float(self.height()))
-        styler = getattr(self, "_styler", None)
-        if styler is not None and styler.media_changed(viewport):
-            self._styles = styler.restyle(viewport)
+        if self._media and any(media_matches(q, viewport) != held
+                               for q, held in self._media.items()):
+            self._media = {q: media_matches(q, viewport) for q in self._media}
+            self._restyle()
         self._display = Layout(self._document, self._styles, self._page_width(), self._zoom,
                                images=self._images,
                                viewport_height=float(max(1, self.height())),
@@ -915,12 +1054,20 @@ class MerlinView(QWidget):
         if self._display is None:
             return
         found, buttons = {}, []
+        self._control_sticky = {}
         for source, fixed in ((self._display, False), (self._display.fixed, True)):
             if source is None:
                 continue
+            around = []
             for item in source.items:
-                if item and item[0] == "control":
+                if item and item[0] == "sticky_push":
+                    around.append(item[1])
+                elif item and item[0] == "sticky_pop" and around:
+                    around.pop()
+                elif item and item[0] == "control":
                     found[item[2]] = (item[1], fixed, item[3], item[4])
+                    if around:
+                        self._control_sticky[item[2]] = around[-1]
                 elif item and item[0] == "button":
                     buttons.append((item[1], item[2], fixed))
         for element in [e for e in self._widgets if e not in found]:
@@ -957,6 +1104,9 @@ class MerlinView(QWidget):
                 widget.hide()
                 continue
             top = rect.top() - (0.0 if fixed else self._scroll)
+            sticky = getattr(self, "_control_sticky", {}).get(element)
+            if sticky is not None and self._display is not None:
+                top += self._display.sticky_offset(sticky, self._scroll)
             height = max(rect.height(), 8.0)
             widget.setGeometry(round(rect.left()), round(top), max(8, round(rect.width())),
                                round(height))
@@ -1342,6 +1492,12 @@ class MerlinView(QWidget):
                 if rect.contains(point):
                     return href
         point = point.__class__(point.x(), point.y() + self._scroll)
+        for info in reversed(self._display.sticky):
+            moved = self._display.sticky_offset(info, self._scroll)
+            if moved:
+                for rect, href in self._display.links[info["links"]:info.get("links_end", info["links"])]:
+                    if rect.translated(0, moved).contains(point):
+                        return href
         for rect, href in self._display.links:
             if rect.contains(point):
                 return href
@@ -1387,9 +1543,10 @@ class MerlinView(QWidget):
                     del details.attrs["open"]
                 else:
                     details.attrs["open"] = ""
-                self._styler.styles = {}
-                self._styles = self._styler.compute()
-                self._layout()
+                # the change is carried to the worker, which styles the page again
+                elements = [self._document.root] + list(self._document.root.elements())
+                self._patches[elements.index(details)] = dict(details.attrs)
+                self._restyle()
             return
         if not href or href.lower().startswith("javascript:"):
             return

@@ -12,6 +12,14 @@ unless asked. The pipeline is the classic one, each stage its own module:
 It uses no Chromium, no Rust and nothing beyond PyQt6 and Python's own
 library. Try it with:  python -m merlin.engine <address or file>
 """
-from .view import MerlinView
-
 __all__ = ["MerlinView"]
+
+
+def __getattr__(name):
+    # MerlinView brings Qt's widgets with it; it is loaded only when asked for,
+    # so a worker process, which uses only the pure Python parts, stays light
+    if name == "MerlinView":
+        from .view import MerlinView
+
+        return MerlinView
+    raise AttributeError(name)

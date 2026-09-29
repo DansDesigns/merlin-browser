@@ -75,10 +75,25 @@ def paint(painter, display: DisplayList, visible: QRectF, images=None) -> None:
     """Draw the parts of the page inside visible, given in page coordinates."""
     images = images or {}
     depth = 0
+    shown = [visible]              # what is visible, as seen from inside sticky boxes
     for item in display.items:
         if item is None:
             continue
         kind = item[0]
+        if kind == "sticky_push":
+            moved = display.sticky_offset(item[1], visible.top())
+            painter.save()
+            depth += 1
+            painter.translate(0, moved)
+            shown.append(shown[-1].translated(0, -moved))
+            continue
+        if kind == "sticky_pop":
+            if depth:
+                painter.restore()
+                depth -= 1
+            if len(shown) > 1:
+                shown.pop()
+            continue
         # clipping and opacity: always followed, whatever is visible, so that
         # every push meets its pop
         if kind == "clip_push":
@@ -106,9 +121,9 @@ def paint(painter, display: DisplayList, visible: QRectF, images=None) -> None:
             continue
         if kind == "group":
             for sub in item[1]:
-                _draw(painter, sub, visible, images)
+                _draw(painter, sub, shown[-1], images)
         else:
-            _draw(painter, item, visible, images)
+            _draw(painter, item, shown[-1], images)
     while depth:
         painter.restore()
         depth -= 1

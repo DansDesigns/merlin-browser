@@ -80,6 +80,17 @@ class DisplayList:
         self.fixed = None                # position: fixed, drawn against the window
         self.simplified = False          # the time budget ran out: estimates used
         self.canvas_gradients = []       # a gradient on <html> or <body>: the whole page
+        self.sticky = []                 # position: sticky boxes, each a dict (see Layout)
+
+    def sticky_offset(self, info: dict, scroll: float) -> float:
+        """How far a sticky box is moved down with the page scrolled by scroll.
+
+        It keeps to its place until reaching its top offset from the window's
+        top, then holds there, but never past the bottom of its parent.
+        """
+        wanted = scroll + info["top"] - info["start"]
+        room = info.get("limit", info["start"] + info["height"]) - (info["start"] + info["height"])
+        return max(0.0, min(wanted, max(0.0, room)))
 
 
 class _Fonts:
@@ -159,6 +170,7 @@ class Layout:
         # and style alive, so their ids cannot be reused by other objects
         # within the pass and give a wrong answer.
         self._measured: dict = {}
+        self._sticky_waiting: dict = {}   # parent element -> its sticky children
         # A time budget for the pass: past it, measuring gives way to quick
         # estimates, so no page can hold the window up for long
         import time as _time
@@ -279,6 +291,15 @@ class Layout:
         max_height = self._length(style.get("max-height"), 0.0, vertical=True)
         fixed_height = self._length(style.get("height"), 0.0, vertical=True)
 
+        sticky = None
+        if style.get("position") == "sticky" and not self._measuring:
+            top_offset = self._length(style.get("top"), 0.0, vertical=True)
+            if top_offset is not None:
+                sticky = {"top": top_offset, "start": y + (margin[0] or 0.0), "height": 0.0,
+                          "links": len(self.out.links)}
+                self.out.items.append(("sticky_push", sticky))
+                self._sticky_waiting.setdefault(element.parent, []).append(sticky)
+                self.out.sticky.append(sticky)
         # opacity covers the box and all inside it; hidden by clip or clip-path
         # counts as opacity 0, drawn as nothing but still taking its room
         opacity = style.get("opacity", 1.0)
@@ -429,6 +450,13 @@ class Layout:
             self.out.links.extend(kept)
         if opacity < 0.999 and not self._measuring:
             self.out.items.append(("opacity_pop",))
+        if sticky is not None:
+            sticky["height"] = box.height()
+            sticky["links_end"] = len(self.out.links)
+            self.out.items.append(("sticky_pop",))
+        # this box is done: sticky children now know how far they may go
+        for info in self._sticky_waiting.pop(element, []):
+            info["limit"] = content_y + inner_height
 
         if style.get("display") == "list-item" and first_baseline is not None:
             self._marker(element, style, content_x, first_baseline)
