@@ -5,6 +5,27 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.7.3.7
+  A loading bar in the status bar: the current tab's progress, in either
+  engine, and a busy animation whenever a page works on with nothing new to
+  report, so a loading tab never looks as if it is doing nothing. Merlin Engine
+  now reports its progress as it goes: the page arriving, each of its
+  stylesheets, styling, then laying it out, where it had jumped from 10% to 70%.
+  Merlin Engine lays out big pages on a thread of its own. Styling was already
+  done in worker processes; laying out a big page was the last long job left on
+  Merlin's main thread, the one that draws the window, and it held the window
+  still while it ran: 0.85 seconds for a test page of 9,000 elements, with no
+  pause over a tenth of a second now. The page is shown, and the load counts as
+  finished, once it is laid out. Small pages, which lay out in a moment, are
+  laid out as before.
+  Fixed: Save page as would not save as a zip. The name it suggested ended in
+  .html whatever form was chosen, and the file kept it, so the zip was written
+  into a .html file. The name now takes the extension of the form chosen,
+  replacing another form's; and if the form chosen is not recognised, the
+  extension typed decides.
+  A zip saved from a Chromium tab now has the page's stylesheets in it too,
+  fetched for it, as a zip saved from a Merlin Engine tab has.
+
 1.7.3.6
   Fixed: a large interface size could leave Merlin unusable on Windows. The
   window came back at its saved size, now drawn larger, running off the screen

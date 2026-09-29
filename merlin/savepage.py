@@ -161,15 +161,13 @@ def save_page_as(window) -> None:
     if engine:
         # Merlin Engine's complete page is one HTML file, its stylesheets in it
         filters[1] = "Web page, complete (*.html)"
+    # no extension on the suggested name: it ended in .html whatever the form
+    # chosen, and choosing the zip then wrote the zip into a .html file
     path, chosen = QFileDialog.getSaveFileName(
-        window, "Save page as", os.path.join(_downloads(), name + ".html"), ";;".join(filters))
+        window, "Save page as", os.path.join(_downloads(), name), ";;".join(filters))
     if not path:
         return
-    kind = FORMATS[filters.index(chosen)][0] if chosen in filters else "html"
-    extension = {"html": ".html", "complete": ".html" if engine else ".mhtml", "pdf": ".pdf",
-                 "txt": ".txt", "png": ".png", "zip": ".zip"}[kind]
-    if not os.path.splitext(path)[1]:
-        path += extension
+    kind, path = choose_format(path, chosen, filters, engine)
     try:
         if engine:
             _save_engine(window, view, kind, path)
@@ -177,6 +175,33 @@ def save_page_as(window) -> None:
             _save_chromium(window, view, kind, path)
     except Exception as exc:                                   # noqa: BLE001
         window.status_label.setText(f"Could not save the page: {exc}")
+
+
+EXTENSIONS = {".html": "html", ".htm": "html", ".mhtml": "complete", ".mht": "complete",
+              ".pdf": "pdf", ".txt": "txt", ".png": "png", ".zip": "zip"}
+
+
+def choose_format(path: str, chosen: str, filters: list, engine: bool) -> tuple:
+    """The form to save in, and the path ending as that form's files do.
+
+    The form chosen in the dialog decides; if the dialog's answer is not one of
+    the forms offered, the extension typed does; failing both, HTML. The file
+    always ends in its form's extension: one ending in another form's is
+    corrected, and a name ending in neither gets it added.
+    """
+    root, ext = os.path.splitext(path)
+    ext = ext.lower()
+    if chosen in filters:
+        kind = FORMATS[filters.index(chosen)][0]
+    else:
+        match = next((i for i, f in enumerate(filters) if chosen and chosen.split(" (")[0] in f), None)
+        kind = FORMATS[match][0] if match is not None else EXTENSIONS.get(ext, "html")
+    wanted = {"html": ".html", "complete": ".html" if engine else ".mhtml", "pdf": ".pdf",
+              "txt": ".txt", "png": ".png", "zip": ".zip"}[kind]
+    fits = ext == wanted or (kind == "html" and ext == ".htm") or (kind == "complete" and ext == ".mht")
+    if not fits:
+        path = (root if ext in EXTENSIONS else path) + wanted
+    return kind, path
 
 
 def _done(window, path: str) -> None:
@@ -249,12 +274,55 @@ def _save_chromium(window, view, kind: str, path: str) -> None:
         buffer.open(QIODevice.OpenModeFlag.WriteOnly)
         view.grab().toImage().save(buffer, "PNG")
 
+        address = view.url().toString()
+        size = [view.width(), view.height()]
+
         def zipped(html: str) -> None:
-            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as bundle:
-                bundle.writestr("page.html", html or "")
-                bundle.writestr("screenshot.png", bytes(shot))
-                bundle.writestr("manifest.json", json.dumps(
-                    {"url": view.url().toString(), "engine": "chromium",
-                     "viewport": [view.width(), view.height()]}, indent=2))
-            _done(window, path)
+            # the page's stylesheets too, fetched here as Chromium keeps its own
+            # to itself: the page alone says little about how it is laid out
+            import threading
+
+            window.status_label.setText("Saving the page and its stylesheets...")
+
+            def work():
+                sheets = _fetch_stylesheets(html or "", address)
+                with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as bundle:
+                    bundle.writestr("page.html", html or "")
+                    for number, (href, text) in enumerate(sheets):
+                        bundle.writestr(f"sheets/{number:03d}.css", text)
+                    bundle.writestr("screenshot.png", bytes(shot))
+                    bundle.writestr("manifest.json", json.dumps(
+                        {"url": address, "engine": "chromium", "viewport": size,
+                         "sheets": [href for href, _text in sheets]}, indent=2))
+                window._save_finished.emit(path)
+
+            threading.Thread(target=work, daemon=True).start()
         page.toHtml(zipped)
+
+
+def _fetch_stylesheets(html: str, page_url: str) -> list:
+    """(address, text) for each stylesheet the page links to, fetched in order.
+
+    Those that cannot be fetched are left out; each is given ten seconds.
+    """
+    import concurrent.futures
+    import urllib.parse
+
+    from .engine.view import fetch_bytes, page_headers
+
+    hrefs = []
+    for tag in re.findall(r"<link\b[^>]*>", html, re.I):
+        if re.search(r"""rel\s*=\s*["']?[^"'>]*stylesheet""", tag, re.I):
+            found = re.search(r"""href\s*=\s*["']([^"']+)["']""", tag, re.I)
+            if found:
+                hrefs.append(urllib.parse.urljoin(page_url, found.group(1).replace("&amp;", "&")))
+    headers = page_headers()
+    headers["Accept"] = "text/css,*/*;q=0.1"
+
+    def get(address):
+        ok, _final, data, _kind = fetch_bytes(address, headers, timeout=10, limit=4 * 1024 * 1024)
+        return data.decode("utf-8", "replace") if ok else None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        texts = list(pool.map(get, hrefs))
+    return [(href, text) for href, text in zip(hrefs, texts) if text is not None]

@@ -354,6 +354,9 @@ class PAGE_VIEWS(metaclass=_PageViews):                   # noqa: N801
 
 
 class BrowserWindow(QMainWindow):
+    # a save that finished on another thread, for the status bar
+    _save_finished = pyqtSignal(str)
+
     # Results from worker threads. Emitting a signal from another thread
     # queues it onto this window's thread, so the slots can touch widgets.
     _stream_resolved = pyqtSignal(str, bool, str)    # page, ok, stream or why
@@ -462,6 +465,9 @@ class BrowserWindow(QMainWindow):
             lambda: self.navigate(self.url_bar.text()))
         # the first click selects the whole address, so typing replaces it
         self.url_bar.installEventFilter(self)
+        self._save_finished.connect(
+            lambda path: self.status_label.setText(
+                f"Saved {os.path.basename(path)} to {os.path.dirname(path)}"))
         # a warning padlock, shown while the tab has certificate problems
         self.act_cert = self.url_bar.addAction(
             icons.coloured_icon("padlock_warning", "#e0a030"),
@@ -590,6 +596,24 @@ class BrowserWindow(QMainWindow):
         # QStatusBar draws a frame around every item it holds, which showed as
         # a grey divider to the left of the clock in both themes.
         self.status.setStyleSheet("QStatusBar::item { border: 0px; }")
+        # a slim loading bar: the current tab's progress, and a busy animation
+        # while it works with nothing new to report, so it never looks idle
+        from PyQt6.QtWidgets import QProgressBar
+
+        self.load_bar = QProgressBar(self)
+        self.load_bar.setTextVisible(False)
+        self.load_bar.setFixedSize(140, 6)
+        self.load_bar.setRange(0, 100)
+        self.load_bar.setStyleSheet(
+            "QProgressBar { border: none; border-radius: 3px; background: rgba(128,128,128,0.25); }"
+            "QProgressBar::chunk { border-radius: 3px; background: #5b7cf0; }")
+        self.load_bar.hide()
+        self.status.addPermanentWidget(self.load_bar)
+        self._bar_seen = (None, -1, 0.0)          # view, progress, when it last moved
+        self._bar_timer = QTimer(self)
+        self._bar_timer.setInterval(400)
+        self._bar_timer.timeout.connect(self._update_load_bar)
+        self._bar_timer.start()
         self.clock_label = QLabel("", self)
         self.status.addPermanentWidget(self.clock_label)
         self._clock_timer = QTimer(self)
@@ -2277,6 +2301,9 @@ class BrowserWindow(QMainWindow):
             if view is self.current():
                 self._update_cert_indicator()
         view._loading = loading
+        view._progress = 0 if loading else 100
+        if view is self.current():
+            self._update_load_bar()
         if not loading and ok:
             # Also look once a page has loaded, not only when the address
             # changes: a reload keeps the same address, and it is exactly when
@@ -2307,7 +2334,32 @@ class BrowserWindow(QMainWindow):
                 self.status_label.setText("" if ok else "Load failed")
             self._refresh_completer()
 
+    def _update_load_bar(self) -> None:
+        """Show the current tab's progress; busy while it works unchanged."""
+        import time
+
+        view = self.current()
+        loading = bool(view is not None and getattr(view, "_loading", False))
+        if not loading:
+            self.load_bar.hide()
+            return
+        progress = int(getattr(view, "_progress", 0) or 0)
+        seen_view, seen_progress, since = self._bar_seen
+        now = time.monotonic()
+        if seen_view is not view or seen_progress != progress:
+            self._bar_seen = (view, progress, now)
+            since = now
+        if now - since > 1.2:
+            self.load_bar.setRange(0, 0)          # still working: a busy animation
+        else:
+            self.load_bar.setRange(0, 100)
+            self.load_bar.setValue(max(3, progress))
+        self.load_bar.show()
+
     def _on_progress(self, view: WebView, progress: int) -> None:
+        view._progress = progress
+        if view is self.current():
+            self._update_load_bar()
         if view is self.current() and 0 < progress < 100:
             self.status_label.setText(f"Loading... {progress}%")
         elif view is self.current():

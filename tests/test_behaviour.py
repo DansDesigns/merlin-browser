@@ -1479,8 +1479,9 @@ def test_source_and_save_page_as(app) -> None:
             check(f"{name}: saves as text, in reading order",
                   0 <= text.find("Saving pages") < text.find("First paragraph") < text.find("Last."))
             check(f"{name}: saves as a picture", not QImage(results["png"][0]).isNull())
-            check(f"{name}: saves as a zip for debugging",
-                  "page.html" in zipfile.ZipFile(results["zip"][0]).namelist())
+            check(f"{name}: saves as a zip for debugging, with its stylesheets",
+                  {"page.html", "sheets/000.css"} <= set(zipfile.ZipFile(results["zip"][0]).namelist()),
+                  str(zipfile.ZipFile(results["zip"][0]).namelist()))
     finally:
         QFileDialog.getSaveFileName = real_dialog
         settings.set("merlin_engine", False, save=False)
@@ -1652,6 +1653,56 @@ def test_interface_too_large(app) -> None:
         window.close()
 
 
+def test_loading_bar_and_save_names(app) -> None:
+    """The status bar's loading bar, and Save page as choosing the right form."""
+    import http.server
+    import threading
+    import time as _time
+
+    from merlin.savepage import FORMATS, choose_format
+
+    class Slow(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            if self.path.startswith("/slow.css"):
+                _time.sleep(3)
+                body, kind = b"p { color: red }", "text/css"
+            else:
+                body, kind = b"<title>Slow</title><link rel=stylesheet href=/slow.css><p>x", "text/html"
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Slow)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    window, settings, _ = make_window(app, "t-load-bar")
+    try:
+        settings.set("merlin_engine", True, save=False)
+        window.show()
+        window.new_tab(f"http://127.0.0.1:{server.server_address[1]}/")
+        wait(app, 0.6)
+        check("the loading bar shows while a page loads", window.load_bar.isVisible())
+        wait(app, 1.8)
+        check("and shows it is busy while the page waits on something slow",
+              window.load_bar.isVisible() and window.load_bar.maximum() == 0)
+        wait(app, 2.5)
+        check("and goes once the page has loaded", not window.load_bar.isVisible())
+    finally:
+        settings.set("merlin_engine", False, save=False)
+        server.shutdown()
+        window.close()
+    filters = [label for _kind, label in FORMATS]
+    check("choosing the zip saves a .zip, not the suggested .html",
+          choose_format("C:/x/page.html", filters[5], filters, False) == ("zip", "C:/x/page.zip"))
+    check("a title with full stops keeps them, and gains the extension",
+          choose_format("C:/x/A. B. C", filters[2], filters, True) == ("pdf", "C:/x/A. B. C.pdf"))
+    check("a form reported differently falls back to the extension typed",
+          choose_format("C:/x/page.zip", "(unknown)", filters, True)[0] == "zip")
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -1683,7 +1734,8 @@ def main() -> int:
                  test_mouse_back_forward, test_merlin_engine_passwords,
                  test_ftp_opens_in_merlin_engine, test_merlin_engine_tab_icon,
                  test_script_sites_and_debug_save, test_source_and_save_page_as,
-                 test_certificate_padlock, test_interface_too_large):
+                 test_certificate_padlock, test_interface_too_large,
+                 test_loading_bar_and_save_names):
         print(f"\n{test.__name__}")
         try:
             test(app)

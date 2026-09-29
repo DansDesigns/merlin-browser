@@ -21,7 +21,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from PyQt6.QtCore import QPoint, Qt, QUrl                     # noqa: E402
+from PyQt6.QtCore import QPoint, Qt, QTimer, QUrl             # noqa: E402
 from PyQt6.QtWidgets import QApplication                      # noqa: E402
 
 FAILED: list = []
@@ -1523,6 +1523,59 @@ def test_stacking_order(app) -> None:
         view.close()
 
 
+def test_big_page_laid_out_in_background(app) -> None:
+    """A big page is laid out on a thread: the window keeps drawing meanwhile,
+    and the load is finished only once the page is laid out."""
+    from merlin.engine import MerlinView
+    from merlin.engine import view as engine_view
+
+    rows = "".join(f"<div style='display:flex;gap:6px'><div style='flex:1'><b>Item {i}</b> "
+                   f"<span>words to wrap</span></div><div style='width:120px'>{i}</div></div>"
+                   for i in range(1500))
+    folder = tempfile.mkdtemp(prefix="merlin-big-")
+    open(os.path.join(folder, "big.html"), "w").write("<title>Big</title><body>" + rows)
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    view = MerlinView()
+    view.resize(1200, 800)
+    view.show()
+    last, gaps, finished = [None], [], []
+
+    def tick():
+        now = time.perf_counter()
+        if last[0] is not None:
+            gaps.append(now - last[0])
+        last[0] = now
+
+    timer = QTimer()
+    timer.setInterval(10)
+    timer.timeout.connect(tick)
+    view.loadFinished.connect(lambda ok: finished.append(view._display is not None
+                                                        and view._display.height > 10000))
+    try:
+        timer.start()
+        view.setUrl(QUrl(f"http://127.0.0.1:{server.server_address[1]}/big.html"))
+        wait(app, 5.0)
+        timer.stop()
+        check("a big page is laid out off the main thread",
+              view._element_count > engine_view.BIG_PAGE)
+        check("the window kept drawing: no pause as long as a quarter-second",
+              gaps and max(gaps) < 0.25, f"longest {max(gaps or [0]):.2f}s")
+        check("and the load finished only once the page was laid out", finished == [True],
+              str(finished))
+    finally:
+        server.shutdown()
+        view.close()
+
+
 def test_view(app) -> None:
     from merlin.engine import MerlinView
 
@@ -1610,6 +1663,8 @@ def main() -> int:
     test_images_do_not_relayout(app)
     print("test_stacking_order")
     test_stacking_order(app)
+    print("test_big_page_laid_out_in_background")
+    test_big_page_laid_out_in_background(app)
     print("test_forms")
     test_forms(app)
     print("test_view")

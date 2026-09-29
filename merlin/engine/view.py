@@ -347,6 +347,11 @@ def _download_name(disposition: str, url: str) -> str:
     return tail or "download"
 
 
+# A page with more elements than this is laid out on a thread: GitHub's front
+# page has about 1,800; an ordinary article a few hundred.
+BIG_PAGE = 1200
+
+
 def needs_javascript(document) -> bool:
     """Whether a page shows little or nothing until scripts build it.
 
@@ -507,6 +512,7 @@ class MerlinView(QWidget):
     loginSubmitted = pyqtSignal(str, str, str)       # page, username, password
     downloadFinished = pyqtSignal(str)               # the saved file
     certTrouble = pyqtSignal(str, str)               # host, certificate problem
+    _laid_out = pyqtSignal(int, object)              # layout number, the display list
     _restyled = pyqtSignal(int, object)              # load number, the worker's answer
     _icon_fetched = pyqtSignal(int, bytes)           # load number, the icon's data
     needsScript = pyqtSignal(str)                    # a page built by JavaScript: its address
@@ -559,6 +565,12 @@ class MerlinView(QWidget):
         self._fetched.connect(self._on_fetched)
         self._image_fetched.connect(self._on_image)
         self._restyled.connect(self._on_restyled)
+        self._laid_out.connect(self._on_laid_out)
+        self._layout_number = 0
+        self._layout_running = False
+        self._layout_again = False
+        self._finish_when_laid_out = None
+        self._element_count = 0
         self._icon_fetched.connect(self._on_icon)
         self._icon = QIcon()
 
@@ -771,6 +783,7 @@ class MerlinView(QWidget):
                 ok, final, text, saved = fetch_page(
                     target, headers=headers, data=body, content_type=content_type,
                     opener=opener, download_dir=download_dir, progress=progress)
+                progress(25)                      # the page is here
                 if ok:
                     # parsed here, off the UI thread, with its stylesheets
                     # fetched before the page is shown, as browsers do
@@ -887,8 +900,22 @@ class MerlinView(QWidget):
             return text
 
         addresses = [urllib.parse.urljoin(page_url, s[1]) for s in links]
+        done = [0]
+        number = self._load_number
+
+        def get_counted(address):
+            text = get(address)
+            done[0] += 1
+            try:
+                if number == self._load_number:
+                    # 25% to 60% across the stylesheets, one step as each arrives
+                    self.loadProgress.emit(25 + int(35 * done[0] / max(1, len(addresses))))
+            except RuntimeError:
+                pass
+            return text
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
-            fetched = dict(zip(addresses, pool.map(get, addresses)))
+            fetched = dict(zip(addresses, pool.map(get_counted, addresses)))
         sheets = []
         for source in sources:
             if source[0] == "style":
@@ -914,6 +941,7 @@ class MerlinView(QWidget):
 
         job = {"markup": markup, "url": url, "sheets": sheets, "viewport": viewport,
                "hiding": hiding, "want": "document"}
+        prepared["styling"] = True
         # in a worker process, truly alongside the rest of Merlin; if none can
         # be had, here, as before
         answer = worker.POOL.style(job) if markup else None
@@ -947,13 +975,25 @@ class MerlinView(QWidget):
                     f"sans-serif;margin:40px'><h2>MerlinEngine could not open this page</h2>"
                     f"<p style='color:#555'>{html.escape(self._url.toString())}</p>"
                     f"<p>{html.escape(text)}</p></body>")
+        self.loadProgress.emit(80)                   # styled: laying it out
+        download = prepared.get("download") if prepared else None
+        self._finish_when_laid_out = (ok, download)
         self._show(text, prepared if ok else None)
+        if not self._layout_running:
+            self._finish_load()
+
+    def _finish_load(self) -> None:
+        """The page is laid out and shown: the load is finished."""
+        if self._finish_when_laid_out is None:
+            return
+        ok, download = self._finish_when_laid_out
+        self._finish_when_laid_out = None
         self.loadProgress.emit(100)
         self.loadFinished.emit(ok)
-        if prepared and prepared.get("download"):
+        if download:
             # announced once the page saying so has loaded, so nothing that
             # tidies up after a load clears the message
-            self.downloadFinished.emit(prepared["download"])
+            self.downloadFinished.emit(download)
         if self._pending_fragment:
             self._scroll_to_fragment(self._pending_fragment)
 
@@ -968,6 +1008,9 @@ class MerlinView(QWidget):
         self._clear_controls()
         self._images = {}
         self._icon = QIcon()
+        self._element_count = sum(1 for _ in self._document.root.elements())
+        if self._element_count > BIG_PAGE:
+            self._display = None          # the old page goes; the new one is being laid out
         self._find = ("", -1)
         self._found_rect = None
         self._markup = prepared.get("markup", markup) if prepared else markup
@@ -1222,10 +1265,58 @@ class MerlinView(QWidget):
                                for q, held in self._media.items()):
             self._media = {q: media_matches(q, viewport) for q in self._media}
             self._restyle()
+        if self._element_count > BIG_PAGE:
+            self._layout_in_background()
+            return
         self._display = Layout(self._document, self._styles, self._page_width(), self._zoom,
                                images=self._images,
                                viewport_height=float(max(1, self.height())),
                                live_controls=True).run()
+        self._shown_laid_out()
+
+    def _layout_in_background(self) -> None:
+        """Lay a big page out on a thread, so the window keeps drawing meanwhile.
+
+        Qt measures and lays out text off the main thread happily; only drawing
+        the window needs it. Python still takes turns, but the main thread gets
+        its turns, so the loading bar and everything else keep moving.
+        """
+        if self._layout_running:
+            self._layout_again = True               # once this one is done
+            return
+        self._layout_running = True
+        self._layout_number += 1
+        number = self._layout_number
+        document, styles = self._document, self._styles
+        width, zoom = self._page_width(), self._zoom
+        images = dict(self._images)
+        height = float(max(1, self.height()))
+
+        def work():
+            try:
+                out = Layout(document, styles, width, zoom, images=images,
+                             viewport_height=height, live_controls=True).run()
+            except Exception:                              # noqa: BLE001
+                out = None
+            try:
+                self._laid_out.emit(number, out)
+            except RuntimeError:
+                pass                                 # the tab was closed
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_laid_out(self, number: int, out) -> None:
+        self._layout_running = False
+        if number == self._layout_number and out is not None:
+            self._display = out
+            self._shown_laid_out()
+        if self._layout_again:
+            self._layout_again = False
+            self._layout_in_background()
+        else:
+            self._finish_load()
+
+    def _shown_laid_out(self) -> None:
         self._update_scrollbar()
         self._sync_controls()
         self.update()
