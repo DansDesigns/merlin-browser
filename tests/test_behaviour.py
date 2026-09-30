@@ -1685,6 +1685,10 @@ def test_loading_bar_and_save_names(app) -> None:
         window.new_tab(f"http://127.0.0.1:{server.server_address[1]}/")
         wait(app, 0.6)
         check("the loading bar shows while a page loads", window.load_bar.isVisible())
+        label, bar = window.status_label.geometry(), window.load_bar.geometry()
+        check("at the left, straight after the status text",
+              bar.x() < window.width() // 3 and 0 <= bar.x() - label.right() < 30,
+              f"text ends at {label.right()}, bar at {bar.x()}")
         wait(app, 1.8)
         check("and shows it is busy while the page waits on something slow",
               window.load_bar.isVisible() and window.load_bar.maximum() == 0)

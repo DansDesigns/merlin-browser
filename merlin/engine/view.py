@@ -535,6 +535,8 @@ class MerlinView(QWidget):
         self._markup = ""              # the page as it came, for styling it again
         self._patches: dict = {}       # element number -> attributes changed since
         self._media: dict = {}         # each @media query, and whether it held
+        self._viewport_units = False   # whether the styles used vw, vh, vmin or vmax
+        self._styled_at = None         # the window size they were worked out for
         self._restyling = False
         self._restyle_again = False
         self._found_rect = None
@@ -949,9 +951,11 @@ class MerlinView(QWidget):
             answer = worker.style_page(job) if markup else None
         if answer is None:
             styler = Styler(document, author_css=sheets, viewport=viewport, extra_css=hiding)
-            answer = {"document": document, "styles": styler.compute(), "media": dict(styler._media)}
+            answer = {"document": document, "styles": styler.compute(), "media": dict(styler._media),
+                      "viewport_units": styler.viewport_units, "viewport": viewport}
         prepared.update(document=answer["document"], styles=answer["styles"],
-                        media=answer["media"])
+                        media=answer["media"], viewport_units=answer.get("viewport_units", False),
+                        styled_at=answer.get("viewport", viewport))
         return prepared
 
     def _on_fetched(self, number: int, ok: bool, final: str, text: str,
@@ -1020,12 +1024,16 @@ class MerlinView(QWidget):
             # is caught by _layout, which has the page styled again
             self._styles = prepared["styles"]
             self._media = prepared.get("media", {})
+            self._viewport_units = prepared.get("viewport_units", False)
+            self._styled_at = prepared.get("styled_at")
         else:
+            styled_at = (self._page_width(), float(self.height()))
             styler = Styler(self._document, author_css=self._sheets,
-                            viewport=(self._page_width(), self.height()),
-                            extra_css=self._hiding_css())
+                            viewport=styled_at, extra_css=self._hiding_css())
             self._styles = styler.compute()
             self._media = dict(styler._media)
+            self._viewport_units = styler.viewport_units
+            self._styled_at = styled_at
         self._styler = None
         title = self._document.title or self._url.toString()
         if title != self._title:
@@ -1247,6 +1255,7 @@ class MerlinView(QWidget):
             if len(styles) == len(elements):
                 self._styles = {e: st for e, st in zip(elements, styles) if st is not None}
                 self._media = answer.get("media", self._media)
+                self._viewport_units = answer.get("viewport_units", self._viewport_units)
                 self._layout()
         if self._restyle_again:
             self._restyle_again = False
@@ -1264,6 +1273,12 @@ class MerlinView(QWidget):
         if self._media and any(media_matches(q, viewport) != held
                                for q, held in self._media.items()):
             self._media = {q: media_matches(q, viewport) for q in self._media}
+            self._restyle()
+        elif self._viewport_units and self._styled_at is not None and (
+                abs(self._styled_at[0] - viewport[0]) > 1 or abs(self._styled_at[1] - viewport[1]) > 1):
+            # vw and vh were worked out for another size: the new tab page,
+            # styled while its view was still tiny, kept its search box 86px wide
+            self._styled_at = viewport
             self._restyle()
         if self._element_count > BIG_PAGE:
             self._layout_in_background()

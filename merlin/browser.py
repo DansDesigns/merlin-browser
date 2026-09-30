@@ -591,7 +591,7 @@ class BrowserWindow(QMainWindow):
 
         self.status = self.statusBar()
         self.status_label = QLabel("", self)
-        self.status.addWidget(self.status_label, 1)
+        self.status.addWidget(self.status_label, 0)
 
         # QStatusBar draws a frame around every item it holds, which showed as
         # a grey divider to the left of the clock in both themes.
@@ -608,7 +608,11 @@ class BrowserWindow(QMainWindow):
             "QProgressBar { border: none; border-radius: 3px; background: rgba(128,128,128,0.25); }"
             "QProgressBar::chunk { border-radius: 3px; background: #5b7cf0; }")
         self.load_bar.hide()
-        self.status.addPermanentWidget(self.load_bar)
+        # straight after the status text, "Loading... 42%", with the rest of
+        # the bar's width left empty after it
+        self.status.addWidget(self.load_bar, 0)
+        filler = QWidget(self)
+        self.status.addWidget(filler, 1)
         self._bar_seen = (None, -1, 0.0)          # view, progress, when it last moved
         self._bar_timer = QTimer(self)
         self._bar_timer.setInterval(400)

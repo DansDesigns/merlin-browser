@@ -74,7 +74,8 @@ def style_page(job: dict) -> dict:
                     viewport=tuple(job.get("viewport") or (1024, 768)),
                     extra_css=job.get("hiding", ""), scheme=job.get("scheme", "light"))
     styles = styler.compute()
-    answer = {"media": dict(styler._media)}
+    answer = {"media": dict(styler._media), "viewport_units": styler.viewport_units,
+              "viewport": tuple(job.get("viewport") or (1024, 768))}
     if job.get("want") == "styles":
         answer["styles"] = [styles.get(element) for element in elements]
     else:

@@ -5,6 +5,26 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.7.3.8
+  Fixed: the new tab page could open squeezed into a narrow column, its search
+  box a sliver and its tiles one above another, until Home was clicked. Its
+  widths are set in vw, a share of the window's width, and Merlin Engine worked
+  them out once, sometimes while the view was still being made and 100 pixels
+  wide; they then stayed that narrow. A page whose styles use vw, vh, vmin or
+  vmax is now styled again when the window's size changes, in the background,
+  as one with @media rules already was.
+  Gradients in Merlin Engine are smooth: dithered, as browsers draw them. Qt
+  draws a gradient to 8 bits a channel, so a dark, gentle blend, such as the
+  new tab page's, came out as stripes of one shade up to 150 pixels wide. It is
+  now drawn in 16 bits a channel, noise under a shade is added, and the result
+  is reduced to 8 bits, so that each pixel falls to the shade above or below as
+  often as the true colour lies near it; on a test blend, the eye's view of it
+  now strays from the true colour a tenth as far. It is drawn at the screen's
+  own pixels, sharp on high-resolution screens, and kept, so scrolling and
+  redrawing reuse it.
+  The loading bar sits at the left of the status bar, straight after its text,
+  "Loading... 42%".
+
 1.7.3.7
   A loading bar in the status bar: the current tab's progress, in either
   engine, and a busy animation whenever a page works on with nothing new to

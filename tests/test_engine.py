@@ -1576,6 +1576,59 @@ def test_big_page_laid_out_in_background(app) -> None:
         view.close()
 
 
+def test_viewport_units_follow_the_window(app) -> None:
+    """Styles using vw or vh are worked out again when the window's size changes.
+
+    The new tab page, styled while its view was still tiny, kept its search box
+    and tiles as narrow as they were then: 86vw of a 100px view.
+    """
+    from merlin.engine import MerlinView
+
+    page = ("<body style='margin:0'><div style='display:flex;flex-wrap:wrap;width:min(680px, 90vw)'>"
+            + "".join(f"<a href='https://t{i}.test/' style='display:block;padding:8px'>Tile {i}</a>"
+                      for i in range(5)) + "</div>")
+    view = MerlinView()
+    view.resize(100, 30)
+    try:
+        view.setHtml(page, QUrl("about:blank"))
+        view.resize(1600, 800)
+        view.show()
+        wait(app, 2.0)
+        # each tile's top edge: a link has a rectangle for its box and one for its text
+        tops = {}
+        for rect, href in view._display.links:
+            if href.startswith("https://t"):
+                tops[href] = min(tops.get(href, rect.y()), rect.y())
+        check("styled while tiny, then grown: vw is worked out again, the tiles in one row",
+              len(tops) == 5 and len({round(y) for y in tops.values()}) == 1, str(tops))
+    finally:
+        view.close()
+
+
+def test_gradients_dithered() -> None:
+    """A large gradient is dithered: its blend smooth, not stripes of one shade."""
+    from PyQt6.QtCore import QRectF
+    from PyQt6.QtGui import QColor, QImage, QPainter
+
+    from merlin.engine import paint as engine_paint
+    from merlin.engine.css import parse_gradients
+
+    spec = parse_gradients("linear-gradient(90deg, #0f2438 0%, #1b3a4d 100%)")[0]
+    img = QImage(1800, 400, QImage.Format.Format_ARGB32)
+    img.fill(QColor("magenta"))
+    painter = QPainter(img)
+    engine_paint.fill_gradient(painter, QRectF(0, 0, 1800, 400), spec)
+    painter.end()
+    errors = []
+    for x0 in range(0, 1800, 32):
+        block = [img.pixelColor(x, y).red() for x in range(x0, min(x0 + 32, 1800)) for y in range(180, 220)]
+        errors.append(abs(sum(block) / len(block) - (15 + 12 * (x0 + 16) / 1800)))
+    check("a dark, gentle gradient follows its true blend (dithered, no stripes)",
+          sum(errors) / len(errors) < 0.08, f"{sum(errors) / len(errors):.3f} of a shade on average")
+    check("and it is not lightened overall by the dithering",
+          abs(sum(img.pixelColor(x, 200).red() for x in range(1800)) / 1800 - 21.0) < 0.3)
+
+
 def test_view(app) -> None:
     from merlin.engine import MerlinView
 
@@ -1648,7 +1701,7 @@ def main() -> int:
                  test_floats_and_positioning, test_grid_svg_inline_block,
                  test_real_world_css, test_files_ftp_smb, test_no_freeze_on_real_grids,
                  test_deep_nesting_stays_quick, test_gradients, test_worker_processes,
-                 test_all_and_script_pages, test_certificate_leniency):
+                 test_all_and_script_pages, test_certificate_leniency, test_gradients_dithered):
         print(test.__name__)
         test()
     print("test_images")
@@ -1665,6 +1718,8 @@ def main() -> int:
     test_stacking_order(app)
     print("test_big_page_laid_out_in_background")
     test_big_page_laid_out_in_background(app)
+    print("test_viewport_units_follow_the_window")
+    test_viewport_units_follow_the_window(app)
     print("test_forms")
     test_forms(app)
     print("test_view")

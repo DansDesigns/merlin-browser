@@ -816,6 +816,9 @@ details:not([open]) > :not(summary) { display: none }
 _DEFAULT_RULES = parse_stylesheet(DEFAULT_STYLESHEET)
 
 
+_VIEWPORT_UNIT = re.compile(r"\d(?:vw|vh|vmin|vmax)\b")
+
+
 class Styler:
     """Matches a document's rules to its elements and computes their styles."""
 
@@ -840,6 +843,9 @@ class Styler:
     def _choose(self) -> None:
         """Index the rules whose @media conditions hold for the viewport now."""
         self._media = {}
+        # whether any value used vw, vh, vmin or vmax: such a page's styles
+        # depend on the window's size, and are worked out again when it changes
+        self.viewport_units = False
         author: dict = {}
         for base, rules in self._sheets:
             for rule in rules:
@@ -999,6 +1005,8 @@ class Styler:
 
     def _value(self, name: str, value: str, font: float, root_size: float, style: dict):
         lowered = value.strip().lower()
+        if "v" in lowered and _VIEWPORT_UNIT.search(lowered):
+            self.viewport_units = True
         if name in ("color", "background-color") or name.endswith("-color"):
             colour = parse_colour(lowered, style.get("color", (0, 0, 0, 255)))
             return colour if colour is not None else style.get(name)

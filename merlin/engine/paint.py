@@ -361,7 +361,94 @@ def gradient_brush(rect: QRectF, spec):
     return brush
 
 
+_DITHERED: dict = {}          # (spec, size, ratio) -> the finished picture, newest last
+_NOISE = None
+DITHER_FROM = 40_000          # pixels: smaller gradients do not band visibly
+
+
+def _noise_tile():
+    """64x64 of noise under one 8-bit shade, in 16-bit colour, made once."""
+    global _NOISE
+    if _NOISE is None:
+        import random
+
+        from PyQt6.QtGui import QColor, QImage
+
+        tile = QImage(64, 64, QImage.Format.Format_RGBA64_Premultiplied)
+        shade = random.Random(1729)            # the same grain every time
+        for y in range(64):
+            for x in range(64):
+                n = shade.randrange(257)       # below one 8-bit step (257 in 16 bits)
+                # opaque, so the small values stay whole when added: with no
+                # alpha a premultiplied pixel's colour is nothing
+                tile.setPixelColor(x, y, QColor.fromRgba64(n, n, n, 65535))
+        _NOISE = tile
+    return _NOISE
+
+
+def _dithered(rect: QRectF, spec, ratio: float):
+    """The gradient drawn smoothly: dithered, and at the screen's own pixels.
+
+    Qt draws gradients to 8 bits a channel without dithering, so a dark, gentle
+    blend became stripes of one shade, some 150 pixels wide. Here it is drawn in
+    16 bits a channel, noise below one 8-bit step is added, and the result is
+    reduced to 8 bits: each pixel then falls to the shade above or below as
+    often as the true colour lies near it, as browsers do. Kept, so scrolling
+    and redrawing reuse it.
+    """
+    from PyQt6.QtGui import QImage, QPainter as _Painter
+
+    width, height = max(1, round(rect.width() * ratio)), max(1, round(rect.height() * ratio))
+    key = (repr(spec), width, height)
+    found = _DITHERED.pop(key, None)
+    if found is None:
+        deep = QImage(width, height, QImage.Format.Format_RGBA64_Premultiplied)
+        deep.fill(0)
+        painter = _Painter(deep)
+        painter.fillRect(QRectF(0, 0, width, height), gradient_brush(QRectF(0, 0, width, height), spec))
+        # half a shade down first: the noise below is added, from nothing up to
+        # a whole shade, and the reduction to 8 bits rounds, so without this
+        # every colour came out half a shade light
+        from PyQt6.QtGui import QColor as _Colour
+
+        painter.setCompositionMode(_Painter.CompositionMode.CompositionMode_Difference)
+        painter.fillRect(QRectF(0, 0, width, height), _Colour.fromRgba64(128, 128, 128, 65535))
+        painter.setCompositionMode(_Painter.CompositionMode.CompositionMode_Plus)
+        # an image texture, which keeps its 16 bits: a pixmap is usually 8 bits
+        # a channel, and noise under one 8-bit step came through as nothing
+        from PyQt6.QtGui import QBrush
+
+        grain = QBrush()
+        grain.setTextureImage(_noise_tile())
+        painter.fillRect(QRectF(0, 0, width, height), grain)
+        painter.end()
+        found = deep.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+        found.setDevicePixelRatio(ratio)
+    _DITHERED[key] = found
+    while len(_DITHERED) > 12:
+        _DITHERED.pop(next(iter(_DITHERED)))
+    return found
+
+
 def fill_gradient(painter, rect: QRectF, spec, radius: float = 0.0) -> None:
+    ratio = 1.0
+    try:
+        ratio = float(painter.device().devicePixelRatioF())
+    except Exception:                                      # noqa: BLE001
+        pass
+    area = rect.width() * rect.height() * ratio * ratio
+    if DITHER_FROM <= area <= 12_000_000:
+        picture = _dithered(rect, spec, ratio)
+        painter.save()
+        if radius > 0.5:
+            from PyQt6.QtGui import QPainterPath
+
+            path = QPainterPath()
+            path.addRoundedRect(rect, radius, radius)
+            painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
+        painter.drawImage(rect, picture)
+        painter.restore()
+        return
     brush = gradient_brush(rect, spec)
     painter.save()
     if radius > 0.5:
