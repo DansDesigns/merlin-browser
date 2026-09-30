@@ -33,7 +33,7 @@ class Text(Node):
 
 
 class Element(Node):
-    __slots__ = ("tag", "attrs")
+    __slots__ = ("tag", "attrs", "_class_cache")
 
     def __init__(self, tag: str, attrs: dict | None = None):
         super().__init__()
@@ -45,8 +45,18 @@ class Element(Node):
         return self.attrs.get("id", "")
 
     @property
-    def classes(self) -> set:
-        return set(self.attrs.get("class", "").split())
+    def classes(self) -> frozenset:
+        # split once, and again only if the attribute changes: the cascade
+        # asked 4.4 million times for GitHub's front page
+        source = self.attrs.get("class", "")
+        try:
+            cached = self._class_cache
+        except AttributeError:
+            cached = None
+        if cached is None or cached[0] is not source:
+            cached = (source, frozenset(source.split()))
+            self._class_cache = cached
+        return cached[1]
 
     def elements(self):
         """Every element below this one, in document order."""

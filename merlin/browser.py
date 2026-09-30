@@ -466,8 +466,8 @@ class BrowserWindow(QMainWindow):
         # the first click selects the whole address, so typing replaces it
         self.url_bar.installEventFilter(self)
         self._save_finished.connect(
-            lambda path: self.status_label.setText(
-                f"Saved {os.path.basename(path)} to {os.path.dirname(path)}"))
+            lambda path: (self.record_download(path), self.status_label.setText(
+                f"Saved {os.path.basename(path)} to {os.path.dirname(path)}")))
         # a warning padlock, shown while the tab has certificate problems
         self.act_cert = self.url_bar.addAction(
             icons.coloured_icon("padlock_warning", "#e0a030"),
@@ -1165,8 +1165,8 @@ class BrowserWindow(QMainWindow):
             view.certTrouble.connect(lambda host, text, v=view: self._engine_cert_trouble(v, host, text))
             view.needsScript.connect(lambda url, v=view: self._offer_chromium(v, url))
             view.downloadFinished.connect(
-                lambda path: self.status_label.setText(
-                    f"Downloaded {os.path.basename(path)} to {os.path.dirname(path)}"))
+                lambda path: (self.record_download(path), self.status_label.setText(
+                    f"Downloaded {os.path.basename(path)} to {os.path.dirname(path)}")))
         else:
             if self.settings.get("merlin_engine", False) and _ENGINE_ERROR:
                 self.status_label.setText(
@@ -3149,6 +3149,17 @@ class BrowserWindow(QMainWindow):
             self.history.clear()
             self.status_label.setText("History cleared")
 
+    def record_download(self, path: str, state: str = "done") -> dict:
+        """Put a file Merlin saved in the Downloads menu, however it was saved.
+
+        Only Chromium's downloads were listed: Merlin Engine's (from the web,
+        FTP or SMB) and anything from Save page as never showed there.
+        """
+        entry = {"path": path, "state": state}
+        self.downloads.append(entry)
+        self._fill_downloads_menu()
+        return entry
+
     def _fill_downloads_menu(self) -> None:
         """Rebuild the downloads list.
 
@@ -3211,8 +3222,14 @@ class BrowserWindow(QMainWindow):
             download.setDownloadDirectory(os.path.dirname(chosen))
             download.setDownloadFileName(os.path.basename(chosen))
             download.accept()
-            download.isFinishedChanged.connect(
-                lambda: self.status_label.setText(f"Saved {os.path.basename(chosen)}"))
+            entry = self.record_download(chosen, "saving")
+
+            def page_saved():
+                entry["state"] = "done"
+                self._fill_downloads_menu()
+                self.status_label.setText(f"Saved {os.path.basename(chosen)}")
+
+            download.isFinishedChanged.connect(page_saved)
             return
         default_dir = QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.DownloadLocation) or os.path.expanduser("~")

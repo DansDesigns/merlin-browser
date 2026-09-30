@@ -102,9 +102,11 @@ class _Fonts:
         "fantasy": QFont.StyleHint.Fantasy, "system-ui": QFont.StyleHint.SansSerif,
     }
 
-    def __init__(self, zoom: float):
+    def __init__(self, zoom: float, aliases=None):
         self.zoom = zoom
         self._cache: dict = {}
+        # a site's web fonts: its CSS family name -> the families Qt loaded them as
+        self.aliases = aliases or {}
 
     def get(self, style: dict):
         key = (style["font-family"], style["font-size"], style["font-weight"],
@@ -122,7 +124,7 @@ class _Fonts:
                 if family.lower() == "monospace":
                     named.extend(["DejaVu Sans Mono", "Consolas", "Courier New", "monospace"])
             else:
-                named.append(family)
+                named.extend(self.aliases.get(family.lower(), [family]))
         if named:
             font.setFamilies(named)
         font.setStyleHint(hint)
@@ -147,7 +149,7 @@ def _px(value, reference: float = 0.0, auto: float | None = 0.0) -> float | None
 class Layout:
     def __init__(self, document, styles: dict, width: float, zoom: float = 1.0,
                  images: dict | None = None, viewport_height: float = 768.0,
-                 live_controls: bool = False):
+                 live_controls: bool = False, font_aliases: dict | None = None):
         # In a view, form fields are real widgets: layout draws their boxes,
         # leaves their text to the widget, and says where each one is.
         self.live_controls = live_controls
@@ -182,7 +184,7 @@ class Layout:
         self.styles = styles
         self.zoom = zoom
         self.width = width
-        self.fonts = _Fonts(zoom)
+        self.fonts = _Fonts(zoom, font_aliases)
         self.out = DisplayList()
 
     # ------------------------------------------------------------ entry
@@ -862,19 +864,7 @@ class Layout:
         single = len(lines) == 1
         for number, line in enumerate(lines):
             gaps = column_gap * (len(line) - 1)
-            free = width - sum(outer(e) for e in line) - gaps
-            if free > 0 and sum(e["grow"] for e in line) > 0:
-                total = sum(e["grow"] for e in line)
-                for entry in line:
-                    entry["size"] += free * entry["grow"] / total
-                    if entry["ceiling"] is not None:
-                        entry["size"] = min(entry["size"], entry["ceiling"])
-            elif free < 0:
-                weights = [e["shrink"] * e["base"] for e in line]
-                total = sum(weights)
-                if total > 0:
-                    for entry, weight in zip(line, weights):
-                        entry["size"] = max(entry["floor"], entry["size"] + free * weight / total)
+            _resolve_flexible(line, width - gaps, outer)
             spare = width - sum(outer(e) for e in line) - gaps
             autos = sum((e["margin"][3] is None) + (e["margin"][1] is None) for e in line)
             if spare > 0 and autos:
@@ -2148,10 +2138,13 @@ class _Measure:
         self.layout._measuring = True
         try:
             if style.get("display") in ("flex", "inline-flex"):
-                self.layout._flex(element, style, 0.0, 0.0, width)
+                return self._flex_natural(element, style, narrowest=width <= 1.0)
             elif style.get("display") in ("grid", "inline-grid"):
                 self.layout._grid(element, style, 0.0, 0.0, width)
             else:
+                stacked = self._stacked_natural(element, width <= 1.0)
+                if stacked is not None:
+                    return stacked
                 self.layout._contents(element, style, 0.0, 0.0, width)
             right = 0.0
             for item in self.layout.out.items:
@@ -2161,6 +2154,131 @@ class _Measure:
             self.layout.out = saved
             self.layout._measuring = was_measuring
             self.layout._floats, self.layout._absolute, self.layout._fixed = held
+
+
+    _BLOCKISH = ("block", "flex", "grid", "table", "list-item", "flow-root")
+
+    def _outer_natural(self, item, item_style, narrowest: bool) -> float:
+        """A box's natural width with its padding, borders and margins."""
+        layout = self.layout
+        margin, padding, border = layout._edges(item_style, 0.0)
+        edges = padding[1] + padding[3] + border[1] + border[3]
+        given = item_style.get("width")
+        fixed = given * layout.zoom if isinstance(given, float) else None
+        if fixed is not None and item_style.get("box-sizing") == "border-box":
+            outer = fixed
+        else:
+            inner = fixed if fixed is not None else layout._natural_width(item, item_style, narrowest)
+            low, high = item_style.get("min-width"), item_style.get("max-width")
+            if isinstance(high, float):
+                inner = min(inner, high * layout.zoom)
+            if isinstance(low, float):
+                inner = max(inner, low * layout.zoom)
+            outer = inner + edges
+        return outer + (margin[1] or 0.0) + (margin[3] or 0.0)
+
+    def _stacked_natural(self, element, narrowest: bool):
+        """A block holding only blocks: as wide as its widest, from their own widths.
+
+        Measured by laying it out on an unbounded line, a flex container inside
+        stretched to that line, and anything it pushed to its far end (a GitHub
+        menu's chevron) made the block as wide as the line. None when the block
+        holds text or inline boxes, which are measured as before.
+        """
+        styles = self.layout.styles
+        blocks = []
+        for child in element.children:
+            if isinstance(child, Element):
+                child_style = styles.get(child, {})
+                display = child_style.get("display")
+                if display == "none" or child_style.get("position") in ("absolute", "fixed"):
+                    continue
+                if display not in self._BLOCKISH:
+                    return None
+                blocks.append((child, child_style))
+            elif isinstance(child, Text) and child.data.strip():
+                return None
+        if not blocks:
+            return None
+        return max(self._outer_natural(c, cs, narrowest) for c, cs in blocks)
+
+    def _flex_natural(self, element, style, narrowest: bool) -> float:
+        """A flex container's content width, as CSS defines it, from its items.
+
+        Laid out on an unbounded line and measured at its right-most edge, as
+        it was, justify-content: space-between (or center, or an auto margin)
+        sent the last item to the far end: a GitHub menu button came out
+        100,000 pixels wide, and everything after it off the screen. The
+        widest a row can be is its items side by side, with their margins and
+        the gaps between; the narrowest, for a row that wraps, its widest item,
+        and for one that does not, all its items at their narrowest. A column
+        is as wide as its widest item.
+        """
+        layout = self.layout
+        saved_origin = getattr(layout, "_flex_origin", (0.0, 0.0))
+        layout._flex_origin = (0.0, 0.0)
+        try:
+            items = layout._flex_items(element)
+        finally:
+            layout._flex_origin = saved_origin
+        row = str(style.get("flex-direction", "row")).startswith("row")
+        wraps = style.get("flex-wrap", "nowrap") in ("wrap", "wrap-reverse")
+        # a percentage has nothing to be a percentage of while measuring, so
+        # such an item is measured by what is in it
+        sizes = [self._outer_natural(item, item_style, narrowest) for item, item_style in items]
+        if not sizes:
+            return 0.0
+        if not row or (narrowest and wraps):
+            return max(sizes)
+        gap = layout._length(style.get("column-gap"), 0.0) or 0.0
+        return sum(sizes) + gap * (len(sizes) - 1)
+
+
+def _resolve_flexible(line: list, room: float, outer) -> None:
+    """Grow or shrink a flex line's items to fill room, as CSS resolves them.
+
+    The free space is shared out, by flex-grow, or when shrinking by
+    flex-shrink times the base size. An item that would pass its limit (its
+    max-width growing; its narrowest content or min-width shrinking) is held
+    at it and frozen, and the rest is shared among the others again. Clamping
+    without sharing again, as before, lost the frozen item's share: GitHub's
+    header, its menu unable to shrink, overflowed by the share the menu could
+    not take, taking Sign in and Sign up off the screen.
+    """
+    frozen = set()
+    for _round in range(len(line) + 1):
+        free = room - sum(outer(e) for e in line)
+        active = [e for e in line if id(e) not in frozen]
+        if not active or abs(free) < 0.01:
+            return
+        if free > 0:
+            total = sum(e["grow"] for e in active)
+            if total <= 0:
+                return
+            shares = {id(e): free * e["grow"] / total for e in active}
+            over = [e for e in active
+                    if e["ceiling"] is not None and e["size"] + shares[id(e)] > e["ceiling"]]
+            if not over:
+                for e in active:
+                    e["size"] += shares[id(e)]
+                return
+            for e in over:
+                e["size"] = max(e["size"], e["ceiling"])
+                frozen.add(id(e))
+        else:
+            weights = {id(e): e["shrink"] * e["base"] for e in active}
+            total = sum(weights.values())
+            if total <= 0:
+                return
+            shares = {id(e): free * weights[id(e)] / total for e in active}
+            under = [e for e in active if e["size"] + shares[id(e)] < e["floor"]]
+            if not under:
+                for e in active:
+                    e["size"] += shares[id(e)]
+                return
+            for e in under:
+                e["size"] = min(e["size"], e["floor"]) if e["size"] < e["floor"] else e["floor"]
+                frozen.add(id(e))
 
 
 def _bottom_edge(item) -> float:

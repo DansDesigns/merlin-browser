@@ -162,6 +162,41 @@ class Selector:
             self.key = ("any", "")
 
 
+def index_keys(selector) -> list:
+    """The index keys a selector's rule is filed under; [] if it can never match.
+
+    An element tries only the rules filed under its tag, id, classes, attribute
+    names, "root" if it is the root, and the few that must be tried everywhere.
+    GitHub has 1,880 rules that had been tried on every element: a rule keyed
+    by an attribute ([data-color-mode=dark]), by :root, or by :where() or :is()
+    of classes, is now filed under those, and one that can never match here
+    (::before, :hover) is left out. Its cascade ran 3.6 million tests.
+    """
+    if not selector.matchable:
+        return []
+    if selector.key[0] != "any":
+        return [selector.key]
+    compound = selector.parts[0][0] if selector.parts else {}
+    pseudos = compound.get("pseudo") or []
+    if "root" in pseudos:
+        return [("root", "")]
+    for pseudo in pseudos:
+        if isinstance(pseudo, tuple) and pseudo[0] in ("is", "where") and pseudo[1]:
+            keys = []
+            for inner in pseudo[1]:
+                found = index_keys(inner)
+                if not found or ("any", "") in found:
+                    keys = None
+                    break
+                keys.extend(found)
+            if keys:
+                return sorted(set(keys))
+    attrs = compound.get("attrs") or []
+    if attrs:
+        return [("attr", attrs[0][0].lower())]
+    return [("any", "")]
+
+
 _SIMPLE = re.compile(
     r"""(?P<tag>\*|[a-zA-Z][\w-]*)
       | \#(?P<id>[\w-]+)
@@ -491,7 +526,12 @@ def parse_declarations(text: str) -> list:
         if ":" not in piece:
             continue
         name, value = piece.split(":", 1)
-        name, value = name.strip().lower(), value.strip()
+        name, value = name.strip(), value.strip()
+        # a custom property's name is case-sensitive, as var() uses it: lowered,
+        # --brand-button-primary-bgColor-rest was never found, and every such
+        # camelCase variable (GitHub's bgColor, fgColor...) came to nothing
+        if not name.startswith("--"):
+            name = name.lower()
         important = False
         if value.lower().endswith("!important"):
             important = True
@@ -851,10 +891,12 @@ class Styler:
             for rule in rules:
                 if rule.media and not all(self._holds(q) for q in rule.media):
                     continue
-                author.setdefault(rule.selector.key, []).append((rule, base))
+                for key in index_keys(rule.selector):
+                    author.setdefault(key, []).append((rule, base))
         default: dict = {}
         for rule in _DEFAULT_RULES:
-            default.setdefault(rule.selector.key, []).append((rule, 0))
+            for key in index_keys(rule.selector):
+                default.setdefault(key, []).append((rule, 0))
         self._index = {"default": default, "author": author}
 
     def _holds(self, query: str) -> bool:
@@ -881,8 +923,19 @@ class Styler:
         if element.id:
             keys.append(("id", element.id))
         keys.extend(("class", name) for name in element.classes)
+        keys.extend(("attr", name) for name in element.attrs)
+        if element is self.document.root:
+            keys.append(("root", ""))
+        seen = set()
         for key in keys:
-            yield from index.get(key, ())
+            for entry in index.get(key, ()):
+                # a rule filed under several keys (:where(.a, .b)) is tried once;
+                # the same rule from a sheet loaded twice is two entries, as the
+                # later copy takes the later place in the cascade
+                marker = (id(entry[0]), entry[1])
+                if marker not in seen:
+                    seen.add(marker)
+                    yield entry
 
     def compute(self) -> dict:
         """Computed style for every element: a dict of property to value."""
@@ -893,9 +946,15 @@ class Styler:
     def _declared(self, element: Element) -> list:
         """Every declaration for the element, weakest first, not yet expanded."""
         found = []   # (layer, specificity, order, name, value)
+        # A sheet loaded more than once gives the same rules again, each in its
+        # own place in the cascade; whether one matches is worked out once
+        answers = {}
         for origin, layer_normal, layer_important in (("default", 0, 5), ("author", 1, 4)):
             for rule, base in self._candidates(self._index[origin], element):
-                if matches(rule.selector, element):
+                answer = answers.get(id(rule))
+                if answer is None:
+                    answer = answers[id(rule)] = matches(rule.selector, element)
+                if answer:
                     for name, value, important in rule.declarations:
                         found.append((layer_important if important else layer_normal,
                                       rule.selector.specificity, base + rule.order, name, value))
@@ -1164,10 +1223,19 @@ def expand_shorthand(name: str, value: str) -> list:
             found.append(("background-color", colour))
         return found
     if name == "background":
-        for token in reversed(_split_outside(value, " ")):
-            if parse_colour(token) is not None:
-                return [("background-color", token)]
-        return [("background-color", "transparent")] if value.strip().lower() == "none" else []
+        # the shorthand resets what it does not name: a colour in its last
+        # layer, or transparent, and no image. "background: 0 0", as minifiers
+        # write "background: none", had left a button's own grey in place
+        # (GitHub's menu). Keywords that stand for the whole value are kept.
+        if value.strip().lower() in ("inherit", "initial", "unset", "revert", "revert-layer"):
+            return [("background-color", value.strip()), ("background-image", value.strip())]
+        layers = _split_outside(value, ",")
+        colour = "transparent"
+        for token in reversed(_split_outside(layers[-1], " ")):
+            if token.strip() and parse_colour(token) is not None:
+                colour = token.strip()
+                break
+        return [("background-color", colour), ("background-image", "none")]
     if name == "list-style":
         for token in value.split():
             if token.lower() in ("disc", "circle", "square", "decimal", "none",
@@ -1542,3 +1610,32 @@ def parse_gradients(value: str, font: float = 16.0, root_size: float = 16.0,
         if stops:
             layers.append(("radial", shape, size, position, stops))
     return layers
+
+
+# ------------------------------------------------------------------ web fonts
+
+def font_faces(text: str) -> list:
+    """The @font-face blocks in a stylesheet: family, sources, weight, style.
+
+    Each source is (url, format), in the order given; a browser uses the first
+    it can. Only url() sources are kept: local() names a font already installed.
+    """
+    faces = []
+    for block in re.finditer(r"@font-face\s*\{([^{}]*)\}", text or "", re.I):
+        family, sources, weight, style = "", [], "400", "normal"
+        for name, value, _important in parse_declarations(block.group(1)):
+            if name == "font-family":
+                family = value.strip().strip("'\"")
+            elif name == "src":
+                for part in _split_outside(value, ","):
+                    found = re.search(r"url\(\s*['\"]?([^'\")]+)['\"]?\s*\)", part)
+                    if found:
+                        kind = re.search(r"format\(\s*['\"]?([^'\")]+)", part)
+                        sources.append((found.group(1).strip(), kind.group(1).lower() if kind else ""))
+            elif name == "font-weight":
+                weight = value.strip()
+            elif name == "font-style":
+                style = value.strip()
+        if family and sources:
+            faces.append({"family": family, "sources": sources, "weight": weight, "style": style})
+    return faces

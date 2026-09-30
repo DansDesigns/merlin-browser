@@ -388,6 +388,85 @@ def needs_javascript(document) -> bool:
     return visible < 200 and (scripts >= 3 or script_size > 20000)
 
 
+_FONTS: dict = {}          # a font file's hash -> the families Qt knows it by
+
+
+def register_font(data: bytes) -> list:
+    """Give Qt a web font; the family names it knows it by, or [] if it cannot.
+
+    Each file is given once a session, however many pages use it. Qt reads
+    TrueType, OpenType and, on most systems, WOFF and WOFF2; a WOFF it will not
+    take is unpacked here and given again.
+    """
+    import hashlib
+
+    from PyQt6.QtCore import QByteArray
+    from PyQt6.QtGui import QFontDatabase
+
+    key = hashlib.sha1(data).hexdigest()
+    if key in _FONTS:
+        return _FONTS[key]
+    font_id = QFontDatabase.addApplicationFontFromData(QByteArray(data))
+    if font_id < 0 and data[:4] == b"wOFF":
+        unpacked = woff_to_sfnt(data)
+        if unpacked:
+            font_id = QFontDatabase.addApplicationFontFromData(QByteArray(unpacked))
+    names = list(QFontDatabase.applicationFontFamilies(font_id)) if font_id >= 0 else []
+    _FONTS[key] = names
+    return names
+
+
+def woff_to_sfnt(data: bytes):
+    """A WOFF font as the TrueType or OpenType file it packs; None if broken.
+
+    WOFF is the font's own tables, each compressed with zlib, and a header
+    saying where they are: the tables are unpacked and laid out again as the
+    file they came from.
+    """
+    import struct
+    import zlib
+
+    try:
+        flavor, _length, count = struct.unpack(">4sIH", data[4:14])
+        tables = []
+        for i in range(count):
+            tag, offset, packed, size, checksum = struct.unpack(
+                ">4sIIII", data[44 + 20 * i:64 + 20 * i])
+            raw = data[offset:offset + packed]
+            tables.append((tag, checksum, zlib.decompress(raw) if packed < size else raw))
+        power = 1
+        while power * 2 <= count:
+            power *= 2
+        search = power * 16
+        out = [struct.pack(">4sHHHH", flavor, count, search, power.bit_length() - 1,
+                           count * 16 - search)]
+        offset = 12 + 16 * count
+        records, bodies = [], []
+        for tag, checksum, body in sorted(tables):
+            records.append(struct.pack(">4sIII", tag, checksum, offset, len(body)))
+            padded = body + b"\0" * (-len(body) % 4)
+            bodies.append(padded)
+            offset += len(padded)
+        return b"".join(out + records + bodies)
+    except (struct.error, zlib.error, ValueError):
+        return None
+
+
+def _gather_fonts(sheets_with_bases) -> list:
+    """The @font-face rules of the page's stylesheets, their urls made whole."""
+    from .css import font_faces
+
+    faces = []
+    for text, base in sheets_with_bases:
+        if not text or "@font-face" not in text.lower():
+            continue
+        for face in font_faces(text):
+            face["sources"] = [(urllib.parse.urljoin(base, url), kind)
+                               for url, kind in face["sources"]]
+            faces.append(face)
+    return faces
+
+
 def _skew_for(host: str, problem: str):
     """For a date problem, how far off this computer's clock is; else None."""
     from ..clock import clock_skew, is_date_problem
@@ -515,6 +594,7 @@ class MerlinView(QWidget):
     _laid_out = pyqtSignal(int, object)              # layout number, the display list
     _restyled = pyqtSignal(int, object)              # load number, the worker's answer
     _icon_fetched = pyqtSignal(int, bytes)           # load number, the icon's data
+    _font_fetched = pyqtSignal(int, str, bytes)      # load number, CSS family, the font file
     needsScript = pyqtSignal(str)                    # a page built by JavaScript: its address
 
     def __init__(self, parent=None, host=None, profile=None):
@@ -574,6 +654,9 @@ class MerlinView(QWidget):
         self._finish_when_laid_out = None
         self._element_count = 0
         self._icon_fetched.connect(self._on_icon)
+        self._font_fetched.connect(self._on_font)
+        self._font_faces: list = []
+        self._font_aliases: dict = {}
         self._icon = QIcon()
 
     # ------------------------------------------------ what Merlin asks for
@@ -868,8 +951,10 @@ class MerlinView(QWidget):
         sources = document.stylesheet_sources()
         links = [s for s in sources if s[0] == "link"]
         if not links:
-            return self._styled(document, [s[1] for s in sources], viewport, hiding,
-                                markup, page_url)
+            prepared = self._styled(document, [s[1] for s in sources], viewport, hiding,
+                                    markup, page_url)
+            prepared["font_faces"] = _gather_fonts([(s[1], page_url) for s in sources])
+            return prepared
         cache = self._stylesheet_cache()
         page_site = _registrable(host_name)
         sheet_headers = dict(headers)
@@ -918,15 +1003,20 @@ class MerlinView(QWidget):
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
             fetched = dict(zip(addresses, pool.map(get_counted, addresses)))
-        sheets = []
+        sheets, with_bases = [], []
         for source in sources:
             if source[0] == "style":
                 sheets.append(source[1])
+                with_bases.append((source[1], page_url))
                 continue
-            text = fetched.get(urllib.parse.urljoin(page_url, source[1]), "")
+            address = urllib.parse.urljoin(page_url, source[1])
+            text = fetched.get(address, "")
             media = source[2]
             sheets.append(f"@media {media} {{{text}}}" if media and media != "all" else text)
-        return self._styled(document, sheets, viewport, hiding, markup, page_url)
+            with_bases.append((text, address))        # a font's url is the sheet's, not the page's
+        prepared = self._styled(document, sheets, viewport, hiding, markup, page_url)
+        prepared["font_faces"] = _gather_fonts(with_bases)
+        return prepared
 
     @staticmethod
     def _styled(document, sheets, viewport, hiding, markup: str = "", url: str = "") -> dict:
@@ -1018,6 +1108,8 @@ class MerlinView(QWidget):
         self._find = ("", -1)
         self._found_rect = None
         self._markup = prepared.get("markup", markup) if prepared else markup
+        self._font_faces = prepared.get("font_faces", []) if prepared else []
+        self._font_aliases = {}
         self._patches = {}
         if prepared is not None and prepared.get("styles") is not None:
             # styled off the UI thread, in a worker; a window resized meanwhile
@@ -1043,6 +1135,7 @@ class MerlinView(QWidget):
         self._layout()
         self._load_images()
         self._load_icon()
+        self._load_fonts()
         if self._url.scheme() in ("http", "https") and needs_javascript(self._document):
             self.needsScript.emit(self._url.toString())
 
@@ -1106,6 +1199,70 @@ class MerlinView(QWidget):
         for src in wanted[:200]:                  # enough for any ordinary page
             address = self._url.resolved(QUrl(src)).toString()
             threading.Thread(target=work, args=(src, address), daemon=True).start()
+
+    def _load_fonts(self) -> None:
+        """Fetch the page's web fonts, once it shows, and lay it out with them.
+
+        The first source of each @font-face in a format Qt reads is fetched;
+        the content blocker is asked about each, as a font. Settings > Merlin
+        Engine > "Use sites' own fonts" can turn them off: fonts can be used
+        to follow people from site to site.
+        """
+        if not self._font_faces:
+            return
+        settings = getattr(self._host, "settings", None)
+        if settings is not None and not settings.get("web_fonts", True):
+            return
+        readable = ("woff2", "woff", "truetype", "opentype", "ttf", "otf", "")
+        chosen, seen = [], set()
+        for face in self._font_faces:
+            for url, kind in face["sources"]:
+                ending = url.lower().split("?")[0].split("#")[0]
+                if kind in readable or ending.endswith((".woff2", ".woff", ".ttf", ".otf")):
+                    if url not in seen and not self._blocked(url, "font"):
+                        seen.add(url)
+                        chosen.append((face["family"], url))
+                    break
+        if not chosen:
+            return
+        number = self._load_number
+        headers = dict(self._headers())
+        headers["Accept"] = "font/woff2,font/woff,application/font-woff,*/*;q=0.5"
+        _subresource(headers, "font")
+        lenient = self._leniency(self._url.host())
+        plain_opener = cookie_opener(None, lenient)
+
+        def get(item):
+            family, url = item
+            ok, _final, data, _kind = fetch_bytes(url, headers, timeout=15,
+                                                  limit=6 * 1024 * 1024, opener=plain_opener)
+            if ok and data:
+                try:
+                    self._font_fetched.emit(number, family, data)
+                except RuntimeError:
+                    pass                               # the tab was closed
+
+        def work():
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                list(pool.map(get, chosen[:40]))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_font(self, number: int, family: str, data: bytes) -> None:
+        if number != self._load_number:
+            return
+        names = register_font(data)
+        if not names:
+            return
+        known = self._font_aliases.setdefault(family.lower(), [])
+        for name in names:
+            if name not in known:
+                known.append(name)
+        # laid out again with the font, at most once a quarter-second
+        if not self._image_relayout.isActive():
+            self._image_relayout.start()
 
     def _icon_address(self) -> str:
         """The page's own icon, near a tab's size, or else the site's /favicon.ico."""
@@ -1286,7 +1443,7 @@ class MerlinView(QWidget):
         self._display = Layout(self._document, self._styles, self._page_width(), self._zoom,
                                images=self._images,
                                viewport_height=float(max(1, self.height())),
-                               live_controls=True).run()
+                               live_controls=True, font_aliases=self._font_aliases).run()
         self._shown_laid_out()
 
     def _layout_in_background(self) -> None:
@@ -1305,12 +1462,14 @@ class MerlinView(QWidget):
         document, styles = self._document, self._styles
         width, zoom = self._page_width(), self._zoom
         images = dict(self._images)
+        aliases = {k: list(v) for k, v in self._font_aliases.items()}
         height = float(max(1, self.height()))
 
         def work():
             try:
                 out = Layout(document, styles, width, zoom, images=images,
-                             viewport_height=height, live_controls=True).run()
+                             viewport_height=height, live_controls=True,
+                             font_aliases=aliases).run()
             except Exception:                              # noqa: BLE001
                 out = None
             try:

@@ -154,6 +154,7 @@ DEFAULTS = {
     "offer_save_passwords": True,      # after a login in a Merlin Engine tab
     "chromium_sites": [],              # sites needing JavaScript: always in Chromium
     "ui_scale": 1.0,                   # interface size, 1.0 = 100%: applied at start
+    "web_fonts": True,                 # Merlin Engine uses sites' own fonts
     "swipe_distance": 520,             # px of travel to complete a swipe
     # --- updates ---
     "check_updates_on_start": True,

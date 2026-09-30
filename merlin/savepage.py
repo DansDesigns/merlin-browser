@@ -205,6 +205,9 @@ def choose_format(path: str, chosen: str, filters: list, engine: bool) -> tuple:
 
 
 def _done(window, path: str) -> None:
+    recorder = getattr(window, "record_download", None)
+    if recorder is not None and os.path.exists(path):
+        recorder(path)
     window.status_label.setText(f"Saved {os.path.basename(path)} to {os.path.dirname(path)}")
 
 
@@ -245,8 +248,10 @@ def _save_chromium(window, view, kind: str, path: str) -> None:
         page.toPlainText(write)
     elif kind == "pdf":
         def printed(where, ok):
-            window.status_label.setText(f"Saved {os.path.basename(where)} to {os.path.dirname(where)}"
-                                        if ok else "Could not save the page as PDF")
+            if ok:
+                _done(window, where)
+            else:
+                window.status_label.setText("Could not save the page as PDF")
             try:
                 page.pdfPrintingFinished.disconnect(printed)
             except Exception:                                  # noqa: BLE001

@@ -5,6 +5,54 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.7.3.10
+  Merlin Engine styles big sites about five times faster: GitHub's front page
+  in 1.8 seconds instead of 8.5, its styles exactly as before. An element tries
+  only the rules that could apply to it, found by its tag, id and classes;
+  1,880 of GitHub's rules had been tried on every element, 3.6 million tries
+  in all. Now a rule keyed by an attribute ([data-color-mode=dark]), by :root,
+  or by :where() or :is() of classes is filed under those, and one that can
+  never match here (::before, :hover) is left out. A stylesheet loaded more
+  than once is matched once, while each copy keeps its own place in the
+  cascade. An element's classes are split out of its class attribute once,
+  not each time a rule asks.
+  Web fonts: Merlin Engine uses the fonts a site asks for with @font-face,
+  such as GitHub's Mona Sans, where it had used the system's. They are fetched
+  once the page shows, from the address their stylesheet gives, and the page
+  is laid out again with them; the content blocker is asked about each. Qt
+  reads TrueType, OpenType, and on most systems WOFF and WOFF2; a WOFF it will
+  not take is unpacked by Merlin. Each font file is loaded once a session, and
+  one site's fonts are never used for another's. Settings > Merlin Engine >
+  "Use sites' own fonts" can switch them off, as fonts can be used to follow
+  people from site to site.
+
+1.7.3.9
+  GitHub in Merlin Engine: the header is whole again, with its menus, Search,
+  Sign in and Sign up; the green Sign up for GitHub button is green; and the
+  hero no longer has its carousel controls laid over its text. Worked out from
+  GitHub's own page and stylesheets, saved with Save page as, four faults, each
+  of which reaches well beyond GitHub:
+  - "background: 0 0", as minifiers write "background: none", left a button's
+    browser grey in place. The background shorthand now resets the colour and
+    image it does not name, as CSS says.
+  - A flex item whose content is spread with space-between, as a menu button
+    with its arrow at the far end, was measured by laying it out on an
+    unbounded line: the arrow went to the end of it, and the button came out
+    100,000 pixels wide, taking everything after it off the screen. A flex
+    container's natural width is now worked out from its items, and a block
+    holding only blocks from its widest, as CSS defines them.
+  - A flex line that had to shrink, with an item that could not, lost that
+    item's share of the shrinking, and overflowed by it. Items at their limit
+    are now held there and the rest shared among the others again, as CSS
+    resolves flexible lengths.
+  - Custom property names were lowered to small letters, so var() never found
+    one with capitals in it: --brand-button-primary-bgColor-rest and all of
+    GitHub's camelCase colours and sizes came to nothing. Custom property
+    names now keep their case, as CSS says; other property names do not.
+  The Downloads menu lists every file Merlin saves: Merlin Engine's downloads,
+  from the web, FTP and SMB, and everything from Save page as, which only said
+  so in the status bar and were never listed.
+
 1.7.3.8
   Fixed: the new tab page could open squeezed into a narrow column, its search
   box a sliver and its tiles one above another, until Home was clicked. Its

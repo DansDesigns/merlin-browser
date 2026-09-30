@@ -1294,6 +1294,9 @@ def test_ftp_opens_in_merlin_engine(app) -> None:
         wait(app, 3.0)
         saved = os.path.join(QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.DownloadLocation), "notes.bin")
+        check("a file downloaded by Merlin Engine is in the Downloads menu",
+              any(d["path"].endswith(".bin") for d in window.downloads),
+              str([d["path"] for d in window.downloads][-3:]))
         check("a file there downloads, and the status bar says so",
               os.path.exists(saved) and window.status_label.text().startswith("Downloaded notes.bin"),
               window.status_label.text())
@@ -1430,6 +1433,8 @@ def test_source_and_save_page_as(app) -> None:
     address = f"http://127.0.0.1:{server.server_address[1]}/page.html"
     out = tempfile.mkdtemp(prefix="merlin-saved-")
     window, settings, _ = make_window(app, "t-save-as")
+    # as app.py does: Chromium's own saves (MHTML) come through the window
+    window.profile.downloadRequested.connect(window.handle_download)
     real_dialog = QFileDialog.getSaveFileName
     asked = []
 
@@ -1479,6 +1484,11 @@ def test_source_and_save_page_as(app) -> None:
             check(f"{name}: saves as text, in reading order",
                   0 <= text.find("Saving pages") < text.find("First paragraph") < text.find("Last."))
             check(f"{name}: saves as a picture", not QImage(results["png"][0]).isNull())
+            listed = {os.path.abspath(d["path"]) for d in window.downloads}
+            saved = [os.path.abspath(p) for p, _n in results.values() if os.path.exists(p)]
+            check(f"{name}: every page saved is in the Downloads menu",
+                  saved and all(p in listed for p in saved),
+                  f"{len([p for p in saved if p in listed])} of {len(saved)} listed")
             check(f"{name}: saves as a zip for debugging, with its stylesheets",
                   {"page.html", "sheets/000.css"} <= set(zipfile.ZipFile(results["zip"][0]).namelist()),
                   str(zipfile.ZipFile(results["zip"][0]).namelist()))

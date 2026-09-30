@@ -1231,6 +1231,11 @@ class SettingsDialog(QDialog):
             "it, and tabs already open keep the engine they have. Switch it "
             "off to go back to Chromium for new tabs."))
         layout.addWidget(self._check(
+            "Use sites' own fonts", "web_fonts",
+            "Load the fonts a site asks for, as other browsers do, rather than using "
+            "your system's. Fonts can be used to follow people from site to site; "
+            "switch this off to keep to your own."))
+        layout.addWidget(self._check(
             "Offer to save passwords when you log in", "offer_save_passwords",
             "After you log in on a Merlin Engine page, offer to keep the password "
             "with your other saved logins, or to update it when it has changed. "

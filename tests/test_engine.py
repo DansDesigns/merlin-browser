@@ -1629,6 +1629,163 @@ def test_gradients_dithered() -> None:
           abs(sum(img.pixelColor(x, 200).red() for x in range(1800)) / 1800 - 21.0) < 0.3)
 
 
+def test_github_header_bugs() -> None:
+    """Four bugs GitHub's header met, each on its own.
+
+    Its menu buttons drew in a browser's own grey, one of them 100,000 pixels
+    wide, pushing Sign in and Sign up off the screen, and its colours from
+    camelCase variables came to nothing.
+    """
+    from merlin.engine.css import Styler, expand_shorthand
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+
+    check("background: 0 0 (a minifier's background: none) clears a button's own grey",
+          ("background-color", "transparent") in expand_shorthand("background", "0 0"))
+    check("and background with only an image clears the colour too",
+          ("background-color", "transparent") in expand_shorthand("background", "url(a.png) no-repeat"))
+    doc = parse("<style>:root{--brand-bgColor:#0fbf3e} p{background-color:var(--brand-bgColor)}</style><p>x")
+    p = next(e for e in doc.root.elements() if e.tag == "p")
+    check("a camelCase custom property keeps its case and is found",
+          Styler(doc).compute()[p]["background-color"] == (15, 191, 62, 255))
+    # a flex button with space-between, in a block, in a flex row
+    markup = ("<body style='margin:0'><ul style='display:flex;margin:0;padding:0;list-style:none'>"
+              "<li><div><button style='display:flex;justify-content:space-between;background:0 0;border:0'>"
+              "Platform <span>v</span></button></div></li><li><a href='/pricing'>Pricing</a></li></ul>")
+    doc = parse(markup)
+    styles = Styler(doc).compute()
+    out = Layout(doc, styles, 1000).run()
+    pricing = next(r for r, h in out.links if h == "/pricing")
+    check("a space-between button in a block is as wide as its content, not the whole line",
+          pricing.x() < 300, f"Pricing at x={pricing.x():.0f}")
+    # a row whose first item cannot shrink: the other takes all the shrinking
+    markup = ("<body style='margin:0'><div style='display:flex;width:1000px'>"
+              "<nav style='white-space:nowrap'>Platform Solutions Resources Open Source "
+              "Enterprise Pricing</nav>"
+              "<div style='width:100%;display:flex;justify-content:flex-end'><a href='/login'>Sign in</a></div></div>")
+    doc = parse(markup)
+    out = Layout(doc, Styler(doc).compute(), 1000).run()
+    login = next(r for r, h in out.links if h == "/login")
+    check("an item that cannot shrink gives its share to the rest: nothing pushed off",
+          login.right() <= 1000.5, f"Sign in ends at x={login.right():.0f}")
+
+
+def test_finer_rule_index() -> None:
+    """Rules filed under attributes, :root, :where() and :is(): the same styles
+    as trying every rule on every element, found far faster."""
+    from merlin.engine import css as engine_css
+    from merlin.engine.css import Styler
+    from merlin.engine.html import parse
+
+    sheet = ("[data-mode=dark] { color: rgb(1, 2, 3) } :root { --x: 4px } "
+             ":where(.a, .b) { margin-left: 7px } :is(.c) { padding-left: 3px } "
+             ":not(.z) { border-top-width: 1px } * { outline-width: 2px } "
+             "p::before { color: red } a:hover { color: red } li:first-child { font-size: 30px }")
+    markup = ("<html data-mode=dark><body><p class=a>a</p><p class=b data-mode=dark>b</p>"
+              "<div class='c z'>c</div><ul><li>1</li><li>2</li></ul><a href=#>x</a>")
+    doc = parse("<style>" + sheet + "</style>" + markup)
+    fast = Styler(doc).compute()
+    elements = [doc.root] + list(doc.root.elements())
+    # the reference: every rule tried on every element
+    real = engine_css.index_keys
+    engine_css.index_keys = lambda selector: [("any", "")]
+    try:
+        slow = Styler(doc).compute()
+    finally:
+        engine_css.index_keys = real
+    check("filed finely, rules give the same styles as trying every one everywhere",
+          all(fast.get(e) == slow.get(e) for e in elements))
+    # a sheet loaded twice around another: the later copy takes the later place
+    doc = parse("<style>p { color: rgb(0, 0, 255) }</style><style>p { color: rgb(255, 0, 0) }</style>"
+                "<style>p { color: rgb(0, 0, 255) }</style><p>x")
+    p = next(e for e in doc.root.elements() if e.tag == "p")
+    check("a stylesheet given twice: its second copy still wins over what came between",
+          Styler(doc).compute()[p]["color"] == (0, 0, 255, 255))
+
+
+def test_web_fonts(app) -> None:
+    """@font-face: read, fetched from its sheet's own address, and used; off when
+    switched off; and WOFF unpacked by Merlin when Qt will not take it."""
+    import zlib
+
+    from PyQt6.QtGui import QFontMetricsF
+
+    from merlin.engine import MerlinView
+    from merlin.engine.css import font_faces
+    from merlin.engine.view import woff_to_sfnt
+
+    faces = font_faces("@font-face{font-family:'Mona Sans';src:local(Mona),"
+                       "url(m.woff2) format('woff2 supports variations'),url(m.woff);font-weight:200 900}")
+    check("@font-face is read: family, sources in order, weight",
+          faces == [{"family": "Mona Sans", "sources": [("m.woff2", "woff2 supports variations"),
+                                                        ("m.woff", "")],
+                     "weight": "200 900", "style": "normal"}], str(faces))
+    ttf_path = next((p for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+                                 "C:/Windows/Fonts/consola.ttf") if os.path.exists(p)), None)
+    if ttf_path is None:
+        print("  skip  web fonts: no monospace TrueType font found to serve")
+        return
+    ttf = open(ttf_path, "rb").read()
+    # a WOFF made by hand: each table zlib-packed, as the format lays them out
+    import struct
+    count = struct.unpack(">H", ttf[4:6])[0]
+    tables = [struct.unpack(">4sIII", ttf[12 + 16 * i:28 + 16 * i]) for i in range(count)]
+    body, entries, offset = b"", [], 44 + 20 * count
+    for tag, checksum, where, length in tables:
+        raw = ttf[where:where + length]
+        packed = zlib.compress(raw)
+        packed = packed if len(packed) < len(raw) else raw
+        entries.append(struct.pack(">4sIIII", tag, offset + len(body), len(packed), length, checksum))
+        body += packed + b"\0" * (-len(packed) % 4)
+    woff = struct.pack(">4s4sIHHIHHIIIII", b"wOFF", ttf[:4], 44 + 20 * count + len(body), count, 0,
+                       len(ttf), 1, 0, 0, 0, 0, 0, 0) + b"".join(entries) + body
+    unpacked = woff_to_sfnt(woff)
+    check("a WOFF font is unpacked into the font it packs",
+          unpacked is not None and unpacked[:4] == ttf[:4] and len(unpacked) >= len(ttf) - 64)
+    folder = tempfile.mkdtemp(prefix="merlin-fonts-")
+    os.makedirs(os.path.join(folder, "css", "fonts"))
+    open(os.path.join(folder, "css", "fonts", "face.woff"), "wb").write(woff)
+    open(os.path.join(folder, "css", "site.css"), "w").write(
+        "@font-face{font-family:'Merlin Test Face';src:url(fonts/face.woff) format('woff')}"
+        "p.web{font-family:'Merlin Test Face',serif;font-size:20px}")
+    open(os.path.join(folder, "index.html"), "w").write(
+        "<title>Fonts</title><link rel=stylesheet href=/css/site.css><p class=web>iiiiiiiiii</p>")
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    class Host:
+        def __init__(self, on):
+            self.settings = {"web_fonts": on}
+
+    widths = {}
+    try:
+        for on in (True, False):
+            view = MerlinView()
+            view._host = Host(on)
+            view.resize(800, 300)
+            view.show()
+            view.setUrl(QUrl(f"http://127.0.0.1:{server.server_address[1]}/index.html"))
+            wait(app, 3.0)
+            runs = [i for i in view._display.items if i and i[0] == "text" and i[3].startswith("iii")]
+            widths[on] = sum(QFontMetricsF(i[4]).horizontalAdvance(i[3]) for i in runs)
+            if on:
+                check("a site's own font, from its stylesheet's folder, is used",
+                      "merlin test face" in view._font_aliases, str(view._font_aliases))
+            view.close()
+        check("text in the site's monospace font is wider than without it",
+              widths[True] > widths[False] * 1.4, f"{widths[True]:.0f} against {widths[False]:.0f}")
+    finally:
+        server.shutdown()
+
+
 def test_view(app) -> None:
     from merlin.engine import MerlinView
 
@@ -1701,7 +1858,8 @@ def main() -> int:
                  test_floats_and_positioning, test_grid_svg_inline_block,
                  test_real_world_css, test_files_ftp_smb, test_no_freeze_on_real_grids,
                  test_deep_nesting_stays_quick, test_gradients, test_worker_processes,
-                 test_all_and_script_pages, test_certificate_leniency, test_gradients_dithered):
+                 test_all_and_script_pages, test_certificate_leniency, test_gradients_dithered,
+                 test_github_header_bugs, test_finer_rule_index):
         print(test.__name__)
         test()
     print("test_images")
@@ -1720,6 +1878,8 @@ def main() -> int:
     test_big_page_laid_out_in_background(app)
     print("test_viewport_units_follow_the_window")
     test_viewport_units_follow_the_window(app)
+    print("test_web_fonts")
+    test_web_fonts(app)
     print("test_forms")
     test_forms(app)
     print("test_view")
