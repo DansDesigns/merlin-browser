@@ -160,7 +160,11 @@ def _paint_range(painter, display, start, end, shown, images, ends, scroll, acti
             if kind == "layer_push":
                 close = ends.get(index, end)
                 context = item[2] if len(item) > 2 else True
-                layers.append((item[1], index, close, _escaping(in_force), context))
+                # equal z-indexes go by the elements' order in the page, not by
+                # the order laid out: an absolute box is laid out after what
+                # follows it, and had been painted over it
+                order = item[3] if len(item) > 3 else index
+                layers.append((item[1], index, close, _escaping(in_force), context, order))
                 if context:
                     index = close + 1
                     continue
@@ -169,8 +173,8 @@ def _paint_range(painter, display, start, end, shown, images, ends, scroll, acti
             elif kind in _POPS and in_force:
                 in_force.pop()
         index += 1
-    below = sorted((l for l in layers if l[0] < 0), key=lambda l: (l[0], l[1]))
-    above = sorted((l for l in layers if l[0] >= 0), key=lambda l: (l[0], l[1]))
+    below = sorted((l for l in layers if l[0] < 0), key=lambda l: (l[0], l[5]))
+    above = sorted((l for l in layers if l[0] >= 0), key=lambda l: (l[0], l[5]))
     for layer in below:
         _paint_layer(painter, display, layer, shown, images, ends, scroll)
     # the content at this level, in document order
@@ -210,7 +214,7 @@ def _paint_range(painter, display, start, end, shown, images, ends, scroll, acti
 
 
 def _paint_layer(painter, display, layer, shown, images, ends, scroll) -> None:
-    _z, start, close, in_force, context = layer
+    _z, start, close, in_force, context, _order = layer
     painter.save()
     here = list(shown)
     for item in in_force:
@@ -456,7 +460,11 @@ def fill_gradient(painter, rect: QRectF, spec, radius: float = 0.0) -> None:
     except Exception:                                      # noqa: BLE001
         pass
     area = rect.width() * rect.height() * ratio * ratio
-    if DITHER_FROM <= area <= 12_000_000:
+    # only a gradient opaque throughout is dithered: the dithering is drawn
+    # with opaque blends, and a see-through gradient (GitHub's overlay, white
+    # at 0 to 10%) came out as a solid sheet over everything under it
+    opaque = all(colour[3] >= 255 for colour, _place in spec[-1])
+    if opaque and DITHER_FROM <= area <= 12_000_000:
         picture = _dithered(rect, spec, ratio)
         painter.save()
         if radius > 0.5:

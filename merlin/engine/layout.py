@@ -173,6 +173,8 @@ class Layout:
         # within the pass and give a wrong answer.
         self._measured: dict = {}
         self._sticky_waiting: dict = {}   # parent element -> its sticky children
+        # each element's place in the page, for painting equal z-indexes in order
+        self._tree_order = {id(e): n for n, e in enumerate(document.root.elements(), 1)}
         # A time budget for the pass: past it, measuring gives way to quick
         # estimates, so no page can hold the window up for long
         import time as _time
@@ -356,7 +358,8 @@ class Layout:
             # GitHub's header, z-index 99, was held inside such an ancestor at 0,
             # and the page scrolled over it.
             context = given or style.get("position") in ("fixed", "sticky")
-            self.out.items.append(("layer_push", z_index, context))
+            self.out.items.append(("layer_push", z_index, context,
+                                   self._tree_order.get(id(element), 0)))
         sticky = None
         if style.get("position") == "sticky" and not self._measuring:
             top_offset = self._length(style.get("top"), 0.0, vertical=True)

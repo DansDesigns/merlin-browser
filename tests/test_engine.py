@@ -1851,6 +1851,47 @@ def test_fixed_in_stacking_order(app) -> None:
         view.close()
 
 
+def test_overlays_and_document_order(app) -> None:
+    """A see-through gradient stays see-through, and equal z-indexes paint in the
+    page's order. Together these hid GitHub's opening section: its overlay,
+    white at 0 to 10%, came out solid, and was painted over it."""
+    from merlin.engine import MerlinView
+
+    page = """<body style='margin:0;background:#ffffff'>
+    <div style='position:relative;height:500px'>
+      <div style='position:absolute;inset:0;background:linear-gradient(#fff0, #ffffff1a)'></div>
+      <div style='position:relative;height:500px'>
+        <div style='height:500px;background:#ff0000'></div></div>
+    </div></body>"""
+    view = MerlinView()
+    view.resize(700, 500)
+    view.show()
+    try:
+        view.setHtml(page, QUrl("about:blank"))
+        wait(app, 0.3)
+        shot = view.grab().toImage()
+        colour = shot.pixelColor(350, 100)
+        check("an absolute box earlier in the page is painted under a later one",
+              colour.name() == "#ff0000", colour.name())
+    finally:
+        view.close()
+    # the overlay alone, over red, at a size that would be dithered
+    page = """<body style='margin:0;background:#ff0000'>
+    <div style='position:absolute;top:0;left:0;width:700px;height:500px;
+     background:linear-gradient(#fff0, #ffffff1a)'></div></body>"""
+    view = MerlinView()
+    view.resize(700, 500)
+    view.show()
+    try:
+        view.setHtml(page, QUrl("about:blank"))
+        wait(app, 0.3)
+        top = view.grab().toImage().pixelColor(350, 5)
+        check("a large see-through gradient lets what is under it show (not dithered opaque)",
+              top.red() > 240 and top.green() < 30, top.name())
+    finally:
+        view.close()
+
+
 def test_view(app) -> None:
     from merlin.engine import MerlinView
 
@@ -1947,6 +1988,8 @@ def main() -> int:
     test_web_fonts(app)
     print("test_fixed_in_stacking_order")
     test_fixed_in_stacking_order(app)
+    print("test_overlays_and_document_order")
+    test_overlays_and_document_order(app)
     print("test_forms")
     test_forms(app)
     print("test_view")

@@ -77,7 +77,23 @@ def parse_colour(value: str, current=(0, 0, 0, 255)):
     return None
 
 
-_LENGTH = re.compile(r"^(-?[\d.]+)(px|em|rem|pt|%|vw|vh|ex|ch)?$")
+_LENGTH = re.compile(r"^(-?[\d.]+)(px|em|rem|pt|pc|cm|mm|in|q|%|ex|ch|lh|rlh"
+                     r"|[sld]?v(?:w|h|min|max|i|b))?$")
+
+
+def viewport_unit(unit: str, viewport):
+    """The size of one unit of vw, vh, vmin or vmax, in any of their forms.
+
+    svh, lvh and dvh (the small, large and dynamic viewport) are the window's
+    height on a desktop, as vh is; vi and vb are the width and height across
+    and along the text. GitHub gives heights in dvh 204 times: not understood,
+    each had come to nothing, and the page after its opening section moved up
+    over it. None if unit is not one of them.
+    """
+    base = unit[1:] if unit[:1] in ("s", "l", "d") and unit[1:2] == "v" else unit
+    width, height = viewport[0], viewport[1]
+    return {"vw": width, "vi": width, "vh": height, "vb": height,
+            "vmin": min(width, height), "vmax": max(width, height)}.get(base)
 
 
 def parse_length(value: str, font_size: float, root_size: float, viewport=(1024, 768)):
@@ -121,11 +137,18 @@ def parse_length(value: str, font_size: float, root_size: float, viewport=(1024,
         return None
     number = float(match.group(1))
     unit = match.group(2) or "px"
+    if unit == "%":
+        return ("%", number)
+    whole = viewport_unit(unit, viewport)
+    if whole is not None:
+        return number * whole / 100
     return {
         "px": number, "em": number * font_size, "rem": number * root_size,
-        "pt": number * 4 / 3, "ex": number * font_size / 2, "ch": number * font_size / 2,
-        "vw": number * viewport[0] / 100, "vh": number * viewport[1] / 100,
-    }.get(unit, ("%", number)) if unit != "%" else ("%", number)
+        "pt": number * 4 / 3, "pc": number * 16, "cm": number * 96 / 2.54,
+        "mm": number * 96 / 25.4, "q": number * 96 / 101.6, "in": number * 96,
+        "ex": number * font_size / 2, "ch": number * font_size / 2,
+        "lh": number * font_size * 1.2, "rlh": number * root_size * 1.2,
+    }.get(unit, ("%", number))
 
 
 FONT_KEYWORDS = {
@@ -652,10 +675,9 @@ def _media_length(text: str, viewport):
     if not found:
         return None
     number, unit = float(found.group(1)), found.group(2) or "px"
-    if unit == "vw":
-        return number * viewport[0] / 100
-    if unit == "vh":
-        return number * viewport[1] / 100
+    whole = viewport_unit(unit, viewport)
+    if whole is not None:
+        return number * whole / 100
     factor = _UNITS.get(unit)
     return number * factor if factor else None
 
@@ -856,7 +878,7 @@ details:not([open]) > :not(summary) { display: none }
 _DEFAULT_RULES = parse_stylesheet(DEFAULT_STYLESHEET)
 
 
-_VIEWPORT_UNIT = re.compile(r"\d(?:vw|vh|vmin|vmax)\b")
+_VIEWPORT_UNIT = re.compile(r"\d(?:[sld]?v(?:w|h|min|max|i|b))\b")
 
 
 class Styler:

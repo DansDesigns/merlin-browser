@@ -5,6 +5,25 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.7.3.12
+  Fixed: GitHub opened on a blank dark screen under its header, in Merlin
+  Engine, and the page after its opening section began too high. Three faults:
+  - Gradients that see through, such as GitHub's overlay, white at 0 to 10%,
+    came out solid when large enough to be dithered (1.7.3.8): the dithering
+    is drawn with opaque blends. Only gradients opaque throughout are dithered
+    now; see-through ones are drawn as before.
+  - Boxes with the same z-index are painted in the order they come in the page,
+    as CSS says. An absolutely positioned box is laid out after what follows it,
+    and had been painted over it: GitHub's overlay, first in its section, over
+    the opening section that comes after.
+  - The viewport units svh, lvh and dvh, svw, lvw and dvw, and their vmin, vmax,
+    vi and vb forms, are understood: on a desktop they are the window's size, as
+    vh and vw are. GitHub gives heights in dvh 204 times, and each had come to
+    nothing. vmin and vmax themselves, and cm, mm, in, pc, q and lh, which were
+    not understood either, are too.
+  GitHub's opening section is meant to fade out as you scroll, by JavaScript,
+  which Merlin Engine does not run yet: it stays, behind what scrolls over it.
+
 1.7.3.11
   Fixed: GitHub's opening section stayed in front of everything as the page
   scrolled, in Merlin Engine. It is position: fixed at z-index 0, and the
