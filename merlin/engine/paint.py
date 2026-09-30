@@ -71,8 +71,8 @@ def _colour(rgba) -> QColor:
     return QColor(rgba[0], rgba[1], rgba[2], rgba[3])
 
 
-_PUSHES = ("clip_push", "opacity_push", "sticky_push")
-_POPS = ("clip_pop", "opacity_pop", "sticky_pop")
+_PUSHES = ("clip_push", "opacity_push", "sticky_push", "fixed_push")
+_POPS = ("clip_pop", "opacity_pop", "sticky_pop", "fixed_pop")
 
 
 def _layer_ends(display: DisplayList) -> dict:
@@ -111,6 +111,10 @@ def _apply(painter, display: DisplayList, item, shown: list, scroll: float) -> N
     elif kind == "opacity_push":
         painter.setOpacity(painter.opacity() * item[1])
         shown.append(shown[-1])
+    elif kind == "fixed_push":
+        # pinned to the window: the page's scroll undone for what is inside
+        painter.translate(0, scroll)
+        shown.append(shown[-1].translated(0, -scroll))
     else:                                   # sticky_push
         moved = display.sticky_offset(item[1], scroll)
         painter.translate(0, moved)
@@ -130,31 +134,43 @@ def paint(painter, display: DisplayList, visible: QRectF, images=None) -> None:
                  _layer_ends(display), visible.top(), [])
 
 
-def _paint_range(painter, display, start, end, shown, images, ends, scroll, active) -> None:
+def _escaping(in_force: list) -> list:
+    """What still applies to a layer: a fixed box escapes the clips and sticky
+    offsets of what it sits in, being placed against the window; only their
+    opacity stays with it. Kept, those clips hid GitHub's header entirely."""
+    last = max((i for i, item in enumerate(in_force) if item[0] == "fixed_push"), default=None)
+    if last is None:
+        return list(in_force)
+    return [item for item in in_force[:last] if item[0] == "opacity_push"] + in_force[last:]
+
+
+def _paint_range(painter, display, start, end, shown, images, ends, scroll, active,
+                 layers_here: bool = True) -> None:
     items = display.items
-    # the layers at this level, with the clips, opacities and sticky offsets
-    # in force where each begins, to be set again when it is painted later
+    # The layers at this level, with the clips, opacities and offsets in force
+    # where each begins, to be set again when it is painted later. A layer that
+    # is no stacking context of its own (z-index: auto) is painted here at 0,
+    # and the layers inside it are this level's too, looked for inside it.
     layers, in_force = [], []
     index = start
-    while index < end:
+    while layers_here and index < end:
         item = items[index]
         if item is not None:
             kind = item[0]
             if kind == "layer_push":
                 close = ends.get(index, end)
-                # only what was set up at this level: whatever encloses this
-                # level is already in force while it paints, and applying it
-                # again doubled opacity and sticky offsets
-                layers.append((item[1], len(layers), index, close, list(in_force)))
-                index = close + 1
-                continue
-            if kind in _PUSHES:
+                context = item[2] if len(item) > 2 else True
+                layers.append((item[1], index, close, _escaping(in_force), context))
+                if context:
+                    index = close + 1
+                    continue
+            elif kind in _PUSHES:
                 in_force.append(item)
             elif kind in _POPS and in_force:
                 in_force.pop()
         index += 1
-    below = sorted(l for l in layers if l[0] < 0)
-    above = sorted(l for l in layers if l[0] >= 0)
+    below = sorted((l for l in layers if l[0] < 0), key=lambda l: (l[0], l[1]))
+    above = sorted((l for l in layers if l[0] >= 0), key=lambda l: (l[0], l[1]))
     for layer in below:
         _paint_layer(painter, display, layer, shown, images, ends, scroll)
     # the content at this level, in document order
@@ -183,7 +199,7 @@ def _paint_range(painter, display, start, end, shown, images, ends, scroll, acti
         elif kind == "group":
             for sub in item[1]:
                 _draw(painter, sub, here[-1], images)
-        elif kind != "layer_pop":
+        elif kind not in ("layer_pop", "fixed_slot"):
             _draw(painter, item, here[-1], images)
         index += 1
     while depth:
@@ -194,13 +210,16 @@ def _paint_range(painter, display, start, end, shown, images, ends, scroll, acti
 
 
 def _paint_layer(painter, display, layer, shown, images, ends, scroll) -> None:
-    _z, _order, start, close, in_force = layer
+    _z, start, close, in_force, context = layer
     painter.save()
     here = list(shown)
     for item in in_force:
         painter.save()
         _apply(painter, display, item, here, scroll)
-    _paint_range(painter, display, start + 1, close, here, images, ends, scroll, in_force)
+    # a stacking context paints its own layers; one that is not leaves them to
+    # the level above, which has gathered them already
+    _paint_range(painter, display, start + 1, close, here, images, ends, scroll, in_force,
+                 layers_here=context)
     for _item in in_force:
         painter.restore()
     painter.restore()

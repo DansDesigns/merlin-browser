@@ -460,7 +460,21 @@ def test_floats_and_positioning() -> None:
               "height:40px;background:red'></div>")
     _flex_check("a fixed box is drawn against the window, not the page", boxes(out, fixed=True).get(R),
           (0, 0, 600, 40))
-    _flex_check("and is not part of the scrolling page", boxes(out).get(R), None)
+    # it is in the page's list, where it comes in the stacking order, but inside
+    # fixed_push and fixed_pop, which pin it to the window as the page scrolls
+    pinned, depth = [], 0
+    for item in out.items:
+        if item and item[0] == "fixed_push":
+            depth += 1
+        elif item and item[0] == "fixed_pop":
+            depth -= 1
+        elif item and item[0] == "group":
+            pinned.extend((depth, sub) for sub in item[1] if sub and sub[0] == "rect")
+        elif item and item[0] == "rect":
+            pinned.append((depth, item))
+    red = [(d, r) for d, r in pinned if r[2][:3] == (255, 0, 0)]
+    check("and in the page it is pinned to the window, not scrolling with it",
+          red and all(d > 0 for d, _r in red), str([(d, r[1]) for d, r in red]))
 
 
 
@@ -1786,6 +1800,57 @@ def test_web_fonts(app) -> None:
         server.shutdown()
 
 
+def test_fixed_in_stacking_order(app) -> None:
+    """position: fixed painted in CSS's stacking order, not over everything.
+
+    GitHub's opening section is fixed at z-index 0 and the page scrolls up over
+    it; its header, fixed at 99 inside a fixed wrapper, inside a box with
+    z-index: auto and overflow hidden, stays over everything.
+    """
+    from PyQt6.QtCore import QPointF
+
+    from merlin.engine import MerlinView
+
+    page = """<body style='margin:0;background:#ffffff'>
+    <div style='position:relative;overflow:hidden;height:10px'>
+      <div style='position:fixed;top:0;left:0;right:0;z-index:99'>
+        <div style='position:fixed;top:0;left:0;width:60px;height:40px;background:#00ff00'></div>
+      </div>
+    </div>
+    <div style='position:fixed;top:0;left:0;width:100%;height:300px;z-index:0;background:#ff0000'>
+      <a href='/hero' style='display:block;height:140px'>hero</a><input name=q></div>
+    <div style='height:300px'></div>
+    <section style='position:relative;z-index:1;height:800px;background:#0000ff'>
+      <a href='/content' style='display:block;height:800px'>content</a></section>
+    <div style='height:1500px'></div></body>"""
+    view = MerlinView()
+    view.resize(600, 400)
+    view.show()
+    try:
+        view.setHtml(page, QUrl("http://example.test/"))
+        wait(app, 0.3)
+
+        def at(x, y):
+            return view.grab().toImage().pixelColor(x, y).name()
+
+        check("a fixed box at z-index 0 shows while nothing covers it", at(300, 100) == "#ff0000", at(300, 100))
+        check("a fixed box nested in a fixed box, inside overflow: hidden, is drawn",
+              at(20, 20) == "#00ff00", at(20, 20))
+        field = next(w for e, w in view._widgets.items() if e.attrs.get("name") == "q")
+        check("its field shows while uncovered", field.isVisible())
+        view.scrollbar.setValue(250)
+        wait(app, 0.2)
+        check("scrolled, later content with z-index 1 comes over the z-index 0 box",
+              at(300, 100) == "#0000ff", at(300, 100))
+        check("while the box with z-index 99, held in an auto ancestor, stays over all",
+              at(20, 20) == "#00ff00", at(20, 20))
+        check("the covered box's field hides", not field.isVisible())
+        check("a click where content covers the z-index 0 box goes to the content",
+              view._link_at(QPointF(300, 100)) == "/content", view._link_at(QPointF(300, 100)))
+    finally:
+        view.close()
+
+
 def test_view(app) -> None:
     from merlin.engine import MerlinView
 
@@ -1880,6 +1945,8 @@ def main() -> int:
     test_viewport_units_follow_the_window(app)
     print("test_web_fonts")
     test_web_fonts(app)
+    print("test_fixed_in_stacking_order")
+    test_fixed_in_stacking_order(app)
     print("test_forms")
     test_forms(app)
     print("test_view")

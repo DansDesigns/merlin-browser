@@ -211,14 +211,63 @@ class Layout:
         for element, style, static_x, static_y in self._absolute[0]:
             self._place_absolute(element, style, page, static_x, static_y)
         if self._fixed:
+            # Each fixed box is laid out against the window on its own, then
+            # put back in the page where it came, pinned to the window by a
+            # fixed_push when painted. GitHub's opening section is fixed with
+            # z-index 0, and the sections after it scroll up over it; painted
+            # last, over everything, it had stayed in front of them.
             saved = self.out
-            self.out = DisplayList()
+            fixed = DisplayList()
+            fixed.link_z = []
+            fixed.control_z = {}
+            pieces = []
             for element, style, static_x, static_y in self._fixed:
+                self.out = DisplayList()
                 self._place_absolute(element, style, page, static_x, static_y)
-            fixed, self.out = self.out, saved
+                pieces.append(self.out.items)
+                fixed.items.extend(self.out.items)
+                fixed.links.extend(self.out.links)
+                try:
+                    z = int(str(style.get("z-index", "auto")).strip())
+                except ValueError:
+                    z = 0
+                fixed.link_z.extend([z] * len(self.out.links))
+                for piece_item in self.out.items:
+                    if piece_item is not None and piece_item[0] == "control":
+                        fixed.control_z[piece_item[2]] = z
+            self.out = saved
             self.out.fixed = fixed
+            # A fixed box inside another (GitHub's header, in a fixed wrapper) has
+            # its place in its outer box's piece: pieces are put back until none
+            # are left, and one inside another is not pinned a second time
+            items = self.out.items
+            for _round in range(len(pieces) + 1):
+                filled = False
+                depth, depths = 0, []
+                for item in items:
+                    if item is not None and item[0] == "fixed_push":
+                        depth += 1
+                    elif item is not None and item[0] == "fixed_pop":
+                        depth -= 1
+                    depths.append(depth)
+                for index in range(len(items) - 1, -1, -1):
+                    item = items[index]
+                    if item is not None and item[0] == "fixed_slot" and item[1] < len(pieces):
+                        piece = pieces[item[1]]
+                        items[index:index + 1] = (list(piece) if depths[index] else
+                                                  [("fixed_push",)] + piece + [("fixed_pop",)])
+                        filled = True
+                if not filled:
+                    break
         self.out.simplified = self.simplified
-        bottom = max((_bottom_edge(item) for item in self.out.items), default=0.0)
+        bottom, pinned = 0.0, 0
+        for item in self.out.items:
+            if item is not None and item[0] == "fixed_push":
+                pinned += 1
+            elif item is not None and item[0] == "fixed_pop":
+                pinned -= 1
+            elif not pinned:
+                bottom = max(bottom, _bottom_edge(item))
         self.out.height = max(height, bottom)
         self.out.width = self.width
         return self.out
@@ -298,9 +347,16 @@ class Layout:
         if layered:
             try:
                 z_index = int(str(style.get("z-index", "auto")).strip())
+                given = True
             except ValueError:
-                z_index = 0                       # auto: with the positioned, at 0
-            self.out.items.append(("layer_push", z_index))
+                z_index, given = 0, False         # auto: with the positioned, at 0
+            # Whether it starts a stacking context of its own: a z-index given,
+            # or fixed or sticky. One with z-index: auto does not, and the
+            # positioned boxes inside it are stacked with its surroundings:
+            # GitHub's header, z-index 99, was held inside such an ancestor at 0,
+            # and the page scrolled over it.
+            context = given or style.get("position") in ("fixed", "sticky")
+            self.out.items.append(("layer_push", z_index, context))
         sticky = None
         if style.get("position") == "sticky" and not self._measuring:
             top_offset = self._length(style.get("top"), 0.0, vertical=True)
@@ -2051,6 +2107,9 @@ class Layout:
                             static_y: float) -> None:
         """Hold a positioned box until its containing block is laid out."""
         if style.get("position") == "fixed":
+            # its place in the page is kept, so it is painted there in the
+            # stacking order, by its z-index, and not simply over everything
+            self.out.items.append(("fixed_slot", len(self._fixed)))
             self._fixed.append((element, style, static_x, static_y))
         else:
             self._absolute[-1].append((element, style, static_x, static_y))

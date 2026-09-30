@@ -5,6 +5,26 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.7.3.11
+  Fixed: GitHub's opening section stayed in front of everything as the page
+  scrolled, in Merlin Engine. It is position: fixed at z-index 0, and the
+  sections after it are meant to scroll up over it; Merlin Engine painted
+  every fixed box last, over the whole page. Fixed boxes now take their place
+  in CSS's stacking order, at their place in the page and by their z-index,
+  pinned to the window as they are painted. A form field in a fixed box hides
+  while content scrolled over the box covers it, and a click there goes to
+  that content.
+  Put right on the way, as CSS has them:
+  - A positioned box with z-index: auto starts no stacking context of its own:
+    the positioned boxes inside it are stacked with its surroundings. GitHub's
+    header, z-index 99, had been held inside such a box, beneath the page.
+  - A fixed box is not clipped by overflow: hidden on the boxes it sits in,
+    being placed against the window.
+  - A fixed box inside another fixed box (GitHub's header, in a fixed wrapper)
+    is drawn: it had been left out entirely.
+  GitHub's header gains a solid background, and its opening section fades out,
+  as you scroll, by JavaScript, which Merlin Engine does not run yet.
+
 1.7.3.10
   Merlin Engine styles big sites about five times faster: GitHub's front page
   in 1.8 seconds instead of 8.5, its styles exactly as before. An element tries

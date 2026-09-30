@@ -1540,7 +1540,18 @@ class MerlinView(QWidget):
             if source is None:
                 continue
             around = []
+            pinned = 0
             for item in source.items:
+                # a fixed box's fields are taken from the fixed list, pinned to
+                # the window; its copy in the page's list is passed over here
+                if item and item[0] == "fixed_push":
+                    pinned += 1
+                    continue
+                if item and item[0] == "fixed_pop":
+                    pinned -= 1
+                    continue
+                if pinned and not fixed:
+                    continue
                 if item and item[0] == "sticky_push":
                     around.append(item[1])
                 elif item and item[0] == "sticky_pop" and around:
@@ -1591,7 +1602,55 @@ class MerlinView(QWidget):
             height = max(rect.height(), 8.0)
             widget.setGeometry(round(rect.left()), round(top), max(8, round(rect.width())),
                                round(height))
-            widget.setVisible(top + height > 0 and top < bottom and rect.left() < right)
+            shown = top + height > 0 and top < bottom and rect.left() < right
+            if shown and fixed:
+                # a field is a widget over the page; one in a fixed box at
+                # z-index 0 or below (GitHub's email box) hides while content
+                # that scrolls over the box covers it, as the box itself is
+                level = getattr(self._display.fixed, "control_z", {}).get(element, 1)
+                if level <= 0 and self._covered(QRectF(rect.left(), top, rect.width(), height),
+                                                level):
+                    shown = False
+            widget.setVisible(shown)
+
+    def _covers(self) -> list:
+        """Where the page draws over the stacking level 0: (page rect, z-index).
+
+        The backgrounds and pictures of positioned boxes in the page itself,
+        not in fixed boxes; worked out once for each layout.
+        """
+        display = self._display
+        if display is None:
+            return []
+        if getattr(display, "_covers", None) is not None:
+            return display._covers
+        found, layers, pinned = [], [], 0
+        for item in display.items:
+            if item is None:
+                continue
+            kind = item[0]
+            if kind == "fixed_push":
+                pinned += 1
+            elif kind == "fixed_pop":
+                pinned -= 1
+            elif kind == "layer_push":
+                layers.append(item[1])
+            elif kind == "layer_pop" and layers:
+                layers.pop()
+            elif layers and not pinned:
+                # a box's background and border come as a group
+                for sub in (item[1] if kind == "group" else [item]):
+                    if sub and sub[0] in ("rect", "rrect", "gradient", "image"):
+                        found.append((sub[1], layers[-1]))
+        display._covers = found
+        return found
+
+    def _covered(self, window_rect: QRectF, level: int) -> bool:
+        centre = window_rect.center()
+        for rect, z in self._covers():
+            if z >= level and rect.translated(0, -self._scroll).contains(centre):
+                return True
+        return False
 
     def _make_control(self, element):
         from PyQt6.QtWidgets import (QCheckBox, QComboBox, QLineEdit, QPlainTextEdit,
@@ -2089,12 +2148,8 @@ class MerlinView(QWidget):
             if self._found_rect is not None:
                 painter.fillRect(self._found_rect.adjusted(-1, -1, 1, 1), QColor(255, 214, 0, 200))
             pictures = {k: v for k, v in self._images.items() if v is not False}
+            # fixed boxes are in the page, in the stacking order, pinned there
             paint(painter, self._display, visible, pictures)
-            if self._display.fixed is not None:
-                # position: fixed stays where it is on the window as the page scrolls
-                painter.resetTransform()
-                paint(painter, self._display.fixed,
-                      QRectF(0, 0, self.width(), self.height()), pictures)
         painter.end()
 
     def wheelEvent(self, event) -> None:                      # noqa: N802
@@ -2117,11 +2172,17 @@ class MerlinView(QWidget):
         if not self._display:
             return ""
         point = position.toPointF() if hasattr(position, "toPointF") else position
+        below = ""
         if self._display.fixed is not None:
-            # fixed boxes sit on top, in window coordinates
-            for rect, href in self._display.fixed.links:
+            # fixed boxes, in window coordinates: one with a z-index above 0 is
+            # on top; one at 0 or below (GitHub's opening section) lies under
+            # what scrolls over it, whose own links come first
+            levels = getattr(self._display.fixed, "link_z", [])
+            for number, (rect, href) in enumerate(self._display.fixed.links):
                 if rect.contains(point):
-                    return href
+                    if (levels[number] if number < len(levels) else 1) > 0:
+                        return href
+                    below = below or href
         point = point.__class__(point.x(), point.y() + self._scroll)
         for info in reversed(self._display.sticky):
             moved = self._display.sticky_offset(info, self._scroll)
@@ -2133,7 +2194,7 @@ class MerlinView(QWidget):
         for rect, href in reversed(self._display.links):
             if rect.contains(point):
                 return href
-        return ""
+        return below
 
     def mouseMoveEvent(self, event) -> None:                  # noqa: N802
         from .layout import LabelTarget
