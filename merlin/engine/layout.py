@@ -80,6 +80,7 @@ class DisplayList:
         self.fixed = None                # position: fixed, drawn against the window
         self.simplified = False          # the time budget ran out: estimates used
         self.canvas_gradients = []       # a gradient on <html> or <body>: the whole page
+        self.boxes = []                  # (rect, element) of each box: what a click lands on
         self.sticky = []                 # position: sticky boxes, each a dict (see Layout)
 
     def sticky_offset(self, info: dict, scroll: float) -> float:
@@ -229,6 +230,7 @@ class Layout:
                 pieces.append(self.out.items)
                 fixed.items.extend(self.out.items)
                 fixed.links.extend(self.out.links)
+                fixed.boxes.extend(self.out.boxes)
                 try:
                     z = int(str(style.get("z-index", "auto")).strip())
                 except ValueError:
@@ -506,6 +508,8 @@ class Layout:
                             box.height() - border[0] - border[2])
             for child, child_style, static_x, static_y in waiting:
                 self._place_absolute(child, child_style, inside, static_x + dx, static_y + dy)
+        if not self._measuring:
+            self.out.boxes.append((box, element))
         if clip_index is not None:
             # overflow: hidden clips what is inside to the padding box, and
             # what can be clicked with it: a hidden link is not clickable

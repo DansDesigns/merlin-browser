@@ -777,6 +777,7 @@ class BrowserWindow(QMainWindow):
         add("Bookmarks", self.show_bookmarks, "Ctrl+Shift+O")
         add("View page source", self.view_source, "Ctrl+U")
         add("Save page as...", self.save_page_as, "Ctrl+S")
+        add("JavaScript on this site", self.toggle_javascript)
         menu.addSeparator()
         add("Settings", self.show_settings, "Ctrl+,")
         add("About Merlin", self.show_about)
@@ -1235,6 +1236,12 @@ class BrowserWindow(QMainWindow):
                 view.stop()
             except Exception:                            # noqa: BLE001
                 pass
+            # a Merlin Engine tab's JavaScript process ends with the tab
+            if hasattr(view, "shutdown"):
+                try:
+                    view.shutdown()
+                except Exception:                        # noqa: BLE001
+                    pass
         if isinstance(view, QWidget):
             view.deleteLater()
         if self.tabs.count() == 0:
@@ -1963,13 +1970,104 @@ class BrowserWindow(QMainWindow):
         QTimer.singleShot(0, lambda u=url.toString(): self.new_tab(u, engine=False))
         return True
 
+    # ------------------------------------------------ JavaScript in Merlin Engine
+    def javascript_allowed(self, site: str) -> bool:
+        return bool(site) and site in (self.settings.get("js_sites", []) or [])
+
+    def deno_for_scripts(self) -> str:
+        from .media import deno_path
+
+        return deno_path()
+
+    def script_cache_dir(self) -> str:
+        from PyQt6.QtCore import QStandardPaths as _Paths
+
+        base = _Paths.writableLocation(_Paths.StandardLocation.CacheLocation) or os.path.expanduser("~")
+        return os.path.join(base, "merlin-js-modules")
+
+    def local_storage(self):
+        """Sites' localStorage: kept between sessions, except in private windows."""
+        from PyQt6.QtCore import QStandardPaths as _Paths
+
+        from .engine.script import LocalStorage
+
+        if getattr(self, "_local_storage", None) is None:
+            folder = None if self.private else os.path.join(
+                _Paths.writableLocation(_Paths.StandardLocation.AppLocalDataLocation)
+                or os.path.expanduser("~"), "merlin-local-storage")
+            self._local_storage = LocalStorage(folder)
+        return self._local_storage
+
+    def set_javascript(self, site: str, allowed: bool, reload_view=None) -> None:
+        """Allow or stop JavaScript for a site in Merlin Engine tabs."""
+        sites = [s for s in (self.settings.get("js_sites", []) or []) if s != site]
+        if allowed and site:
+            sites.append(site)
+        self.settings.set("js_sites", sites)
+        if reload_view is None:
+            return
+        if allowed and not self.deno_for_scripts():
+            # the engine is Deno (V8), which Merlin fetches once, as for yt-dlp
+            self.status_label.setText("Fetching the JavaScript engine (Deno)...")
+            import threading
+
+            from .media import fetch_deno
+
+            done = {}
+
+            def work():
+                done["result"] = fetch_deno()
+
+            def check():
+                if "result" not in done:
+                    QTimer.singleShot(300, check)
+                    return
+                ok, text = done["result"]
+                self.status_label.setText(text)
+                if ok:
+                    reload_view.reload()
+            threading.Thread(target=work, daemon=True).start()
+            QTimer.singleShot(300, check)
+            return
+        reload_view.reload()
+
+    def toggle_javascript(self) -> None:
+        """Main menu: JavaScript on this site, for a Merlin Engine tab."""
+        from .adblock import _registrable
+
+        view = self.current()
+        if not _is_merlin_view(view):
+            self.status_label.setText("JavaScript is Chromium's own in this tab")
+            return
+        site = _registrable(view.url().host().lower())
+        if not site:
+            return
+        now = not self.javascript_allowed(site)
+        self.set_javascript(site, now, view)
+        self.status_label.setText(f"JavaScript {'allowed' if now else 'stopped'} for {site}")
+
+    def forget_javascript_sites(self) -> int:
+        count = len(self.settings.get("js_sites", []) or [])
+        self.settings.set("js_sites", [])
+        return count
+
     def _offer_chromium(self, view, url: str) -> None:
-        """A page Merlin Engine cannot show, as it needs JavaScript: offer Chromium."""
+        """A page that needs JavaScript: offer to allow it for the site in Merlin
+        Engine, which runs it now; Chromium remains in the main menu."""
         from .adblock import _registrable
 
         if self.current() is not view:
             return
         site = _registrable(QUrl(url).host().lower())
+        if _is_merlin_view(view) and site and not self.javascript_allowed(site):
+            self._notice_page = ""
+            self._notice_action = lambda: self.set_javascript(site, True, view)
+            self.notice_bar.show_notice(
+                f"{site} needs JavaScript, which is off in Merlin Engine until you allow it "
+                f"for a site. Allow JavaScript for {site}?", "Allow JavaScript")
+            return
+        if self.javascript_allowed(site):
+            return
 
         def switch():
             sites = list(self.settings.get("chromium_sites", []) or [])

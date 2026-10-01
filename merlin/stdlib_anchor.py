@@ -64,6 +64,7 @@ if __name__ == "__merlin_never_runs__":
     import dis  # noqa: F401
     import doctest  # noqa: F401
     import email  # noqa: F401
+    import email.message  # noqa: F401
     import email.utils  # noqa: F401
     import encodings  # noqa: F401
     import enum  # noqa: F401

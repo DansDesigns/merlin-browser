@@ -16,7 +16,7 @@ import threading
 import urllib.parse
 import urllib.request
 
-from PyQt6.QtCore import QObject, QRectF, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import QObject, QRectF, QStandardPaths, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QImage, QPainter
 from PyQt6.QtWidgets import QScrollBar, QWidget
 
@@ -176,8 +176,21 @@ def _expand_imports(text: str, base: str, get) -> str:
 
 
 def _registrable(host: str) -> str:
-    """Roughly the site a host belongs to: example.co.uk for www.example.co.uk."""
-    parts = host.lower().strip(".").split(".")
+    """Roughly the site a host belongs to: example.co.uk for www.example.co.uk.
+
+    An IP address, or a name with no dots such as localhost, is a site of its
+    own: 127.0.0.1 had been taken as the site "0.1", so a site allowed
+    JavaScript in the window was not the one the tab looked for.
+    """
+    import ipaddress
+
+    bare = host.lower().strip(".").strip("[]")
+    try:
+        ipaddress.ip_address(bare)
+        return bare
+    except ValueError:
+        pass
+    parts = bare.split(".")
     if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in (
             "co", "com", "org", "net", "ac", "gov", "edu", "ltd", "plc", "me"):
         return ".".join(parts[-3:])
@@ -592,6 +605,7 @@ class MerlinView(QWidget):
     downloadFinished = pyqtSignal(str)               # the saved file
     certTrouble = pyqtSignal(str, str)               # host, certificate problem
     _laid_out = pyqtSignal(int, object)              # layout number, the display list
+    _script_prepared = pyqtSignal(int, str, object)  # load number, page from scripts, prepared
     _restyled = pyqtSignal(int, object)              # load number, the worker's answer
     _icon_fetched = pyqtSignal(int, bytes)           # load number, the icon's data
     _font_fetched = pyqtSignal(int, str, bytes)      # load number, CSS family, the font file
@@ -648,6 +662,21 @@ class MerlinView(QWidget):
         self._image_fetched.connect(self._on_image)
         self._restyled.connect(self._on_restyled)
         self._laid_out.connect(self._on_laid_out)
+        self._script_prepared.connect(self._apply_script_dom)
+        # JavaScript: a Deno process for the page, where the site is allowed
+        self._script = None
+        self._script_waiting: dict = {}
+        self._script_next = 0
+        self._script_busy = False
+        self._script_queued = None
+        self._by_script_id: dict = {}
+        from collections import deque
+
+        self.console_lines = deque(maxlen=400)
+        self._script_scroll = QTimer(self)
+        self._script_scroll.setSingleShot(True)
+        self._script_scroll.setInterval(100)
+        self._script_scroll.timeout.connect(self._send_scroll)
         self._layout_number = 0
         self._layout_running = False
         self._layout_again = False
@@ -734,6 +763,7 @@ class MerlinView(QWidget):
     load = setUrl
 
     def setHtml(self, markup: str, base: QUrl = QUrl()) -> None:  # noqa: N802
+        self._stop_script()
         self._load_number += 1
         self._url = QUrl(base) if base.isValid() else QUrl("about:blank")
         self.loadStarted.emit()
@@ -790,6 +820,8 @@ class MerlinView(QWidget):
     def _navigate(self, url: QUrl, record: bool, body: bytes | None = None,
                   content_type: str = "") -> None:
         scheme = url.scheme().lower()
+        if scheme != "merlin":
+            self._stop_script()
         if scheme == "merlin":
             # Merlin's own addresses, handled by the window as for Chromium's tabs
             if url.host() == "allow-certificate":
@@ -1073,6 +1105,8 @@ class MerlinView(QWidget):
         download = prepared.get("download") if prepared else None
         self._finish_when_laid_out = (ok, download)
         self._show(text, prepared if ok else None)
+        if ok and not download:
+            self._start_script()
         if not self._layout_running:
             self._finish_load()
 
@@ -1418,6 +1452,271 @@ class MerlinView(QWidget):
             self._restyle_again = False
             self._restyle()
 
+    # ------------------------------------------------------ JavaScript
+    def _start_script(self) -> None:
+        """Run the page's scripts, if its site may, in a Deno process of its own."""
+        from .script import LocalStorage, ScriptHost, cookie_string, import_hosts
+
+        if self._url.scheme() not in ("http", "https") or "<script" not in (self._markup or "").lower():
+            return
+        allowed = getattr(self._host, "javascript_allowed", None)
+        site = _registrable(self._url.host())
+        if allowed is None or not allowed(site):
+            return
+        deno = getattr(self._host, "deno_for_scripts", lambda: "")()
+        if not deno:
+            return
+        cache = getattr(self._host, "script_cache_dir", lambda: "")() or os.path.join(
+            QStandardPaths.writableLocation(QStandardPaths.StandardLocation.CacheLocation), "merlin-js")
+        try:
+            host = ScriptHost(deno, import_hosts(self._markup, self._url.toString()), cache, self)
+        except Exception as exc:                            # noqa: BLE001
+            self.console_lines.append(("error", f"JavaScript could not start: {exc}"))
+            return
+        self._script = host
+        host.message.connect(self._on_script_message)
+        host.ended.connect(lambda h=host: self._script_ended(h))
+        storage = getattr(self._host, "local_storage", None)
+        storage = storage() if storage is not None else LocalStorage(None)
+        self._storage = storage
+        headers = self._headers()
+        # the page as Merlin Engine's parser built it: html, head and body there
+        from .dom import to_html
+        from .html import parse as parse_page
+
+        whole = to_html(parse_page(self._markup, self._url.toString()))
+        host.send({"type": "load", "html": whole, "state": {
+            "url": self._url.toString(), "width": self._page_width(), "height": float(self.height()),
+            "userAgent": headers.get("User-Agent", ""), "language": "en-GB",
+            "cookie": cookie_string(self._cookies(), self._url.toString()),
+            "storage": storage.load(self._origin()),
+            "scheme": "dark" if getattr(self._host, "dark", False) else "light"}})
+
+    def _origin(self) -> str:
+        return f"{self._url.scheme()}://{self._url.authority()}"
+
+    def shutdown(self) -> None:
+        """The tab is closing: its page's scripts end with it."""
+        self._stop_script()
+
+    def _stop_script(self) -> None:
+        if self._script is not None:
+            host, self._script = self._script, None
+            host.stop()
+            host.deleteLater()
+        for callback in list(self._script_waiting.values()):
+            try:
+                callback[0](False)
+            except Exception:                              # noqa: BLE001
+                pass
+        self._script_waiting.clear()
+        self._script_queued = None
+
+    def _script_ended(self, host) -> None:
+        if host is self._script:
+            self._script = None
+            self.console_lines.append(("error", "the page's scripts stopped"))
+
+    def _script_event(self, message: dict, then) -> None:
+        """Send an event to the page's scripts; then(prevented) when they answer.
+
+        A page that does not answer in 1.5 seconds is not waited for: the
+        default goes ahead, as if nothing had stopped it.
+        """
+        self._script_next += 1
+        number = self._script_next
+        message["id"] = number
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda: self._script_answered(number, False))
+        self._script_waiting[number] = (then, timer)
+        timer.start(1500)
+        self._script.send(message)
+
+    def _script_answered(self, number: int, prevented: bool) -> None:
+        waiting = self._script_waiting.pop(number, None)
+        if waiting is None:
+            return
+        then, timer = waiting
+        timer.stop()
+        timer.deleteLater()
+        then(prevented)
+
+    def _script_input(self, element, text, checked=None) -> None:
+        element = self._current(element)
+        if self._script is None or not element.attrs.get("data-mjs"):
+            return
+        message = {"type": "input", "target": int(element.attrs["data-mjs"]), "id": 0}
+        if text is not None:
+            message["value"] = text
+        if checked is not None:
+            message["checked"] = bool(checked)
+        self._script.send(message)
+
+    def _send_scroll(self) -> None:
+        if self._script is not None:
+            self._script.send({"type": "scroll", "x": 0, "y": float(self._scroll)})
+
+    def _current(self, element):
+        """The element as it is now: scripts' updates replace the page's elements."""
+        if element is None or not getattr(element, "attrs", None):
+            return element
+        known = element.attrs.get("data-mjs")
+        return self._by_script_id.get(known, element) if known else element
+
+    def _element_at(self, position):
+        """The script id of the element a click at position lands on, or None."""
+        if self._display is None:
+            return None
+        point = position.toPointF() if hasattr(position, "toPointF") else position
+        candidates = []
+        if self._display.fixed is not None:
+            candidates += [(r, e) for r, e in self._display.fixed.boxes if r.contains(point)]
+        if not candidates:
+            page_point = point.__class__(point.x(), point.y() + self._scroll)
+            candidates = [(r, e) for r, e in self._display.boxes if r.contains(page_point)]
+        for rect, element in sorted(candidates, key=lambda c: c[0].width() * c[0].height()):
+            if element.attrs.get("data-mjs"):
+                return int(element.attrs["data-mjs"])
+        return None
+
+    def _on_script_message(self, message: dict) -> None:
+        kind = message.get("type")
+        host = self._script
+        if host is None:
+            return
+        if kind == "dom":
+            self._script_dom(message.get("html", ""), message.get("title", ""))
+        elif kind == "fetch":
+            self._script_fetch(host, message)
+        elif kind == "handled":
+            self._script_answered(message.get("id"), bool(message.get("prevented")))
+        elif kind == "url":
+            self._url = QUrl(message.get("url", ""))
+            self.urlChanged.emit(self.url())
+        elif kind == "navigate":
+            QTimer.singleShot(0, lambda u=message.get("url", ""): self.setUrl(QUrl(u)))
+        elif kind == "reload":
+            QTimer.singleShot(0, self.reload)
+        elif kind == "history":
+            step = message.get("step", 0)
+            QTimer.singleShot(0, self.back if step < 0 else self.forward if step > 0 else self.reload)
+        elif kind == "open":
+            opener = getattr(self._host, "new_tab", None)
+            if opener is not None:
+                QTimer.singleShot(0, lambda u=message.get("url", ""): opener(u, engine=True))
+        elif kind == "cookie":
+            from .script import set_cookie
+
+            set_cookie(self._cookies(), self._url.toString(), message.get("value", ""))
+        elif kind == "storage":
+            storage = getattr(self, "_storage", None)
+            if storage is not None:
+                storage.save(self._origin(), message.get("items", {}))
+        elif kind == "scroll":
+            self.scrollbar.setValue(int(message.get("y", 0) or 0))
+        elif kind == "alert":
+            label = getattr(self._host, "status_label", None)
+            if label is not None:
+                label.setText("This page says: " + str(message.get("text", ""))[:200])
+        elif kind == "console":
+            self.console_lines.append((message.get("level", "log"), message.get("text", "")))
+
+    def _script_fetch(self, host, message: dict) -> None:
+        """A request from the page's script: made here, as the page's."""
+        from .script import page_fetch
+
+        url = message.get("url", "")
+        same = _registrable(QUrl(url).host()) == _registrable(self._url.host())
+        blocked = self._blocked(url, "xmlhttprequest")
+        lenient = self._leniency(self._url.host())
+        opener = cookie_opener(self._cookies() if same else None, lenient)
+        base = {k: v for k, v in self._headers().items()
+                if k in ("User-Agent", "Accept-Language", "DNT", "Sec-GPC")}
+        headers = dict(base, **(message.get("headers") or {}))
+        headers.setdefault("Referer", self._url.toString())
+
+        def work():
+            answer = ({"error": "blocked by the content blocker"} if blocked else
+                      page_fetch(url, message.get("method", "GET"), headers, message.get("body"), opener))
+            answer.update(type="answer", id=message.get("id"))
+            host.send(answer)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _script_dom(self, markup: str, title: str) -> None:
+        """The page as scripts left it: styled off the UI thread, then shown."""
+        if self._script_busy:
+            self._script_queued = (markup, title)          # only the latest counts
+            return
+        self._script_busy = True
+        number = self._load_number
+        page_url = self._url.toString()
+        headers = self._headers()
+        host_name = self._url.host()
+        lenient = self._leniency(host_name)
+        opener = cookie_opener(self._cookies(), lenient)
+        plain = cookie_opener(None, lenient)
+        viewport = (self._page_width(), float(max(1, self.height())))
+        hiding = self._hiding_css_for(host_name)
+
+        def work():
+            try:
+                prepared = self._prepare(markup, page_url, headers, opener, host_name, viewport,
+                                         hiding, plain)
+                prepared["title"] = title
+            except Exception:                              # noqa: BLE001
+                prepared = None
+            try:
+                self._script_prepared.emit(number, markup, prepared)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_script_dom(self, number: int, markup: str, prepared) -> None:
+        """Show the page as scripts changed it, keeping the scroll, the fields and
+        what is typed in them, and the pictures already fetched."""
+        self._script_busy = False
+        if number == self._load_number and prepared is not None and self._script is not None:
+            old = {e.attrs.get("data-mjs"): w for e, w in self._widgets.items() if e.attrs.get("data-mjs")}
+            self._document = prepared["document"]
+            self._sheets = prepared.get("sheets", self._sheets)
+            self._styles = prepared["styles"]
+            self._media = prepared.get("media", {})
+            self._viewport_units = prepared.get("viewport_units", False)
+            self._styled_at = prepared.get("styled_at")
+            self._markup = markup
+            self._by_script_id = {}
+            kept = {}
+            for element in self._document.root.elements():
+                known = element.attrs.get("data-mjs")
+                if not known:
+                    continue
+                self._by_script_id[known] = element
+                # a field's value as the script left it
+                if "data-mjs-value" in element.attrs and element.tag in ("input", "textarea", "select"):
+                    element.attrs["value"] = element.attrs["data-mjs-value"]
+                if "data-mjs-checked" in element.attrs:
+                    element.attrs["checked"] = ""
+                if known in old:
+                    kept[element] = old.pop(known)
+            for widget in old.values():
+                widget.hide()
+                widget.deleteLater()
+            self._widgets = kept
+            self._element_count = sum(1 for _ in self._document.root.elements())
+            title = prepared.get("title") or ""
+            if title and title != self._title:
+                self._title = title
+                self.titleChanged.emit(title)
+            self._layout()
+            self._load_images()
+        if self._script_queued is not None:
+            markup, title = self._script_queued
+            self._script_queued = None
+            self._script_dom(markup, title)
+
     def _page_width(self) -> float:
         return max(100.0, float(self.width() - self.scrollbar.sizeHint().width()))
 
@@ -1512,6 +1811,8 @@ class MerlinView(QWidget):
         self._scroll = float(self.scrollbar.value())
 
     def _scrolled(self, value: int) -> None:
+        if self._script is not None and not self._script_scroll.isActive():
+            self._script_scroll.start()
         self._scroll = float(value)
         self._place_controls()
         self.update()
@@ -1668,6 +1969,7 @@ class MerlinView(QWidget):
                 # radio button in the view as one
                 widget.setAutoExclusive(False)
                 widget.toggled.connect(lambda on, e=element: self._radio_toggled(e, on))
+            widget.toggled.connect(lambda on, e=element: self._script_input(e, None, on))
         elif kind == "select":
             widget = QComboBox(self)
             options = [o for o in element.elements() if o.tag == "option"]
@@ -1707,6 +2009,7 @@ class MerlinView(QWidget):
                 widget.setReadOnly(True)
             # Enter sends the form, as in any browser
             widget.returnPressed.connect(lambda e=element: self._submit(e))
+            widget.textEdited.connect(lambda text, e=element: self._script_input(e, text))
         if forms._disabled(element):
             widget.setEnabled(False)
         widget.setProperty("merlin_control", True)
@@ -1788,12 +2091,20 @@ class MerlinView(QWidget):
                 values[element] = widget.text()
         return values
 
-    def _submit(self, element, submitter=None) -> None:
+    def _submit(self, element, submitter=None, scripts_asked: bool = False) -> None:
         """Send the form element belongs to, as its button or Enter asks."""
         from . import forms
 
+        element = self._current(element)
+        submitter = self._current(submitter) if submitter is not None else None
         form = element if element.tag == "form" else forms.form_of(element)
         if form is None:
+            return
+        if self._script is not None and not scripts_asked and form.attrs.get("data-mjs"):
+            # the page's submit handlers first: most frameworks send forms themselves
+            self._script_event({"type": "submit", "target": int(form.attrs["data-mjs"])},
+                               lambda prevented: None if prevented else
+                               self._submit(element, submitter, scripts_asked=True))
             return
         if submitter is None:
             # Enter in a field: the form's first submit button sends it
@@ -2125,6 +2436,9 @@ class MerlinView(QWidget):
 
     # ------------------------------------------------------------ Qt
     def resizeEvent(self, event) -> None:                     # noqa: N802
+        if self._script is not None:
+            self._script.send({"type": "resize", "width": self._page_width(),
+                               "height": float(self.height())})
         bar = self.scrollbar.sizeHint().width()
         self.scrollbar.setGeometry(self.width() - bar, 0, bar, self.height())
         self._relayout.start()
@@ -2215,15 +2529,26 @@ class MerlinView(QWidget):
             self.linkHovered.emit(shown)
 
     def mouseReleaseEvent(self, event) -> None:               # noqa: N802
-        from .layout import LabelTarget
-
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        button = self._button_at(event.position())
+        position = event.position()
+        target = self._element_at(position) if self._script is not None else None
+        if target is not None:
+            self._script_event({"type": "click", "target": target, "x": position.x(),
+                                "y": position.y()},
+                               lambda prevented: None if prevented else self._default_click(position))
+            return
+        self._default_click(position)
+
+    def _default_click(self, position) -> None:
+        """What a click does when no script stops it: a link, a button, a label."""
+        from .layout import LabelTarget
+
+        button = self._button_at(position)
         if button is not None:
             self._press_button(button)
             return
-        href = self._link_at(event.position())
+        href = self._link_at(position)
         if isinstance(href, LabelTarget):
             self._activate_label(href.element)
             return

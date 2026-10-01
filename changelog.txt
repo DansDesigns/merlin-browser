@@ -5,6 +5,39 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.0
+  JavaScript in Merlin Engine. It is off until you allow it for a site: when a
+  page needs it the notice bar offers "Allow JavaScript", and the main menu's
+  "JavaScript on this site" turns it on and off; Settings > Merlin Engine
+  forgets the sites allowed.
+  Pages' scripts run in V8, Chrome's JavaScript engine, by way of Deno, which
+  Merlin already fetches for yt-dlp and fetches when first wanted if it has
+  not. Each tab's scripts run in a Deno process of their own, given no
+  permissions at all: no files, no network, nothing of the computer. It may
+  import modules only from the page's own hosts. Everything else a page asks
+  for (fetch, XMLHttpRequest, scripts) Merlin does on its behalf, with the
+  page's own cookies and through the content blocker. The process ends when
+  the tab leaves the page or closes.
+  The page's DOM lives in that process (linkedom, open source, shipped with
+  Merlin), with what pages expect of a browser: window, document, location,
+  history, navigator, document.cookie (never HttpOnly cookies), localStorage
+  (kept for each site, not in private windows) and sessionStorage, timers,
+  requestAnimationFrame, matchMedia, MutationObserver, custom elements,
+  IntersectionObserver, ResizeObserver, event handler properties and inline
+  handlers such as onclick, and ES modules. Classic scripts run in order,
+  then modules; scripts a page adds later run as they arrive.
+  What scripts change, Merlin Engine styles and lays out, off the main thread.
+  Clicks, typing, Enter, form submission, scrolling and resizing reach the
+  page's scripts as events first, and Merlin does what a browser would only
+  if they do not cancel it. Fields keep their text and focus as the page
+  re-renders.
+  Tested with a React 18 app, server-rendered and hydrated as GitHub's is:
+  it fetches its data, counts clicks, mirrors typing and handles its own form,
+  as in a browser. Bigger sites will meet what is not there yet: layout sizes
+  for scripts (they are told 0), WebSocket, Workers, canvas and video.
+  Fixed on the way: 127.0.0.1 and other IP addresses had been taken as the
+  site "0.1" by Merlin Engine, for cookies and now JavaScript.
+
 1.7.3.12
   Fixed: GitHub opened on a blank dark screen under its header, in Merlin
   Engine, and the page after its opening section began too high. Three faults:

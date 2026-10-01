@@ -13,6 +13,7 @@ import http.server
 import os
 import sys
 import tempfile
+import shutil
 import threading
 import urllib.error
 import time
@@ -1892,6 +1893,152 @@ def test_overlays_and_document_order(app) -> None:
         view.close()
 
 
+def _deno_for_tests() -> str:
+    from merlin.media import deno_path
+
+    found = os.environ.get("MERLIN_DENO") or deno_path()
+    return found if found and os.path.exists(found) else ""
+
+
+def test_javascript(app) -> None:
+    """JavaScript in Merlin Engine: a hydrated React app, clicked, typed in and
+    sent in Merlin; inline handlers; modules only from allowed hosts; cookies
+    and storage; and nothing at all on a site not allowed."""
+    from http.cookiejar import Cookie
+
+    from PyQt6.QtTest import QTest
+
+    from merlin.engine import MerlinView
+    from merlin.engine.script import LocalStorage
+
+    deno = _deno_for_tests()
+    if not deno:
+        print("  skip  JavaScript: Deno is not here (set MERLIN_DENO, or fetch it in Settings)")
+        return
+    folder = tempfile.mkdtemp(prefix="merlin-js-")
+    fixtures = os.path.join(ROOT, "tests", "fixtures", "react18")
+    for name in os.listdir(fixtures):
+        shutil.copy(os.path.join(fixtures, name), folder)
+    open(os.path.join(folder, "repos.json"), "w").write('[{"name": "merlin-browser"}, {"name": "naru"}]')
+    os.makedirs(os.path.join(folder, "js"))
+    open(os.path.join(folder, "js", "lib.js"), "w").write("export const greet = w => `hello from ${w}`;")
+    open(os.path.join(folder, "js", "main.js"), "w").write(
+        "import { greet } from './lib.js';\n"
+        "document.getElementById('mod').textContent = greet('modules');\n"
+        "document.getElementById('cookie').textContent = 'cookies: ' + document.cookie;\n"
+        "document.getElementById('kept').textContent = 'kept: ' + localStorage.getItem('visits');\n"
+        "localStorage.setItem('visits', String(Number(localStorage.getItem('visits') || 0) + 1));")
+    open(os.path.join(folder, "more.html"), "w").write(
+        "<title>More</title><p id=mod>waiting</p><p id=cookie></p><p id=kept></p>"
+        "<button id=old onclick=\"this.textContent='clicked inline'\" style='padding:10px'>old style</button>"
+        "<script type=module src=/js/main.js></script>")
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    storage = LocalStorage(tempfile.mkdtemp(prefix="merlin-storage-"))
+
+    class Host:
+        settings = {}
+
+        def __init__(self, allowed):
+            self.allowed = allowed
+
+        def javascript_allowed(self, site):
+            return self.allowed
+
+        def deno_for_scripts(self):
+            return deno
+
+        def script_cache_dir(self):
+            return os.path.join(folder, "deno-cache")
+
+        def local_storage(self):
+            return storage
+
+    def text_of(view, eid):
+        if view._document is None:
+            return None
+        found = next((x for x in view._document.root.elements() if x.id == eid), None)
+        return " ".join(found.text().split()) if found is not None else None
+
+    def until(view, test, seconds):
+        end = time.time() + seconds
+        while time.time() < end and not test():
+            app.processEvents()
+            time.sleep(0.02)
+        return test()
+
+    def click(view, eid):
+        box = next(r for r, e in view._display.boxes if e.id == eid)
+        QTest.mouseClick(view, Qt.MouseButton.LeftButton,
+                         pos=QPoint(int(box.center().x()), int(box.center().y() - view._scroll)))
+
+    try:
+        view = MerlinView()
+        view._host = Host(False)
+        view.resize(900, 600)
+        view.show()
+        view.setUrl(QUrl(base + "/index.html"))
+        wait(app, 2.5)
+        check("on a site not allowed, no script runs", view._script is None and not text_of(view, "repos"))
+        view.close()
+
+        view = MerlinView()
+        view._host = Host(True)
+        view.resize(900, 600)
+        view.show()
+        view.setUrl(QUrl(base + "/index.html"))
+        check("allowed, a server-rendered React app hydrates, with data it fetched",
+              until(view, lambda: "merlin-browser" in (text_of(view, "repos") or ""), 15),
+              str(text_of(view, "repos")))
+        click(view, "count")
+        check("a click in Merlin reaches React's handler",
+              until(view, lambda: text_of(view, "count") == "Clicked 1 times", 5), str(text_of(view, "count")))
+        field = next(w for e, w in view._widgets.items() if e.id == "q")
+        field.setFocus()
+        QTest.keyClicks(field, "hello")
+        check("typing in Merlin's field reaches React's state",
+              until(view, lambda: text_of(view, "echo") == "typed: hello", 5), str(text_of(view, "echo")))
+        field = next(w for e, w in view._widgets.items() if e.id == "q")
+        check("and the field keeps its text and focus as React re-renders",
+              field.text() == "hello" and field.hasFocus())
+        QTest.keyClick(field, Qt.Key.Key_Return)
+        check("Enter goes to React's onSubmit, which keeps Merlin on the page",
+              until(view, lambda: text_of(view, "sent") == "sent: hello", 5)
+              and view.url().toString().endswith("index.html"), str(text_of(view, "sent")))
+        check("with no errors in the page's console",
+              not [t for level, t in view.console_lines if level == "error"],
+              str([t for level, t in view.console_lines if level == "error"][:2]))
+        # cookies: the page sees its own, not HttpOnly ones
+        jar = view._cookies()
+        for name, httponly in (("visible", False), ("secret", True)):
+            jar.set_cookie(Cookie(0, name, "1", None, False, "127.0.0.1", False, False, "/", True, False,
+                                  None, False, None, None, {"HttpOnly": None} if httponly else {}))
+        view.setUrl(QUrl(base + "/more.html"))
+        check("an ES module and its import load, from the page's own host",
+              until(view, lambda: text_of(view, "mod") == "hello from modules", 15), str(text_of(view, "mod")))
+        check("document.cookie shows the page's cookies but not HttpOnly ones",
+              "visible=1" in (text_of(view, "cookie") or "") and "secret" not in (text_of(view, "cookie") or ""),
+              str(text_of(view, "cookie")))
+        click(view, "old")
+        check("an inline onclick attribute runs", until(view, lambda: text_of(view, "old") == "clicked inline", 5),
+              str(text_of(view, "old")))
+        view.setUrl(QUrl(base + "/more.html"))
+        check("localStorage is kept from one visit to the next",
+              until(view, lambda: text_of(view, "kept") == "kept: 1", 15), str(text_of(view, "kept")))
+        view.close()
+    finally:
+        server.shutdown()
+
+
 def test_view(app) -> None:
     from merlin.engine import MerlinView
 
@@ -1990,6 +2137,8 @@ def main() -> int:
     test_fixed_in_stacking_order(app)
     print("test_overlays_and_document_order")
     test_overlays_and_document_order(app)
+    print("test_javascript")
+    test_javascript(app)
     print("test_forms")
     test_forms(app)
     print("test_view")

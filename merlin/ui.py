@@ -1256,6 +1256,20 @@ class SettingsDialog(QDialog):
         compare.clicked.connect(
             lambda: getattr(self.window_ref, "reopen_in_other_engine", lambda: None)())
         layout.addWidget(compare)
+        scripts = self.settings.get("js_sites", []) or []
+        stop_js = QPushButton(f"Forget the sites allowed JavaScript ({len(scripts)})", page)
+        stop_js.setToolTip("JavaScript is off in Merlin Engine except on sites you allow, "
+                           "from the notice when a page needs it or the main menu's "
+                           "'JavaScript on this site'. Allowed: " + (", ".join(scripts) or "none yet"))
+        stop_js.setEnabled(bool(scripts))
+
+        def js_forgotten():
+            getattr(self.window_ref, "forget_javascript_sites", lambda: 0)()
+            stop_js.setText("Forget the sites allowed JavaScript (0)")
+            stop_js.setEnabled(False)
+
+        stop_js.clicked.connect(js_forgotten)
+        layout.addWidget(stop_js)
         sites = self.settings.get("chromium_sites", []) or []
         forget = QPushButton(f"Forget the sites sent to Chromium ({len(sites)})", page)
         forget.setToolTip("Sites that need JavaScript, which you chose to open in Chromium: "

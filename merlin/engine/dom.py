@@ -122,3 +122,43 @@ class Document:
                     found.append(("link", element.attrs["href"].strip(),
                                   element.attrs.get("media", "").strip()))
         return found
+
+
+
+_RAW = {"script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes", "plaintext"}
+
+
+def to_html(document) -> str:
+    """The document as HTML, as its tree now is: html, head and body always there.
+
+    A page's scripts are handed this, rather than the page as it came, so they
+    start from the tree Merlin Engine built: a page written without <html> or
+    <body> had become, for the script host's DOM, a document made of its first
+    element alone.
+    """
+    from .html import VOID
+
+    out = ["<!DOCTYPE html>"]
+
+    def escape(text: str, attribute: bool = False) -> str:
+        text = text.replace("&", "&amp;")
+        return text.replace('"', "&quot;") if attribute else text.replace("<", "&lt;").replace(">", "&gt;")
+
+    def walk(node, raw: bool) -> None:
+        if isinstance(node, Text):
+            out.append(node.data if raw else escape(node.data))
+            return
+        if not isinstance(node, Element):
+            return
+        out.append("<" + node.tag)
+        for name, value in node.attrs.items():
+            out.append(f' {name}="{escape(value, True)}"')
+        out.append(">")
+        if node.tag in VOID:
+            return
+        for child in node.children:
+            walk(child, node.tag in _RAW)
+        out.append(f"</{node.tag}>")
+
+    walk(document.root, False)
+    return "".join(out)

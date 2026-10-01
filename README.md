@@ -1,5 +1,5 @@
 # Merlin Browser
-![version](https://img.shields.io/badge/version-1.7.3.12-6f8ff0)
+![version](https://img.shields.io/badge/version-1.8.0-6f8ff0)
 
 ### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6 Requires a reinstall as there has been a fundamental change to the folder structure. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
 
@@ -163,8 +163,9 @@ stylesheets, with @media rules, CSS variables and modern selectors. Forms
 work: fields to type in, boxes, dropdowns, files, and sending by GET or POST,
 with cookies for the session and saved passwords. It also opens ftp:// and
 smb:// addresses, which Chromium cannot, and file:// folders, and saves
-downloads. JavaScript is still to come, so web apps, YouTube among them, will
-not work in it yet.
+downloads. It runs JavaScript in V8 (by way of Deno), each tab's scripts in a
+process of their own with no permissions, for the sites you allow: it is off
+until then.
 
 
 
@@ -328,7 +329,8 @@ changelog.txt    what changed in each release
 - **[EasyList](https://easylist.to/)** — filter lists for the content blocker, CC BY-SA 3.0 / GPLv3
 - **[mpv](https://mpv.io/)**, **[VLC](https://www.videolan.org/)** and **[FFmpeg](https://ffmpeg.org/)** — optional media playback
 - **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** — fetched on first use, finds the stream on a page for the player
-- **[Deno](https://deno.com/)** — fetched on first use, the JavaScript runtime yt-dlp needs for YouTube
+- **[Deno](https://deno.com/)** — fetched on first use, the JavaScript runtime yt-dlp needs for YouTube, and the V8 engine Merlin Engine runs pages' JavaScript in
+- **[linkedom](https://github.com/WebReflection/linkedom)** (ISC) — shipped in `merlin/engine/js`, the DOM that pages' scripts work on in Merlin Engine
 - **[GitHub Actions](https://github.com/features/actions)** — builds the Qt WebEngine with H.264 and AAC that the installers fetch
 
 The filter syntax follows the format established by
