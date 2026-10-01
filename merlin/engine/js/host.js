@@ -21,6 +21,7 @@ function send(message) {
 // console goes to Merlin as messages: anything printed would break the channel
 for (const level of ["log", "info", "warn", "error", "debug"]) {
   console[level] = (...args) => {
+    if (level === "debug") return;
     try {
       send({ type: "console", level, text: args.map(a => typeof a === "string" ? a : safeString(a)).join(" ") });
     } catch (_) { /* nothing to do */ }
@@ -464,11 +465,18 @@ async function classic(script) {
   fire(script, "load");
 }
 
+// A module that never arrives is not waited for: one had held up every script
+// after it, and the page was never sent back changed at all.
+function withinTime(promise, seconds, what) {
+  return Promise.race([promise, new Promise((_, fail) =>
+    setTimeout(() => fail(new Error(`${what} took over ${seconds}s`)), seconds * 1000))]);
+}
+
 async function moduleScript(script) {
   const src = script.getAttribute("src");
   try {
-    if (src) await import(new URL(src, state.url).href);
-    else await import("data:text/javascript;charset=utf-8," + encodeURIComponent(script.textContent));
+    if (src) await withinTime(import(new URL(src, state.url).href), 20, src);
+    else await withinTime(import("data:text/javascript;charset=utf-8," + encodeURIComponent(script.textContent)), 20, "inline module");
     fire(script, "load");
   } catch (e) {
     send({ type: "console", level: "warn", text: `module ${src || "(inline)"}: ${e.message}` });
@@ -495,7 +503,8 @@ async function runScripts() {
     else await classic(script);
   }
   __setReadyState("interactive");
-  for (const script of modules) await moduleScript(script);
+  changed();                     // what the classic scripts made, without waiting for modules
+  for (const script of modules) await moduleScript(script);   // in order, each within its time
   fire(document_, "DOMContentLoaded");
   await new Promise(r => setTimeout(r, 0));
   __setReadyState("complete");

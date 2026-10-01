@@ -52,6 +52,9 @@ def check(name: str, passed: bool, detail: str = "") -> None:
 
 def make_window(app, tag: str, **preset):
     settings = cfg.Settings()
+    # Most tests here are of Chromium tabs, written when they were the default;
+    # since 1.8.1 Merlin Engine is, so they ask for Chromium unless told otherwise
+    preset.setdefault("merlin_engine", False)
     for key, value in preset.items():
         settings.set(key, value, save=False)
     apply_theme(app, True)
@@ -1359,7 +1362,6 @@ def test_script_sites_and_debug_save(app) -> None:
     window, settings, _ = make_window(app, "t-script-sites")
     try:
         settings.set("merlin_engine", True, save=False)
-        settings.set("chromium_sites", [], save=False)
         view = window.new_tab("data:text/html,<title>x</title><p>readable")
         wait(app, 1.5)
         # a page built by scripts, as if it had come from a site
@@ -1369,18 +1371,6 @@ def test_script_sites_and_debug_save(app) -> None:
         view.needsScript.emit("https://app.example.com/")
         wait(app, 0.3)
         message = " ".join(label.text() for label in window.notice_bar.findChildren(QLabel))
-        # since 1.8.0 Merlin Engine runs JavaScript: the offer is to allow it
-        check("a page needing JavaScript is offered JavaScript for its site",
-              window.notice_bar.isVisible() and "Allow JavaScript" in message, message)
-        window.deno_for_scripts = lambda: "/nonexistent/deno"     # no download in a test
-        window.set_javascript("example.com", True)
-        check("allowing it remembers the site", settings.get("js_sites") == ["example.com"],
-              str(settings.get("js_sites")))
-        settings.set("js_sites", [], save=False)
-        # a site sent to Chromium before 1.8.0 still opens there
-        settings.set("chromium_sites", ["example.com"], save=False)
-        again = window.new_tab("https://app.example.com/other")
-        check("a site sent to Chromium before still opens in Chromium", isinstance(again, WebView))
         engine = window.new_tab("data:text/html,<title>Saved</title><style>p{color:red}</style><p>x")
         wait(app, 1.5)
         window.tabs.setCurrentIndex(window.tabs.indexOf(engine))
@@ -1401,7 +1391,6 @@ def test_script_sites_and_debug_save(app) -> None:
         del MerlinView
     finally:
         settings.set("merlin_engine", False, save=False)
-        settings.set("chromium_sites", [], save=False)
         window.close()
 
 
@@ -1721,27 +1710,33 @@ def test_loading_bar_and_save_names(app) -> None:
 
 
 def test_javascript_permission(app) -> None:
-    """JavaScript in Merlin Engine: off until a site is allowed; offered when a
-    page needs it; switched off from the menu; and gone with its tab."""
+    """JavaScript in Merlin Engine: on by default, as in other browsers, with
+    one switch in Settings; its process ends with the tab; and the debugging
+    zip says how the scripts went."""
     import http.server
+    import json
     import tempfile
     import threading
     import time as _time
+    import zipfile
 
-    from PyQt6.QtWidgets import QLabel
+    from PyQt6.QtGui import QAction
 
     from merlin.media import deno_path
 
+    fresh = cfg.Settings.__new__(cfg.Settings)
+    fresh._data = dict(cfg.DEFAULTS)
+    check("a fresh install draws pages with Merlin Engine and runs their JavaScript",
+          fresh.get("merlin_engine") is True and fresh.get("javascript") is True)
     deno = os.environ.get("MERLIN_DENO") or deno_path()
     if not deno or not os.path.exists(deno):
-        print("  skip  JavaScript permission: Deno is not here (set MERLIN_DENO)")
+        print("  skip  JavaScript: Deno is not here (set MERLIN_DENO)")
         return
-    folder = tempfile.mkdtemp(prefix="merlin-jsperm-")
-    # a page built wholly by its scripts, as many are
+    folder = tempfile.mkdtemp(prefix="merlin-js-default-")
     open(os.path.join(folder, "index.html"), "w").write(
         "<title>Built by script</title><div id=app></div>"
         "<script>document.getElementById('app').innerHTML = '<h1 id=made>Made by JavaScript</h1>';"
-        "var padding = '" + "x" * 30000 + "';</script><script>1</script><script>2</script>")
+        "console.log('hello from the page');</script>")
 
     class Quiet(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *a, **k):
@@ -1752,9 +1747,10 @@ def test_javascript_permission(app) -> None:
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    window, settings, _ = make_window(app, "t-js-permission")
+    window, settings, _ = make_window(app, "t-js-default", merlin_engine=True)
     window.deno_for_scripts = lambda: deno
     window.script_cache_dir = lambda: os.path.join(folder, "cache")
+    address = f"http://127.0.0.1:{server.server_address[1]}/index.html"
 
     def made(view):
         document = getattr(view, "_document", None)
@@ -1768,35 +1764,39 @@ def test_javascript_permission(app) -> None:
         return test()
 
     try:
-        settings.set("merlin_engine", True, save=False)
-        settings.set("js_sites", [], save=False)
-        view = window.new_tab(f"http://127.0.0.1:{server.server_address[1]}/index.html")
-        wait(app, 2.5)
-        message = " ".join(label.text() for label in window.notice_bar.findChildren(QLabel))
-        check("a page built by scripts is offered JavaScript, off until then",
-              window.notice_bar.isVisible() and "Allow JavaScript" in message and view._script is None
-              and not made(view), message)
-        window._notice_accepted()
-        check("allowing it runs the page's scripts, which build it",
-              until(lambda: made(view), 15) and "127.0.0.1" in settings.get("js_sites"),
-              str(settings.get("js_sites")))
-        process = view._script.process if view._script is not None else None
+        view = window.new_tab(address)
+        check("a page's scripts run with nothing to allow", until(lambda: made(view), 15),
+              getattr(view, "script_status", ""))
+        menu_texts = [a.text() for a in window.findChildren(QAction)]
+        check("and there is no per-site JavaScript entry in the menu",
+              not any("JavaScript on this site" in t for t in menu_texts))
         window.tabs.setCurrentIndex(window.tabs.indexOf(view))
-        window.toggle_javascript()
-        wait(app, 2.5)
-        check("the menu's 'JavaScript on this site' switches it off again",
-              settings.get("js_sites") == [] and view._script is None and not made(view))
-        check("and the page's Deno process is ended", process is not None and process.poll() is not None)
-        settings.set("js_sites", ["127.0.0.1"], save=False)
-        view.reload()
-        until(lambda: view._script is not None, 10)
+        window.save_engine_page()
+        path = window.status_label.text().split("Saved for debugging: ", 1)[-1]
+        if os.path.exists(path):
+            bundle = zipfile.ZipFile(path)
+            manifest = json.loads(bundle.read("manifest.json"))
+            console = bundle.read("console.txt").decode()
+            check("the debugging zip says the scripts ran and changed the page, with their console",
+                  manifest.get("scripts") == "running" and manifest.get("scripts_changed_page")
+                  and "hello from the page" in console, f"{manifest.get('scripts')} | {console[:80]}")
+            os.remove(path)
+        else:
+            check("the debugging zip says the scripts ran and changed the page, with their console",
+                  False, "no zip saved")
         process = view._script.process if view._script is not None else None
         window.close_tab(window.tabs.indexOf(view))
         check("closing a tab ends its Deno process",
               process is not None and until(lambda: process.poll() is not None, 5))
+        settings.set("javascript", False, save=False)
+        view = window.new_tab(address)
+        wait(app, 2.5)
+        check("with Run JavaScript off in Settings, no scripts run, and the page says why",
+              view._script is None and not made(view)
+              and "off in Settings" in getattr(view, "script_status", ""), getattr(view, "script_status", ""))
     finally:
+        settings.set("javascript", True, save=False)
         settings.set("merlin_engine", False, save=False)
-        settings.set("js_sites", [], save=False)
         server.shutdown()
         window.close()
 

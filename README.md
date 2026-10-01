@@ -1,5 +1,5 @@
 # Merlin Browser
-![version](https://img.shields.io/badge/version-1.8.0-6f8ff0)
+![version](https://img.shields.io/badge/version-1.8.1-6f8ff0)
 
 ### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6 Requires a reinstall as there has been a fundamental change to the folder structure. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
 
@@ -164,8 +164,8 @@ work: fields to type in, boxes, dropdowns, files, and sending by GET or POST,
 with cookies for the session and saved passwords. It also opens ftp:// and
 smb:// addresses, which Chromium cannot, and file:// folders, and saves
 downloads. It runs JavaScript in V8 (by way of Deno), each tab's scripts in a
-process of their own with no permissions, for the sites you allow: it is off
-until then.
+process of their own with no permissions; JavaScript is on by default, with a
+switch in Settings.
 
 
 

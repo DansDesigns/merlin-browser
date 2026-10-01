@@ -5,6 +5,26 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.1
+  JavaScript is on by default in Merlin Engine, as in other browsers, with one
+  switch: Settings > Merlin Engine > "Run JavaScript". The per-site permission,
+  its main menu entry, its Settings button and the "Allow JavaScript" offer are
+  gone. Deno, which runs pages' JavaScript, is fetched once, in the background,
+  the first time a page has scripts, and the page is reloaded when it is ready.
+  Merlin Engine draws every page by default. Settings saved before this version
+  are moved over to it once; after that, Settings > Merlin Engine decides.
+  Chromium remains for what Merlin Engine cannot do yet, YouTube and video
+  among them: "Open the current page in the other engine" in Settings. The
+  old "always open this site in Chromium" list is gone.
+  Why a page's scripts did or did not run is now recorded: off in Settings,
+  Deno still being fetched, started, running, or ended, with the reason in
+  merlin-log.txt when they fail. Save page as > the debugging zip carries it,
+  whether the scripts changed the page, and the page's console.
+  A module that never finishes loading is no longer waited on for ever: each
+  is given 20 seconds, and the page is sent back as the classic scripts left
+  it without waiting for the modules. GitHub's scripts are almost all modules,
+  and on GitHub its page never came back changed.
+
 1.8.0
   JavaScript in Merlin Engine. It is off until you allow it for a site: when a
   page needs it the notice bar offers "Allow JavaScript", and the main menu's

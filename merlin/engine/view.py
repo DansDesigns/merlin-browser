@@ -480,6 +480,16 @@ def _gather_fonts(sheets_with_bases) -> list:
     return faces
 
 
+def _note(text: str) -> None:
+    """A line in merlin-log.txt."""
+    try:
+        from .. import crashlog
+
+        crashlog.note(text)
+    except Exception:                                      # noqa: BLE001
+        pass
+
+
 def _skew_for(host: str, problem: str):
     """For a date problem, how far off this computer's clock is; else None."""
     from ..clock import clock_skew, is_date_problem
@@ -673,6 +683,7 @@ class MerlinView(QWidget):
         from collections import deque
 
         self.console_lines = deque(maxlen=400)
+        self.script_status = "not started"
         self._script_scroll = QTimer(self)
         self._script_scroll.setSingleShot(True)
         self._script_scroll.setInterval(100)
@@ -1458,21 +1469,27 @@ class MerlinView(QWidget):
         from .script import LocalStorage, ScriptHost, cookie_string, import_hosts
 
         if self._url.scheme() not in ("http", "https") or "<script" not in (self._markup or "").lower():
+            self.script_status = "no scripts on this page"
             return
         allowed = getattr(self._host, "javascript_allowed", None)
         site = _registrable(self._url.host())
         if allowed is None or not allowed(site):
+            self.script_status = "JavaScript is off in Settings"
             return
         deno = getattr(self._host, "deno_for_scripts", lambda: "")()
         if not deno:
+            self.script_status = "Deno, which runs JavaScript, is not here yet (being fetched)"
             return
         cache = getattr(self._host, "script_cache_dir", lambda: "")() or os.path.join(
             QStandardPaths.writableLocation(QStandardPaths.StandardLocation.CacheLocation), "merlin-js")
         try:
             host = ScriptHost(deno, import_hosts(self._markup, self._url.toString()), cache, self)
         except Exception as exc:                            # noqa: BLE001
-            self.console_lines.append(("error", f"JavaScript could not start: {exc}"))
+            self.script_status = f"JavaScript could not start: {exc}"
+            self.console_lines.append(("error", self.script_status))
+            _note(f"javascript: {self._url.host()}: {self.script_status}")
             return
+        self.script_status = f"started with {deno}"
         self._script = host
         host.message.connect(self._on_script_message)
         host.ended.connect(lambda h=host: self._script_ended(h))
@@ -1515,7 +1532,10 @@ class MerlinView(QWidget):
     def _script_ended(self, host) -> None:
         if host is self._script:
             self._script = None
-            self.console_lines.append(("error", "the page's scripts stopped"))
+            code = host.process.poll()
+            self.script_status = f"the scripts' process ended (code {code})"
+            self.console_lines.append(("error", self.script_status))
+            _note(f"javascript: {self._url.host()}: {self.script_status}")
 
     def _script_event(self, message: dict, then) -> None:
         """Send an event to the page's scripts; then(prevented) when they answer.
@@ -1621,6 +1641,8 @@ class MerlinView(QWidget):
                 label.setText("This page says: " + str(message.get("text", ""))[:200])
         elif kind == "console":
             self.console_lines.append((message.get("level", "log"), message.get("text", "")))
+        elif kind == "ready":
+            self.script_status = "running"
 
     def _script_fetch(self, host, message: dict) -> None:
         """A request from the page's script: made here, as the page's."""
@@ -2273,13 +2295,17 @@ class MerlinView(QWidget):
         manifest = {"url": self._url.toString(), "version": version,
                     "viewport": [self._page_width(), self.height()], "zoom": self._zoom,
                     "scroll": self._scroll, "sheets": len(sheets),
-                    "simplified": bool(self._display and self._display.simplified)}
+                    "simplified": bool(self._display and self._display.simplified),
+                    "scripts": getattr(self, "script_status", ""),
+                    "scripts_changed_page": "data-mjs=" in (self._markup or "")}
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as bundle:
             bundle.writestr("page.html", self._markup or "")
             for number, text in enumerate(sheets):
                 bundle.writestr(f"sheets/{number:03d}.css", text or "")
             bundle.writestr("screenshot.png", bytes(shot))
             bundle.writestr("manifest.json", json.dumps(manifest, indent=2))
+            bundle.writestr("console.txt", "\n".join(f"[{level}] {text}" for level, text
+                                                     in getattr(self, "console_lines", [])))
         return path
 
     # ------------------------------------------------------ saving the page

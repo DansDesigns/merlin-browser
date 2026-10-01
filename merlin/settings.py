@@ -150,12 +150,12 @@ DEFAULTS = {
     # --- input ---
     "swipe_navigation": True,          # two-finger swipe = back / forward
     "invert_swipe": False,
-    "merlin_engine": False,            # new tabs drawn by MerlinEngine, not Chromium
+    "merlin_engine": True,             # pages drawn by Merlin Engine; Chromium as a fallback
+    "engine_switched": False,          # existing settings moved to Merlin Engine, once
     "offer_save_passwords": True,      # after a login in a Merlin Engine tab
-    "chromium_sites": [],              # sites needing JavaScript: always in Chromium
     "ui_scale": 1.0,                   # interface size, 1.0 = 100%: applied at start
     "web_fonts": True,                 # Merlin Engine uses sites' own fonts
-    "js_sites": [],                    # sites allowed JavaScript in Merlin Engine
+    "javascript": True,                # Merlin Engine runs pages' JavaScript
     "swipe_distance": 520,             # px of travel to complete a swipe
     # --- updates ---
     "check_updates_on_start": True,
@@ -194,6 +194,12 @@ class Settings(QObject):
                 for key, value in stored.items():
                     if key in DEFAULTS:
                         self._data[key] = value
+                # Merlin Engine became the engine for every page in 1.8.1:
+                # settings saved before then are moved over once, and after
+                # that the choice in Settings stands
+                if not stored.get("engine_switched"):
+                    self._data["merlin_engine"] = True
+                    self._data["engine_switched"] = True
         except (OSError, ValueError):
             pass
 

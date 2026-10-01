@@ -777,7 +777,6 @@ class BrowserWindow(QMainWindow):
         add("Bookmarks", self.show_bookmarks, "Ctrl+Shift+O")
         add("View page source", self.view_source, "Ctrl+U")
         add("Save page as...", self.save_page_as, "Ctrl+S")
-        add("JavaScript on this site", self.toggle_javascript)
         menu.addSeparator()
         add("Settings", self.show_settings, "Ctrl+,")
         add("About Merlin", self.show_about)
@@ -1155,8 +1154,6 @@ class BrowserWindow(QMainWindow):
         else until you click them.
         """
         wanted = self.settings.get("merlin_engine", False) if engine is None else engine
-        if wanted and engine is None and url and self._chromium_site(QUrl(url)):
-            wanted = False                  # a site that needs JavaScript: Chromium
         engine_view = _merlin_view_class() if wanted else None
         if engine_view is not None:
             # Merlin's own engine, switched on in Settings > Merlin Engine.
@@ -1164,7 +1161,6 @@ class BrowserWindow(QMainWindow):
             view = engine_view(self, host=self, profile=self.profile)
             view.loginSubmitted.connect(self._offer_to_save_login)
             view.certTrouble.connect(lambda host, text, v=view: self._engine_cert_trouble(v, host, text))
-            view.needsScript.connect(lambda url, v=view: self._offer_chromium(v, url))
             view.downloadFinished.connect(
                 lambda path: (self.record_download(path), self.status_label.setText(
                     f"Downloaded {os.path.basename(path)} to {os.path.dirname(path)}")))
@@ -1791,12 +1787,6 @@ class BrowserWindow(QMainWindow):
             return
         self.status_label.setText(f"Saved for debugging: {path}")
 
-    def forget_chromium_sites(self) -> int:
-        count = len(self.settings.get("chromium_sites", []) or [])
-        self.settings.set("chromium_sites", [])
-        return count
-
-    # ------------------------------------------------ certificate problems
     def certificate_allowed(self, site: str) -> str:
         """How far the site's certificate problems are allowed: "", "dates" or "any"."""
         from . import certs
@@ -1956,28 +1946,47 @@ class BrowserWindow(QMainWindow):
         QTimer.singleShot(250, report)
 
     # ------------------------------------------------ sites needing JavaScript
-    def _chromium_site(self, url: QUrl) -> bool:
-        from .adblock import _registrable
-
-        host = (url.host() or "").lower()
-        sites = self.settings.get("chromium_sites", []) or []
-        return bool(host) and _registrable(host) in sites
-
-    def route_to_chromium(self, url: QUrl) -> bool:
-        """A Merlin Engine tab going to a site sent to Chromium: open it there."""
-        if not self._chromium_site(url):
-            return False
-        QTimer.singleShot(0, lambda u=url.toString(): self.new_tab(u, engine=False))
-        return True
-
     # ------------------------------------------------ JavaScript in Merlin Engine
     def javascript_allowed(self, site: str) -> bool:
-        return bool(site) and site in (self.settings.get("js_sites", []) or [])
+        """Whether pages' JavaScript runs: on, as in other browsers, unless
+        Settings > Merlin Engine > "Run JavaScript" is off."""
+        return bool(self.settings.get("javascript", True))
 
     def deno_for_scripts(self) -> str:
+        """Deno, which runs pages' JavaScript; fetched once, in the background,
+        the first time a page has scripts and it is not here yet."""
         from .media import deno_path
 
-        return deno_path()
+        found = deno_path()
+        if found or getattr(self, "_fetching_deno", False):
+            return found
+        self._fetching_deno = True
+        self.status_label.setText("Fetching the JavaScript engine (Deno), once...")
+        import threading
+
+        from .media import fetch_deno
+
+        done = {}
+        threading.Thread(target=lambda: done.setdefault("result", fetch_deno()), daemon=True).start()
+
+        def check():
+            if "result" not in done:
+                QTimer.singleShot(400, check)
+                return
+            self._fetching_deno = False
+            ok, text = done["result"]
+            self.status_label.setText(text)
+            try:
+                from . import crashlog
+
+                crashlog.note(f"javascript: fetching Deno: {text}")
+            except Exception:                              # noqa: BLE001
+                pass
+            view = self.current()
+            if ok and _is_merlin_view(view):
+                view.reload()                   # its scripts can run now
+        QTimer.singleShot(400, check)
+        return ""
 
     def script_cache_dir(self) -> str:
         from PyQt6.QtCore import QStandardPaths as _Paths
@@ -1997,93 +2006,6 @@ class BrowserWindow(QMainWindow):
                 or os.path.expanduser("~"), "merlin-local-storage")
             self._local_storage = LocalStorage(folder)
         return self._local_storage
-
-    def set_javascript(self, site: str, allowed: bool, reload_view=None) -> None:
-        """Allow or stop JavaScript for a site in Merlin Engine tabs."""
-        sites = [s for s in (self.settings.get("js_sites", []) or []) if s != site]
-        if allowed and site:
-            sites.append(site)
-        self.settings.set("js_sites", sites)
-        if reload_view is None:
-            return
-        if allowed and not self.deno_for_scripts():
-            # the engine is Deno (V8), which Merlin fetches once, as for yt-dlp
-            self.status_label.setText("Fetching the JavaScript engine (Deno)...")
-            import threading
-
-            from .media import fetch_deno
-
-            done = {}
-
-            def work():
-                done["result"] = fetch_deno()
-
-            def check():
-                if "result" not in done:
-                    QTimer.singleShot(300, check)
-                    return
-                ok, text = done["result"]
-                self.status_label.setText(text)
-                if ok:
-                    reload_view.reload()
-            threading.Thread(target=work, daemon=True).start()
-            QTimer.singleShot(300, check)
-            return
-        reload_view.reload()
-
-    def toggle_javascript(self) -> None:
-        """Main menu: JavaScript on this site, for a Merlin Engine tab."""
-        from .adblock import _registrable
-
-        view = self.current()
-        if not _is_merlin_view(view):
-            self.status_label.setText("JavaScript is Chromium's own in this tab")
-            return
-        site = _registrable(view.url().host().lower())
-        if not site:
-            return
-        now = not self.javascript_allowed(site)
-        self.set_javascript(site, now, view)
-        self.status_label.setText(f"JavaScript {'allowed' if now else 'stopped'} for {site}")
-
-    def forget_javascript_sites(self) -> int:
-        count = len(self.settings.get("js_sites", []) or [])
-        self.settings.set("js_sites", [])
-        return count
-
-    def _offer_chromium(self, view, url: str) -> None:
-        """A page that needs JavaScript: offer to allow it for the site in Merlin
-        Engine, which runs it now; Chromium remains in the main menu."""
-        from .adblock import _registrable
-
-        if self.current() is not view:
-            return
-        site = _registrable(QUrl(url).host().lower())
-        if _is_merlin_view(view) and site and not self.javascript_allowed(site):
-            self._notice_page = ""
-            self._notice_action = lambda: self.set_javascript(site, True, view)
-            self.notice_bar.show_notice(
-                f"{site} needs JavaScript, which is off in Merlin Engine until you allow it "
-                f"for a site. Allow JavaScript for {site}?", "Allow JavaScript")
-            return
-        if self.javascript_allowed(site):
-            return
-
-        def switch():
-            sites = list(self.settings.get("chromium_sites", []) or [])
-            if site and site not in sites:
-                sites.append(site)
-                self.settings.set("chromium_sites", sites)
-            index = self.tabs.indexOf(view)
-            self.new_tab(url, engine=False)
-            if index >= 0:
-                self.close_tab(index)
-
-        self._notice_page = ""
-        self._notice_action = switch
-        self.notice_bar.show_notice(
-            f"{site or 'This site'} needs JavaScript, which Merlin Engine cannot run yet. "
-            f"Open it in Chromium, and use Chromium for it from now on?", "Open in Chromium")
 
     def _save_login(self, url: str, username: str, password: str) -> None:
         from . import passwords
