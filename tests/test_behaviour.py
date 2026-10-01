@@ -1801,6 +1801,47 @@ def test_javascript_permission(app) -> None:
         window.close()
 
 
+def test_download_popup(app) -> None:
+    """A finished download is said so in a popup under the downloads button,
+    as Brave does: its name, Open and Show in folder; gone after a while."""
+    import tempfile
+
+    from PyQt6.QtGui import QDesktopServices
+
+    from merlin.ui import DownloadPopup
+
+    window, settings, _ = make_window(app, "t-download-popup")
+    opened = []
+    real_open = QDesktopServices.openUrl
+    QDesktopServices.openUrl = staticmethod(lambda url: (opened.append(url.toLocalFile()), True)[1])
+    real_time = DownloadPopup.SHOWN_FOR
+    DownloadPopup.SHOWN_FOR = 700
+    try:
+        path = os.path.join(tempfile.mkdtemp(prefix="merlin-popup-"), "report.pdf")
+        open(path, "wb").write(b"%PDF" + b"0" * 4000)
+        window.record_download(path)
+        wait(app, 0.2)
+        popup = window._download_popup
+        check("a finished download pops up, with its name",
+              popup.isVisible() and "report.pdf" in popup.name.text(), popup.name.text())
+        button = window.btn_downloads
+        under = button.mapToGlobal(button.rect().bottomRight())
+        check("under the downloads button", abs(popup.geometry().right() - under.x()) < 4
+              and 0 <= popup.y() - under.y() < 20, f"{popup.geometry()} {under}")
+        check("with Open and Show in folder",
+              popup.open_button.isVisible() and popup.folder_button.isVisible())
+        wait(app, 1.2)
+        check("and it goes after a while", not popup.isVisible())
+        window.record_download(path)
+        wait(app, 0.1)
+        popup.open_button.click()
+        check("Open opens the file", opened == [path] and not popup.isVisible(), str(opened))
+    finally:
+        QDesktopServices.openUrl = real_open
+        DownloadPopup.SHOWN_FOR = real_time
+        window.close()
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -1833,7 +1874,8 @@ def main() -> int:
                  test_ftp_opens_in_merlin_engine, test_merlin_engine_tab_icon,
                  test_script_sites_and_debug_save, test_source_and_save_page_as,
                  test_certificate_padlock, test_interface_too_large,
-                 test_loading_bar_and_save_names, test_javascript_permission):
+                 test_loading_bar_and_save_names, test_javascript_permission,
+                 test_download_popup):
         print(f"\n{test.__name__}")
         try:
             test(app)

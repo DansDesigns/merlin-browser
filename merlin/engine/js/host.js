@@ -84,6 +84,8 @@ async function merlinFetch(input, init = {}) {
 let window_, document_;
 const state = { url: "about:blank", width: 1280, height: 800, scrollX: 0, scrollY: 0, cookie: "", scheme: "light",
                 userAgent: "Mozilla/5.0", language: "en-GB", storage: {}, loaded: false };
+const geometry = new Map();      // element id -> [x, y, width, height, fixed] in page terms
+const observers = new Set();     // the live IntersectionObservers
 const ids = new WeakMap();
 const byId = new Map();
 let lastId = 0;
@@ -284,17 +286,48 @@ function install(html) {
     } });
   };
   g.IntersectionObserver = class {
-    // Merlin Engine has no scroll positions for scripts yet: everything
-    // observed is reported in view, which shows content revealed on scroll
-    constructor(callback, options = {}) { this._cb = callback; this._targets = new Set(); this.root = options.root ?? null; this.rootMargin = options.rootMargin ?? "0px"; this.thresholds = [].concat(options.threshold ?? 0); }
-    observe(target) {
-      this._targets.add(target);
-      queueMicrotask(() => { try { this._cb([{ target, isIntersecting: true, intersectionRatio: 1, time: performance.now(),
-        boundingClientRect: target.getBoundingClientRect?.() ?? {}, intersectionRect: {}, rootBounds: null }], this); } catch (e) { reportError(e); } });
+    // Worked out from Merlin Engine's layout and the scroll: an entry each
+    // time a target comes into or goes out of view, past a threshold, as in a
+    // browser. Until the page has been laid out, nothing is reported.
+    constructor(callback, options = {}) {
+      this._cb = callback; this._targets = new Map(); this.root = options.root ?? null;
+      this.rootMargin = options.rootMargin ?? "0px";
+      this.thresholds = [].concat(options.threshold ?? 0).map(Number).sort((a, b) => a - b);
+      observers.add(this);
     }
+    observe(target) { if (!this._targets.has(target)) { this._targets.set(target, null); queueMicrotask(() => this._check()); } }
     unobserve(target) { this._targets.delete(target); }
-    disconnect() { this._targets.clear(); }
+    disconnect() { this._targets.clear(); observers.delete(this); }
     takeRecords() { return []; }
+    _margins() {
+      const parts = String(this.rootMargin).trim().split(/\s+/).map((p) => p.endsWith("%") ? parseFloat(p) / 100 * state.height : parseFloat(p) || 0);
+      const [top, right = top, bottom = top, left = right] = parts;
+      return { top, right, bottom, left };
+    }
+    _check() {
+      if (!geometry.size) return;
+      const m = this._margins();
+      const view = { top: -m.top, left: -m.left, bottom: state.height + m.bottom, right: state.width + m.right };
+      const entries = [];
+      for (const [target, last] of this._targets) {
+        const rect = target.getBoundingClientRect();
+        const w = Math.max(0, Math.min(rect.right, view.right) - Math.max(rect.left, view.left));
+        const h = Math.max(0, Math.min(rect.bottom, view.bottom) - Math.max(rect.top, view.top));
+        const area = rect.width * rect.height;
+        const ratio = area > 0 ? (w * h) / area : (w > 0 || h > 0 ? 1 : 0);
+        const visible = (rect.width > 0 || rect.height > 0) && w * h > 0 || (area === 0 && rect.bottom >= view.top && rect.top <= view.bottom && rect.height + rect.width > 0);
+        // which threshold band the ratio is in: an entry when that changes
+        const band = this.thresholds.filter((t) => ratio >= t && (t > 0 || visible)).length;
+        if (last === null || last !== band) {
+          this._targets.set(target, band);
+          entries.push({ target, isIntersecting: visible, intersectionRatio: visible ? ratio : 0, time: performance.now(),
+            boundingClientRect: rect, rootBounds: { top: view.top, left: view.left, bottom: view.bottom, right: view.right,
+              width: view.right - view.left, height: view.bottom - view.top },
+            intersectionRect: { top: Math.max(rect.top, view.top), left: Math.max(rect.left, view.left), width: w, height: h } });
+        }
+      }
+      if (entries.length) { try { this._cb(entries, this); } catch (e) { reportError(e); } }
+    }
   };
   g.ResizeObserver = class {
     constructor(callback) { this._cb = callback; }
@@ -331,16 +364,39 @@ function install(html) {
   typed(g.HTMLButtonElement, function () {
     const t = (this.getAttribute("type") || "").toLowerCase(); return ["submit", "reset", "button"].includes(t) ? t : "submit"; });
   installHandlers(g, made);
+  // In a browser HTMLElement has no observedAttributes, and a page may assign
+  // one to its element class; linkedom's base class has it as a getter only,
+  // and GitHub's elements failed to load on assigning it.
+  for (const name of INTERFACES) {
+    let cls = g[name];
+    while (typeof cls === "function" && cls !== Function.prototype) {
+      const own = Object.getOwnPropertyDescriptor(cls, "observedAttributes");
+      if (own && own.get && !own.set) {
+        Object.defineProperty(cls, "observedAttributes", { configurable: true,
+          get: own.get,
+          set(value) { Object.defineProperty(this, "observedAttributes", { value, writable: true, configurable: true }); } });
+      }
+      cls = Object.getPrototypeOf(cls);
+    }
+  }
   const proto = (g.Element || made.Element).prototype;
-  if (!proto.getBoundingClientRect) proto.getBoundingClientRect = function () {
-    return { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, toJSON() { return this; } };
+  // where Merlin Engine laid the element out, as the window sees it now
+  proto.getBoundingClientRect = function () {
+    const box = geometry.get(ids.get(this));
+    if (!box) return { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, toJSON() { return this; } };
+    const [x, y, width, height, fixed] = box;
+    const top = fixed ? y : y - state.scrollY, left = fixed ? x : x - state.scrollX;
+    return { x: left, y: top, top, left, right: left + width, bottom: top + height, width, height, toJSON() { return this; } };
   };
+  for (const [name, index] of [["offsetWidth", 2], ["offsetHeight", 3], ["clientWidth", 2], ["clientHeight", 3],
+                               ["scrollWidth", 2], ["scrollHeight", 3]]) {
+    Object.defineProperty(proto, name, { configurable: true, get() { const box = geometry.get(ids.get(this)); return box ? Math.round(box[index]) : 0; } });
+  }
+  Object.defineProperty(proto, "offsetTop", { configurable: true, get() { const box = geometry.get(ids.get(this)); return box ? Math.round(box[1]) : 0; } });
+  Object.defineProperty(proto, "offsetLeft", { configurable: true, get() { const box = geometry.get(ids.get(this)); return box ? Math.round(box[0]) : 0; } });
   if (!proto.getClientRects) proto.getClientRects = function () { return []; };
   for (const name of ["scrollIntoView", "focus", "blur", "scrollTo", "scrollBy", "animate", "requestFullscreen"]) {
     if (!proto[name]) proto[name] = function () { return name === "animate" ? { finished: Promise.resolve(), cancel() {}, play() {}, pause() {}, addEventListener() {} } : undefined; };
-  }
-  for (const name of ["offsetWidth", "offsetHeight", "clientWidth", "clientHeight", "scrollWidth", "scrollHeight", "offsetTop", "offsetLeft"]) {
-    if (!(name in proto)) Object.defineProperty(proto, name, { get() { return 0; }, configurable: true });
   }
   if (!("isConnected" in proto)) Object.defineProperty(proto, "isConnected", { get() { return this.ownerDocument?.contains?.(this) ?? true; }, configurable: true });
   g.reportError = (error) => send({ type: "console", level: "error", text: `Uncaught ${safeString(error)}${error && error.stack ? "\n" + String(error.stack).split("\n").slice(1, 4).join("\n") : ""}` });
@@ -571,7 +627,16 @@ function dispatch(message) {
   const target = nodeOf(message.target);
   if (message.type === "scroll") {
     state.scrollX = message.x || 0; state.scrollY = message.y || 0;
-    fire(globalThis, "scroll"); fire(document_, "scroll"); return;
+    fire(globalThis, "scroll"); fire(document_, "scroll");
+    for (const observer of observers) observer._check();
+    return;
+  }
+  if (message.type === "geometry") {
+    geometry.clear();
+    for (const [id, box] of Object.entries(message.boxes || {})) geometry.set(Number(id), box);
+    if (message.height) state.height = message.height;
+    for (const observer of observers) observer._check();
+    return;
   }
   if (message.type === "resize") {
     state.width = message.width; state.height = message.height; fire(globalThis, "resize"); return;
@@ -629,6 +694,21 @@ async function main() {
       if (message.type === "load") {
         Object.assign(state, message.state || {});
         install(message.html);
+        // Merlin's numbering of the elements becomes the ids here, and the
+        // attributes go, so the page's scripts never see them; with the layout
+        // Merlin has already done, scripts' first measurements are real
+        for (const element of document_.querySelectorAll("[data-mjs]")) {
+          const number = Number(element.getAttribute("data-mjs"));
+          element.removeAttribute("data-mjs");
+          ids.set(element, number); byId.set(number, new WeakRef(element));
+          if (number > lastId) lastId = number;
+        }
+        const root = document_.documentElement;
+        if (root && root.hasAttribute && root.hasAttribute("data-mjs")) {
+          const number = Number(root.getAttribute("data-mjs")); root.removeAttribute("data-mjs");
+          ids.set(root, number); byId.set(number, new WeakRef(root));
+        }
+        for (const [id, box] of Object.entries(message.geometry || {})) geometry.set(Number(id), box);
         send({ type: "ready" });
         watchForScripts();
         new globalThis.MutationObserver(changed).observe(document_, { childList: true, subtree: true, attributes: true, characterData: true });

@@ -1764,3 +1764,105 @@ def fit_on_screen(widget) -> bool:
     if (x, y) != (frame.x(), frame.y()):
         widget.move(x, y)
     return changed
+
+
+
+class DownloadPopup(QFrame):
+    """A finished download, said so under the downloads button, as Brave does.
+
+    It takes no focus, so typing in a page goes on; it goes after a few seconds,
+    or stays while the pointer is on it.
+    """
+
+    SHOWN_FOR = 6000                                        # milliseconds
+
+    def __init__(self, parent):
+        super().__init__(parent, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setObjectName("downloadPopup")
+        self.setStyleSheet(
+            "#downloadPopup { background: #202229; border: 1px solid #3a3d47; border-radius: 10px; }"
+            "QLabel { color: #e6e6ea; } QLabel#heading { font-weight: 600; }"
+            "QLabel#detail { color: #9a9ba1; font-size: 12px; }"
+            "QPushButton { background: #2e313b; color: #e6e6ea; border: 1px solid #3a3d47;"
+            " border-radius: 6px; padding: 5px 12px; } QPushButton:hover { background: #3a3e4a; }")
+        from PyQt6.QtWidgets import QHBoxLayout as _Row
+        from PyQt6.QtWidgets import QVBoxLayout as _Column
+
+        column = _Column(self)
+        column.setContentsMargins(14, 12, 14, 12)
+        self.heading = QLabel("Download complete", self)
+        self.heading.setObjectName("heading")
+        self.name = QLabel("", self)
+        self.detail = QLabel("", self)
+        self.detail.setObjectName("detail")
+        row = _Row()
+        self.open_button = QPushButton("Open", self)
+        self.folder_button = QPushButton("Show in folder", self)
+        row.addWidget(self.open_button)
+        row.addWidget(self.folder_button)
+        row.addStretch(1)
+        for widget in (self.heading, self.name, self.detail):
+            column.addWidget(widget)
+        column.addLayout(row)
+        self.open_button.clicked.connect(self._open)
+        self.folder_button.clicked.connect(self._show_folder)
+        self.path = ""
+        from PyQt6.QtCore import QTimer as _Timer
+
+        self._timer = _Timer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.hide)
+        self.setFixedWidth(320)
+
+    def announce(self, path: str, anchor) -> None:
+        """Show it for path, under anchor (the downloads button)."""
+        self.path = path
+        name = os.path.basename(path)
+        metrics = self.name.fontMetrics()
+        self.name.setText(metrics.elidedText(name, Qt.TextElideMode.ElideMiddle, 290))
+        self.name.setToolTip(path)
+        try:
+            size = os.path.getsize(path)
+            text = (f"{size / 1048576:.1f} MB" if size >= 1048576 else f"{max(1, size // 1024)} KB")
+        except OSError:
+            text = ""
+        folder = os.path.basename(os.path.dirname(path)) or os.path.dirname(path)
+        self.detail.setText(" · ".join(t for t in (text, f"in {folder}") if t))
+        self.adjustSize()
+        if anchor is not None and anchor.isVisible():
+            corner = anchor.mapToGlobal(anchor.rect().bottomRight())
+            self.move(corner.x() - self.width(), corner.y() + 6)
+        self.show()
+        self.raise_()
+        self._timer.start(self.SHOWN_FOR)
+
+    def enterEvent(self, event):                            # noqa: N802
+        self._timer.stop()                      # stays while the pointer is on it
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):                            # noqa: N802
+        self._timer.start(2500)
+        super().leaveEvent(event)
+
+    def _open(self) -> None:
+        from PyQt6.QtCore import QUrl as _Url
+        from PyQt6.QtGui import QDesktopServices
+
+        QDesktopServices.openUrl(_Url.fromLocalFile(self.path))
+        self.hide()
+
+    def _show_folder(self) -> None:
+        import subprocess
+        import sys as _sys
+
+        from PyQt6.QtCore import QUrl as _Url
+        from PyQt6.QtGui import QDesktopServices
+
+        if _sys.platform.startswith("win"):
+            # Explorer, with the file chosen in its folder
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(self.path)])
+        else:
+            QDesktopServices.openUrl(_Url.fromLocalFile(os.path.dirname(self.path)))
+        self.hide()

@@ -1466,7 +1466,7 @@ class MerlinView(QWidget):
     # ------------------------------------------------------ JavaScript
     def _start_script(self) -> None:
         """Run the page's scripts, if its site may, in a Deno process of its own."""
-        from .script import LocalStorage, ScriptHost, cookie_string, import_hosts
+        from .script import LocalStorage, ScriptHost, cookie_string, import_hosts, import_map
 
         if self._url.scheme() not in ("http", "https") or "<script" not in (self._markup or "").lower():
             self.script_status = "no scripts on this page"
@@ -1483,7 +1483,8 @@ class MerlinView(QWidget):
         cache = getattr(self._host, "script_cache_dir", lambda: "")() or os.path.join(
             QStandardPaths.writableLocation(QStandardPaths.StandardLocation.CacheLocation), "merlin-js")
         try:
-            host = ScriptHost(deno, import_hosts(self._markup, self._url.toString()), cache, self)
+            host = ScriptHost(deno, import_hosts(self._markup, self._url.toString()), cache, self,
+                              mapping=import_map(self._markup, self._url.toString()))
         except Exception as exc:                            # noqa: BLE001
             self.script_status = f"JavaScript could not start: {exc}"
             self.console_lines.append(("error", self.script_status))
@@ -1497,12 +1498,16 @@ class MerlinView(QWidget):
         storage = storage() if storage is not None else LocalStorage(None)
         self._storage = storage
         headers = self._headers()
-        # the page as Merlin Engine's parser built it: html, head and body there
+        # The page as Merlin Engine's parser built it (html, head and body
+        # there), each element numbered here: the scripts' DOM takes the same
+        # numbers, so the layout already done can be given to them at once, and
+        # their first measurements are real rather than 0.
         from .dom import to_html
-        from .html import parse as parse_page
 
-        whole = to_html(parse_page(self._markup, self._url.toString()))
-        host.send({"type": "load", "html": whole, "state": {
+        for number, element in enumerate([self._document.root] + list(self._document.root.elements()), 1):
+            element.attrs["data-mjs"] = str(number)
+        whole = to_html(self._document)
+        host.send({"type": "load", "html": whole, "geometry": self._geometry_now(), "state": {
             "url": self._url.toString(), "width": self._page_width(), "height": float(self.height()),
             "userAgent": headers.get("User-Agent", ""), "language": "en-GB",
             "cookie": cookie_string(self._cookies(), self._url.toString()),
@@ -1532,8 +1537,7 @@ class MerlinView(QWidget):
     def _script_ended(self, host) -> None:
         if host is self._script:
             self._script = None
-            code = host.process.poll()
-            self.script_status = f"the scripts' process ended (code {code})"
+            self.script_status = f"the scripts' process ended ({host.why_it_ended()})"
             self.console_lines.append(("error", self.script_status))
             _note(f"javascript: {self._url.host()}: {self.script_status}")
 
@@ -1572,6 +1576,30 @@ class MerlinView(QWidget):
         if checked is not None:
             message["checked"] = bool(checked)
         self._script.send(message)
+
+    def _send_geometry(self) -> None:
+        """Where each element was laid out, for the page's scripts: their
+        getBoundingClientRect, sizes and IntersectionObserver are worked out
+        from it, and from the scroll, sent as it changes."""
+        if self._script is None or self._display is None:
+            return
+        self._script.send({"type": "geometry", "boxes": self._geometry_now(),
+                           "height": float(self.height())})
+
+    def _geometry_now(self) -> dict:
+        boxes = {}
+        if self._display is None:
+            return boxes
+        sources = [(self._display.boxes, False)]
+        if self._display.fixed is not None:
+            sources.append((self._display.fixed.boxes, True))
+        for listed, fixed in sources:
+            for rect, element in listed:
+                known = element.attrs.get("data-mjs")
+                if known and known not in boxes:
+                    boxes[known] = [round(rect.x(), 1), round(rect.y(), 1), round(rect.width(), 1),
+                                    round(rect.height(), 1), fixed]
+        return boxes
 
     def _send_scroll(self) -> None:
         if self._script is not None:
@@ -1815,6 +1843,7 @@ class MerlinView(QWidget):
         self._update_scrollbar()
         self._sync_controls()
         self.update()
+        self._send_geometry()
         if self._display.simplified:
             label = getattr(self._host, "status_label", None)
             if label is not None:

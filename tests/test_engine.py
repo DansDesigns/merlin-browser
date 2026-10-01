@@ -1928,6 +1928,28 @@ def test_javascript(app) -> None:
         "document.getElementById('cookie').textContent = 'cookies: ' + document.cookie;\n"
         "document.getElementById('kept').textContent = 'kept: ' + localStorage.getItem('visits');\n"
         "localStorage.setItem('visits', String(Number(localStorage.getItem('visits') || 0) + 1));")
+    open(os.path.join(folder, "js", "greet.js"), "w").write(
+        "export const greet = (w) => `mapped import for ${w}`;")
+    open(os.path.join(folder, "js", "fade.js"), "w").write(
+        "import { greet } from 'lib/greet';\n"
+        "document.getElementById('mapped').textContent = greet('modules');\n"
+        "class Fancy extends HTMLElement {}\n"
+        "Fancy.observedAttributes = ['size'];\n"
+        "customElements.define('fancy-el', Fancy);\n"
+        "document.getElementById('elements').textContent = 'custom elements: ' + Fancy.observedAttributes.join();\n"
+        "const hero = document.getElementById('hero');\n"
+        "new IntersectionObserver((es) => { for (const e of es) hero.className = e.isIntersecting ? '' : 'faded'; })"
+        ".observe(document.getElementById('sentinel'));\n"
+        "const box = document.getElementById('measured').getBoundingClientRect();\n"
+        "document.getElementById('size').textContent = `measured ${Math.round(box.width)}x${Math.round(box.height)}`;")
+    open(os.path.join(folder, "fade.html"), "w").write(
+        "<!DOCTYPE html><html><head><title>Fade</title>"
+        "<script type=importmap>{\"imports\": {\"lib/greet\": \"/js/greet.js\"}}</script>"
+        "<style>body{margin:0} #hero{position:fixed;top:0;left:0;right:0;height:200px;z-index:0;background:#f00}"
+        "#hero.faded{opacity:0} #sentinel{height:300px} #measured{width:250px;height:40px}</style></head>"
+        "<body><div id=hero>pinned</div><div id=sentinel></div><p id=mapped>waiting</p><p id=elements></p>"
+        "<div id=measured></div><p id=size></p><div style='height:3000px'></div>"
+        "<script type=module src=/js/fade.js></script></body></html>")
     open(os.path.join(folder, "more.html"), "w").write(
         "<title>More</title><p id=mod>waiting</p><p id=cookie></p><p id=kept></p>"
         "<button id=old onclick=\"this.textContent='clicked inline'\" style='padding:10px'>old style</button>"
@@ -2034,6 +2056,25 @@ def test_javascript(app) -> None:
         view.setUrl(QUrl(base + "/more.html"))
         check("localStorage is kept from one visit to the next",
               until(view, lambda: text_of(view, "kept") == "kept: 1", 15), str(text_of(view, "kept")))
+        # GitHub's ways: an import map, observedAttributes assigned, measuring,
+        # and a section that fades as a marker scrolls out of view
+        view.setUrl(QUrl(base + "/fade.html"))
+        check("a bare module name resolves through the page's import map",
+              until(view, lambda: text_of(view, "mapped") == "mapped import for modules", 15),
+              str(text_of(view, "mapped")))
+        check("an element class may have observedAttributes assigned",
+              text_of(view, "elements") == "custom elements: size", str(text_of(view, "elements")))
+        check("getBoundingClientRect gives the real size from the first run",
+              text_of(view, "size") == "measured 250x40", str(text_of(view, "size")))
+
+        def hero():
+            return next((x.attrs.get("class", "") for x in view._document.root.elements() if x.id == "hero"), None)
+
+        view.scrollbar.setValue(600)
+        check("IntersectionObserver sees a marker scroll out of view: the section fades",
+              until(view, lambda: hero() == "faded", 5), str(hero()))
+        view.scrollbar.setValue(0)
+        check("and scrolled back, it comes back", until(view, lambda: hero() == "", 5), str(hero()))
         view.close()
     finally:
         server.shutdown()

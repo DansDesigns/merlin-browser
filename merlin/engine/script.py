@@ -25,7 +25,31 @@ import urllib.request
 from PyQt6.QtCore import QObject, pyqtSignal
 
 HOST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "js", "host.js")
-MEMORY_MB = 1024
+MEMORY_MB = 2048
+
+
+def import_map(markup: str, page_url: str):
+    """The page's <script type="importmap">, its addresses made whole; or None.
+
+    GitHub's modules import bare names such as react/jsx-runtime, which the
+    page's import map turns into addresses; without it they could not load.
+    """
+    found = re.findall(r"""<script\b[^>]*type\s*=\s*["']?importmap["']?[^>]*>(.*?)</script>""",
+                       markup or "", re.I | re.S)
+    if not found:
+        return None
+    merged = {"imports": {}, "scopes": {}}
+    for text in found:
+        try:
+            data = json.loads(text)
+        except ValueError:
+            continue
+        for name, target in (data.get("imports") or {}).items():
+            merged["imports"][name] = urllib.parse.urljoin(page_url, target)
+        for scope, mapping in (data.get("scopes") or {}).items():
+            merged["scopes"][urllib.parse.urljoin(page_url, scope)] = {
+                name: urllib.parse.urljoin(page_url, target) for name, target in (mapping or {}).items()}
+    return merged if merged["imports"] or merged["scopes"] else None
 
 
 def import_hosts(markup: str, page_url: str) -> list:
@@ -35,6 +59,12 @@ def import_hosts(markup: str, page_url: str) -> list:
     page = urllib.parse.urlsplit(page_url)
     if page.netloc:
         hosts.add(page.netloc)
+    mapped = import_map(markup, page_url) or {}
+    for target in list((mapped.get("imports") or {}).values()) + [
+            t for scope in (mapped.get("scopes") or {}).values() for t in scope.values()]:
+        host = urllib.parse.urlsplit(target).netloc
+        if host:
+            hosts.add(host)
     for tag in re.findall(r"<(?:script|link)\b[^>]*>", markup or "", re.I):
         if not re.search(r"""type\s*=\s*["']?module|rel\s*=\s*["']?modulepreload""", tag, re.I):
             continue
@@ -52,12 +82,20 @@ class ScriptHost(QObject):
     message = pyqtSignal(object)          # a dict from the page's scripts
     ended = pyqtSignal()
 
-    def __init__(self, deno: str, hosts: list, cache_dir: str, parent=None):
+    def __init__(self, deno: str, hosts: list, cache_dir: str, parent=None, mapping=None):
         super().__init__(parent)
         command = [deno, "run", "--quiet", "--no-prompt", "--no-config", "--no-lock",
                    f"--v8-flags=--max-old-space-size={MEMORY_MB}"]
         if hosts:
             command.append("--allow-import=" + ",".join(hosts))
+        if mapping:
+            os.makedirs(cache_dir, exist_ok=True)
+            import tempfile
+
+            handle, path = tempfile.mkstemp(prefix="importmap-", suffix=".json", dir=cache_dir)
+            with os.fdopen(handle, "w", encoding="utf-8") as out:
+                json.dump(mapping, out)
+            command.append("--import-map=" + path)
         command.append(HOST)
         kwargs = {}
         if os.name == "nt":
@@ -65,7 +103,12 @@ class ScriptHost(QObject):
         os.makedirs(cache_dir, exist_ok=True)
         env = dict(os.environ, DENO_DIR=cache_dir, NO_COLOR="1", DENO_NO_UPDATE_CHECK="1")
         self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                        stderr=subprocess.DEVNULL, env=env, **kwargs)
+                                        stderr=subprocess.PIPE, env=env, **kwargs)
+        # Deno's own messages, should it fail: the last of them, for the log
+        from collections import deque
+
+        self.errors = deque(maxlen=30)
+        threading.Thread(target=self._read_errors, daemon=True).start()
         self._lock = threading.Lock()
         self._closed = False
         # the process goes with its tab: when the view is deleted, this is too,
@@ -88,6 +131,19 @@ class ScriptHost(QObject):
             self.ended.emit()
         except RuntimeError:
             pass
+
+    def _read_errors(self) -> None:
+        for line in self.process.stderr:
+            self.errors.append(line.decode("utf-8", "replace").rstrip())
+
+    def why_it_ended(self) -> str:
+        """The process's exit code and its last words, once it has ended."""
+        try:
+            code = self.process.wait(timeout=2)
+        except Exception:                                  # noqa: BLE001
+            code = None
+        tail = " | ".join(line for line in list(self.errors)[-6:] if line.strip())
+        return f"code {code}" + (f": {tail[:600]}" if tail else "")
 
     def send(self, message: dict) -> None:
         if self._closed:

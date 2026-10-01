@@ -5,6 +5,34 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.2
+  A finished download says so in a popup under the downloads button, as Brave
+  does: the file's name, its size and folder, and Open and Show in folder (on
+  Windows, Explorer with the file chosen). It takes no focus, so typing in a
+  page goes on, and goes after a few seconds, or stays while the pointer is on
+  it. For downloads in either engine and for Save page as; a Chromium download
+  that is cancelled or fails says so in the status bar instead.
+  GitHub's scripts now load in Merlin Engine. What the debugging zip from
+  1.8.1 showed, and what is put right:
+  - GitHub's modules import names such as react/jsx-runtime, which the page's
+    import map (<script type="importmap">) turns into addresses. Deno did not
+    know the page's map, and those modules, landing-pages among them, failed.
+    The map is now given to Deno, its hosts allowed for imports.
+  - GitHub's custom elements assign observedAttributes to their classes, and
+    the DOM's base class had it as a getter only, so they failed to load. It is
+    assignable now, as in a browser.
+  - Scripts were told every element was 0 by 0, at 0,0, and that everything
+    was in view. Each layout is now given to them: getBoundingClientRect,
+    offsetWidth and the rest give real sizes and places, and
+    IntersectionObserver reports elements coming into and going out of view as
+    the page scrolls, by its thresholds and rootMargin, as in a browser. A
+    section that fades as the page scrolls past it, as GitHub's opening one,
+    can now do so. The page's elements are numbered by Merlin before scripts
+    start, so even their first measurements are real.
+  - The scripts' process had ended on GitHub with nothing said of why. Deno's
+    own messages are now kept, and the last of them go in merlin-log.txt and
+    the debugging zip when it ends; it is given 2 GB rather than 1.
+
 1.8.1
   JavaScript is on by default in Merlin Engine, as in other browsers, with one
   switch: Settings > Merlin Engine > "Run JavaScript". The per-site permission,

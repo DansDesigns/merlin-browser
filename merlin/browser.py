@@ -3178,7 +3178,17 @@ class BrowserWindow(QMainWindow):
         entry = {"path": path, "state": state}
         self.downloads.append(entry)
         self._fill_downloads_menu()
+        if state == "done":
+            self.announce_download(path)
         return entry
+
+    def announce_download(self, path: str) -> None:
+        """A popup under the downloads button saying the download is done."""
+        from .ui import DownloadPopup
+
+        if getattr(self, "_download_popup", None) is None:
+            self._download_popup = DownloadPopup(self)
+        self._download_popup.announce(path, getattr(self, "btn_downloads", None))
 
     def _fill_downloads_menu(self) -> None:
         """Rebuild the downloads list.
@@ -3247,6 +3257,7 @@ class BrowserWindow(QMainWindow):
             def page_saved():
                 entry["state"] = "done"
                 self._fill_downloads_menu()
+                self.announce_download(chosen)
                 self.status_label.setText(f"Saved {os.path.basename(chosen)}")
 
             download.isFinishedChanged.connect(page_saved)
@@ -3268,9 +3279,20 @@ class BrowserWindow(QMainWindow):
         self.status_label.setText(f"Downloading {os.path.basename(path)}...")
 
         def finished():
-            entry["state"] = "done"
+            completed = True
+            try:
+                from PyQt6.QtWebEngineCore import QWebEngineDownloadRequest as _Request
+
+                completed = download.state() == _Request.DownloadState.DownloadCompleted
+            except Exception:                              # noqa: BLE001
+                pass
+            entry["state"] = "done" if completed else "failed"
             self._fill_downloads_menu()
-            self.status_label.setText(f"Saved {os.path.basename(path)}")
+            if completed:
+                self.status_label.setText(f"Saved {os.path.basename(path)}")
+                self.announce_download(path)
+            else:
+                self.status_label.setText(f"The download of {os.path.basename(path)} did not finish")
 
         download.isFinishedChanged.connect(finished)
 
