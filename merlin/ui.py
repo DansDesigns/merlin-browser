@@ -1780,13 +1780,47 @@ class DownloadPopup(QFrame):
         super().__init__(parent, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
                          | Qt.WindowType.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        # its own window is see-through, so its rounded corners show as rounded
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setObjectName("downloadPopup")
+        self._radius = None
+        self.set_radius(10)
+        self._build()
+
+    def set_radius(self, radius) -> None:
+        """Its corners, as round as the window's (Settings > Appearance)."""
+        try:
+            radius = max(0, min(30, int(radius)))
+        except (TypeError, ValueError):
+            radius = 10
+        if radius == self._radius:
+            return
+        self._radius = radius
+        self._themed()
+
+    def _themed(self) -> None:
+        """The popup in the theme in use, decided each time it is shown, as
+        the notice bar does: Merlin themes with an application stylesheet that
+        gives every widget the theme's background, and fixed colours had left
+        light text on white labels in the light theme."""
+        from PyQt6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        dark = app is not None and app.styleSheet() == DARK_QSS
+        if dark:
+            self._panel, self._edge, text, detail = "#232429", "#3a3d45", "#e6e6e9", "#9a9ba1"
+        else:
+            self._panel, self._edge, text, detail = "#ffffff", "#d3d5dc", "#1d1e22", "#65676e"
+        # the panel is painted in paintEvent; its labels are see-through on it,
+        # and its buttons are left to the theme, as every other button is
         self.setStyleSheet(
-            "#downloadPopup { background: #202229; border: 1px solid #3a3d47; border-radius: 10px; }"
-            "QLabel { color: #e6e6ea; } QLabel#heading { font-weight: 600; }"
-            "QLabel#detail { color: #9a9ba1; font-size: 12px; }"
-            "QPushButton { background: #2e313b; color: #e6e6ea; border: 1px solid #3a3d47;"
-            " border-radius: 6px; padding: 5px 12px; } QPushButton:hover { background: #3a3e4a; }")
+            "#downloadPopup { background: transparent; border: 0; }"
+            f"#downloadPopup QLabel {{ color: {text}; background: transparent; }}"
+            "#downloadPopup QLabel#heading { font-weight: 600; }"
+            f"#downloadPopup QLabel#detail {{ color: {detail}; font-size: 12px; }}")
+        self.update()
+
+    def _build(self) -> None:
         from PyQt6.QtWidgets import QHBoxLayout as _Row
         from PyQt6.QtWidgets import QVBoxLayout as _Column
 
@@ -1818,6 +1852,7 @@ class DownloadPopup(QFrame):
 
     def announce(self, path: str, anchor) -> None:
         """Show it for path, under anchor (the downloads button)."""
+        self._themed()                          # the theme now, should it have changed
         self.path = path
         name = os.path.basename(path)
         metrics = self.name.fontMetrics()
@@ -1837,6 +1872,20 @@ class DownloadPopup(QFrame):
         self.show()
         self.raise_()
         self._timer.start(self.SHOWN_FOR)
+
+    def paintEvent(self, event):                            # noqa: N802
+        from PyQt6.QtCore import QRectF as _Rect
+        from PyQt6.QtGui import QColor as _Colour
+        from PyQt6.QtGui import QPainter as _Painter
+        from PyQt6.QtGui import QPen as _Pen
+
+        painter = _Painter(self)
+        painter.setRenderHint(_Painter.RenderHint.Antialiasing)
+        painter.setPen(_Pen(_Colour(getattr(self, "_edge", "#3a3d45")), 1))
+        painter.setBrush(_Colour(getattr(self, "_panel", "#232429")))
+        radius = float(self._radius or 0)
+        painter.drawRoundedRect(_Rect(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
+        painter.end()
 
     def enterEvent(self, event):                            # noqa: N802
         self._timer.stop()                      # stays while the pointer is on it

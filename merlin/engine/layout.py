@@ -81,6 +81,8 @@ class DisplayList:
         self.simplified = False          # the time budget ran out: estimates used
         self.canvas_gradients = []       # a gradient on <html> or <body>: the whole page
         self.boxes = []                  # (rect, element) of each box: what a click lands on
+        self.animated = False            # whether anything on it is animated: paint keeps time
+        self.animated_boxes = []         # where: only those in view are drawn again
         self.sticky = []                 # position: sticky boxes, each a dict (see Layout)
 
     def sticky_offset(self, info: dict, scroll: float) -> float:
@@ -122,10 +124,19 @@ class _Fonts:
         for family in families:
             if family.lower() in self.GENERIC:
                 hint = self.GENERIC[family.lower()]
-                if family.lower() == "monospace":
-                    named.extend(["DejaVu Sans Mono", "Consolas", "Courier New", "monospace"])
+                # A generic name stands for real fonts, here in the list: given
+                # to Qt as only a hint, it was passed over, and a font named
+                # after it, such as Noto Color Emoji on Google, drew the text,
+                # its wide spaces opening gaps between every word.
+                named.extend(_installed_for(family.lower()))
             else:
                 named.extend(self.aliases.get(family.lower(), [family]))
+        # emoji fonts are for emoji: after every font for text, never first
+        emoji = [f for f in named if "emoji" in f.lower()]
+        named = [f for f in named if "emoji" not in f.lower()]
+        if not any(_installed(f) for f in named):
+            named.extend(_installed_for("sans-serif" if hint != QFont.StyleHint.Serif else "serif"))
+        named.extend(emoji)
         if named:
             font.setFamilies(named)
         font.setStyleHint(hint)
@@ -138,6 +149,40 @@ class _Fonts:
         return font, metrics
 
 
+FIELD_TAGS = ("input", "textarea", "select")
+_FAMILIES = None
+_FOR_GENERIC = {
+    "sans-serif": ["Segoe UI", "Arial", "Helvetica", "Liberation Sans", "DejaVu Sans", "Noto Sans", "Ubuntu", "Cantarell"],
+    "system-ui": ["Segoe UI", "Ubuntu", "Cantarell", "Noto Sans", "DejaVu Sans", "Arial"],
+    "serif": ["Times New Roman", "Georgia", "Liberation Serif", "DejaVu Serif", "Noto Serif", "Times"],
+    "monospace": ["Consolas", "Cascadia Mono", "DejaVu Sans Mono", "Liberation Mono", "Courier New", "Noto Sans Mono"],
+    "cursive": ["Comic Sans MS", "URW Chancery L"],
+    "fantasy": ["Impact", "Papyrus"],
+}
+
+
+def _installed(family: str) -> bool:
+    global _FAMILIES
+    if _FAMILIES is None:
+        from PyQt6.QtGui import QFontDatabase
+
+        _FAMILIES = {name.lower() for name in QFontDatabase.families()}
+    return family.lower() in _FAMILIES
+
+
+def _installed_for(generic: str) -> list:
+    """The installed fonts a generic family (sans-serif, serif...) means here,
+    the system's own font among them for sans-serif and system-ui."""
+    found = [name for name in _FOR_GENERIC.get(generic, []) if _installed(name)]
+    if generic in ("sans-serif", "system-ui", "cursive", "fantasy"):
+        from PyQt6.QtGui import QFontDatabase
+
+        system = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont).family()
+        if system and system not in found and "emoji" not in system.lower():
+            found.append(system)
+    return found
+
+
 def _px(value, reference: float = 0.0, auto: float | None = 0.0) -> float | None:
     """A computed length as px: percentages of reference, 'auto' as auto."""
     if value == "auto" or value is None:
@@ -146,6 +191,43 @@ def _px(value, reference: float = 0.0, auto: float | None = 0.0) -> float | None
         return reference * value[1] / 100
     return float(value)
 
+
+
+def _origin(value, width: float, height: float):
+    """transform-origin (or perspective-origin) as a point in the box.
+
+    Keywords (left, center, right, top, bottom), lengths and percentages, as
+    CSS gives them; 50% 50% when not set.
+    """
+    words = str(value or "").strip().lower().split()
+    x, y = width / 2, height / 2
+    spots = {"left": ("x", 0.0), "right": ("x", 1.0), "top": ("y", 0.0), "bottom": ("y", 1.0)}
+    horizontal_set = False
+    for index, word in enumerate(words[:2]):
+        if word in spots:
+            axis, share = spots[word]
+            if axis == "x":
+                x = width * share
+                horizontal_set = True
+            else:
+                y = height * share
+            continue
+        if word == "center":
+            continue
+        try:
+            if word.endswith("%"):
+                amount = float(word[:-1]) / 100
+                value_px = amount * (width if (index == 0 and not horizontal_set) else height)
+            else:
+                value_px = float(word[:-2]) if word.endswith("px") else float(word)
+        except ValueError:
+            continue
+        if index == 0:
+            x = value_px
+            horizontal_set = True
+        else:
+            y = value_px
+    return x, y
 
 class Layout:
     def __init__(self, document, styles: dict, width: float, zoom: float = 1.0,
@@ -174,6 +256,7 @@ class Layout:
         # within the pass and give a wrong answer.
         self._measured: dict = {}
         self._sticky_waiting: dict = {}   # parent element -> its sticky children
+        self._perspectives: list = []     # the perspectives the boxes being laid out are seen in
         # each element's place in the page, for painting equal z-indexes in order
         self._tree_order = {id(e): n for n, e in enumerate(document.root.elements(), 1)}
         # A time budget for the pass: past it, measuring gives way to quick
@@ -231,6 +314,8 @@ class Layout:
                 fixed.items.extend(self.out.items)
                 fixed.links.extend(self.out.links)
                 fixed.boxes.extend(self.out.boxes)
+                fixed.animated = fixed.animated or self.out.animated
+                fixed.animated_boxes.extend(self.out.animated_boxes)
                 try:
                     z = int(str(style.get("z-index", "auto")).strip())
                 except ValueError:
@@ -272,6 +357,10 @@ class Layout:
                 pinned -= 1
             elif not pinned:
                 bottom = max(bottom, _bottom_edge(item))
+        # boxes count whether or not anything is drawn in them, as in a browser:
+        # an empty absolutely placed box below the rest had left it unreachable
+        for rect, _element in self.out.boxes:
+            bottom = max(bottom, rect.bottom())
         self.out.height = max(height, bottom)
         self.out.width = self.width
         return self.out
@@ -362,6 +451,18 @@ class Layout:
             context = given or style.get("position") in ("fixed", "sticky")
             self.out.items.append(("layer_push", z_index, context,
                                    self._tree_order.get(id(element), 0)))
+        # A transform, or an animation of one or of opacity, is drawn by paint
+        # at the element's box, and makes it a stacking context, as in CSS.
+        from .css import TransformOps
+
+        transform_ops = style.get("transform") if isinstance(style.get("transform"), TransformOps) else None
+        animations = style.get("animations")
+        moving = bool(transform_ops or animations) and not self._measuring
+        animates_opacity = bool(animations) and any(
+            "opacity" in frame[1] for animation in animations for frame in animation["frames"])
+        own_layer = moving and not layered
+        if own_layer:
+            self.out.items.append(("layer_push", 0, True, self._tree_order.get(id(element), 0)))
         sticky = None
         if style.get("position") == "sticky" and not self._measuring:
             top_offset = self._length(style.get("top"), 0.0, vertical=True)
@@ -378,8 +479,21 @@ class Layout:
             opacity = 1.0
         if _visually_hidden(style):
             opacity = 0.0
-        if opacity < 0.999 and not self._measuring:
+        if opacity < 0.999 and not self._measuring and not (moving and animates_opacity):
             self.out.items.append(("opacity_push", opacity))
+        xform_index = None
+        if moving:
+            xform_index = len(self.out.items)
+            self.out.items.append(None)          # ("xform_push", spec), once the box is known
+            if animations:
+                self.out.animated = True
+        # a perspective is for the children: where it is seen from, once known
+        perspective = None
+        depth = self._length(style.get("perspective"), 0.0) if style.get("perspective") not in (
+            None, "none") and not self._measuring else None
+        if depth:
+            perspective = {"depth": depth, "origin": style.get("perspective-origin"), "box": None}
+            self._perspectives.append(perspective)
         # the background goes under the children, so its place is kept now
         background_index = len(self.out.items)
         links_before = len(self.out.links)
@@ -400,6 +514,10 @@ class Layout:
         # and grows to hold them
         display = style.get("display")
         new_context = (root_level or style.get("_bfc") or style.get("float") in ("left", "right")
+                       # a clearfix (its ::after clears) contains its floats,
+                       # as a new context does: GitHub's profile name, floated,
+                       # had run on and pushed the sidebar's details beside it
+                       or style.get("-merlin-clear-after") in ("left", "right", "both")
                        or position in ("absolute", "fixed")
                        or style.get("overflow") not in (None, "", "visible")
                        or display in ("flow-root", "table", "table-cell", "inline-block",
@@ -421,10 +539,12 @@ class Layout:
         elif element.tag == "svg":
             inner_height, first_baseline = self._svg_block(element, style, content_x,
                                                            content_y, content_width)
-        elif style.get("display") in ("grid", "inline-grid"):
+        # a form field is a field whatever its display: Google's search box is a
+        # textarea with display: flex, laid out as a flex box with no field in it
+        elif style.get("display") in ("grid", "inline-grid") and element.tag not in FIELD_TAGS:
             inner_height, first_baseline = self._grid(
                 element, style, content_x, content_y, content_width, room=fixed_height)
-        elif style.get("display") in ("flex", "inline-flex"):
+        elif style.get("display") in ("flex", "inline-flex") and element.tag not in FIELD_TAGS:
             inner_height, first_baseline = self._flex(
                 element, style, content_x, content_y, content_width,
                 room=fixed_height, least=min_height)
@@ -525,7 +645,24 @@ class Layout:
                     kept.append((inside_rect, target))
             del self.out.links[clip_links:]
             self.out.links.extend(kept)
-        if opacity < 0.999 and not self._measuring:
+        if perspective is not None:
+            perspective["box"] = (box.x(), box.y(), box.width(), box.height())
+            self._perspectives.pop()
+        if xform_index is not None:
+            # the element's own box and origin; the perspective of the parent
+            # it sits in, if any; and its animations, played by paint
+            bx, by, bw, bh = box.x(), box.y(), box.width(), box.height()
+            ox, oy = _origin(style.get("transform-origin"), bw, bh)
+            seen = self._perspectives[-1] if self._perspectives else None
+            self.out.items[xform_index] = ("xform_push", {
+                "box": (bx, by, bw, bh), "origin": (bx + ox, by + oy, 0.0),
+                "ops": list(transform_ops or []), "animations": animations,
+                "opacity": opacity, "animates_opacity": animates_opacity,
+                "perspective": seen, "backface": style.get("backface-visibility") == "hidden"})
+            self.out.items.append(("xform_pop",))
+            if animations:
+                self.out.animated_boxes.append(QRectF(box))
+        if opacity < 0.999 and not self._measuring and not (moving and animates_opacity):
             self.out.items.append(("opacity_pop",))
         if sticky is not None:
             sticky["height"] = box.height()
@@ -535,6 +672,8 @@ class Layout:
         for info in self._sticky_waiting.pop(element, []):
             info["limit"] = content_y + inner_height
         if layered:
+            self.out.items.append(("layer_pop",))
+        if own_layer:
             self.out.items.append(("layer_pop",))
 
         if style.get("display") == "list-item" and first_baseline is not None:
@@ -720,6 +859,12 @@ class Layout:
                 run.append(child)
         flush_run()
         cursor += pending_margin
+        if style.get("-merlin-clear-after") in ("left", "right", "both"):
+            # its ::after clears floats (the clearfix): the box ends below them,
+            # and they go no further
+            below = self._floats_bottom(style["-merlin-clear-after"])
+            if below is not None and below > cursor:
+                cursor = below
         return cursor - y, first_baseline
 
     # ------------------------------------------------------------ lengths
@@ -879,9 +1024,15 @@ class Layout:
         for element, item_style in items:
             margin, padding, border = self._edges(item_style, width)
             edges = padding[1] + padding[3] + border[1] + border[3]
-            fixed = self._length(item_style.get("width"), width)
+            # with box-sizing: border-box, a width (and flex-basis, min and max)
+            # includes padding and border, which come off it here: GitHub's
+            # pinned repositories, two at 50% with padding, had wrapped to one
+            # a row
+            inner = (lambda value: None if value is None else max(0.0, value - edges)) \
+                if item_style.get("box-sizing") == "border-box" else (lambda value: value)
+            fixed = inner(self._length(item_style.get("width"), width))
             basis_value = item_style.get("flex-basis", "auto")
-            basis = self._length(basis_value, width) if basis_value not in (None, "auto") else None
+            basis = inner(self._length(basis_value, width)) if basis_value not in (None, "auto") else None
             if basis is None:
                 basis = fixed if fixed is not None else self._natural_width(element, item_style, False)
             # The automatic minimum is the smaller of the narrowest content and
@@ -890,8 +1041,8 @@ class Layout:
             narrowest = self._natural_width(element, item_style, True)
             if fixed is not None:
                 narrowest = min(narrowest, fixed)
-            low = self._length(item_style.get("min-width"), width)
-            high = self._length(item_style.get("max-width"), width)
+            low = inner(self._length(item_style.get("min-width"), width))
+            high = inner(self._length(item_style.get("max-width"), width))
             # an item's automatic minimum is its narrowest content
             floor = low if low is not None else narrowest
             size = max(basis, low or 0.0)
@@ -1724,6 +1875,8 @@ class Layout:
             return track[1] * self.zoom
         if kind == "pct":
             return room * track[1] / 100
+        if kind == "mix":                         # calc() of a percentage and lengths
+            return max(0.0, room * track[1] / 100 + track[2] * self.zoom)
         if kind == "minmax":
             return self._track_floor(track[1], room)
         return 0.0
@@ -1883,19 +2036,19 @@ class Layout:
         sizes, flexible = [], {}
         for index, track in enumerate(column_tracks):
             kind = track[0]
-            if kind in ("px", "pct"):
+            if kind in ("px", "pct", "mix"):
                 sizes.append(self._track_floor(track, width))
             elif kind == "fr":
                 sizes.append(low[index])
                 flexible[index] = (track[1], low[index])
             elif kind == "minmax":
-                floor = self._track_floor(track[1], width) if track[1][0] in ("px", "pct") \
+                floor = self._track_floor(track[1], width) if track[1][0] in ("px", "pct", "mix") \
                     else (low[index] if track[1][0] in ("auto", "min") else high[index])
                 ceiling = track[2]
                 if ceiling[0] == "fr":
                     sizes.append(floor)
                     flexible[index] = (ceiling[1], floor)
-                elif ceiling[0] in ("px", "pct"):
+                elif ceiling[0] in ("px", "pct", "mix"):
                     sizes.append(max(floor, min(self._track_floor(ceiling, width),
                                                 max(high[index], floor))))
                 else:
@@ -1906,6 +2059,25 @@ class Layout:
                 sizes.append(high[index])
         gaps = column_gap * (len(sizes) - 1)
         free = width - sum(sizes) - gaps
+        # Maximize tracks, as the specification orders it: room left first
+        # grows tracks with a definite most (minmax(0, 960px), or GitHub's
+        # minmax(0, calc(100% - sidebar - gutter))) towards it, shared evenly,
+        # before fr tracks take any or auto tracks are stretched. Left out,
+        # GitHub's main column stayed as narrow as a word.
+        limits = {}
+        for index, track in enumerate(column_tracks):
+            if track[0] == "minmax" and track[2][0] in ("px", "pct", "mix") and index not in flexible:
+                limit = self._track_floor(track[2], width)
+                if limit > sizes[index]:
+                    limits[index] = limit
+        while free > 0.5 and limits:
+            share = free / len(limits)
+            for index in list(limits):
+                grow = min(share, limits[index] - sizes[index])
+                sizes[index] += grow
+                free -= grow
+                if limits[index] - sizes[index] < 0.5:
+                    del limits[index]
         if flexible and free > 0:
             # share the room left among the fr tracks, none below its floor
             active = dict(flexible)

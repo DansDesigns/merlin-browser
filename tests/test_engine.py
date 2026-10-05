@@ -1893,6 +1893,18 @@ def test_overlays_and_document_order(app) -> None:
         view.close()
 
 
+def _shown_style(view, eid) -> dict:
+    """The computed style of the element with id eid and of its nearest hidden
+    ancestor, if one is: display none anywhere above counts."""
+    element = next((x for x in view._document.root.elements() if x.id == eid), None)
+    while element is not None:
+        style = view._styles.get(element, {})
+        if style.get("display") == "none":
+            return style
+        element = element.parent
+    return {}
+
+
 def _deno_for_tests() -> str:
     from merlin.media import deno_path
 
@@ -1950,6 +1962,44 @@ def test_javascript(app) -> None:
         "<body><div id=hero>pinned</div><div id=sentinel></div><p id=mapped>waiting</p><p id=elements></p>"
         "<div id=measured></div><p id=size></p><div style='height:3000px'></div>"
         "<script type=module src=/js/fade.js></script></body></html>")
+    open(os.path.join(folder, "order.js"), "w").write(
+        "document.getElementById('order').textContent = 'config: ' + window.siteConfig.name;\n"
+        "document.getElementById('domain').textContent = 'domain: ' + document.domain;\n"
+        "requestAnimationFrame(() => { const broken = undefined; broken.charAt(0); });\n"
+        "setTimeout(() => { document.getElementById('after').textContent = 'still running after the error'; }, 300);")
+    open(os.path.join(folder, "order.html"), "w").write(
+        "<!DOCTYPE html><html><head><title>Order</title><script defer src='/order.js'></script></head>"
+        "<body><p id=order>waiting</p><p id=domain></p><p id=after></p>"
+        "<script>window.siteConfig = { name: 'alterniTech' };</script></body></html>")
+    open(os.path.join(folder, "js", "n.js"), "w").write("export const n = 42;")
+    open(os.path.join(folder, "features.html"), "w").write(
+        "<!DOCTYPE html><html><head><title>Features</title></head><body>"
+        "<p id=a></p><p id=b></p><p id=c></p><p id=d></p><p id=e></p>"
+        "<script>const out = (id, t) => document.getElementById(id).textContent = t;"
+        "out('a', 'process: ' + typeof process + ', Buffer: ' + typeof Buffer);"
+        "out('b', 'escape: ' + CSS.escape('1a.b') + ', supports: ' + CSS.supports('display', 'grid'));"
+        "out('c', 'selectors: ' + document.querySelectorAll(':target, p').length + ' ' + document.body.matches(':hover'));"
+        "import('/js/n.js').then(m => out('d', 'plain-script import(): ' + m.n));</script>"
+        "<script type=module>import { n } from './js/n.js'; out('e', 'inline module static import: ' + n);</script>"
+        "</body></html>")
+    open(os.path.join(folder, "google-like.html"), "w").write(
+        "<!DOCTYPE html><html><head><title>G</title>"
+        "<noscript><style>table,div,span,p{display:none}</style></noscript><style>p{margin:0}</style></head><body>"
+        "<div><p id=made>waiting</p></div><p id=parts></p><input name=q><input name=q><p id=elements></p>"
+        "<p id=sheets></p><p id=busy>0</p>"
+        "<script>document.getElementById('made').textContent = 'made by script';"
+        "var s = document.createElement('a'); s.href = 'https://example.test/shop/item?x=1#top';"
+        "document.getElementById('parts').textContent = [s.protocol, s.host, s.pathname, s.search, s.hash, s.pathname.charAt(0)].join(' | ');"
+        "const out = ['byName: ' + document.getElementsByName('q').length];"
+        "customElements.define('toggle-switch', class extends HTMLElement {});"
+        "try { customElements.define('toggle-switch', class extends HTMLElement {}); out.push('no refusal'); }"
+        "catch (e) { out.push('refused: ' + (e instanceof DOMException) + ' ' + e.name); }"
+        "document.getElementById('elements').textContent = out.join(' | ');"
+        "var extra = document.createElement('style'); document.head.appendChild(extra);"
+        "extra.sheet.insertRule('.added { color: blue }', 0);"
+        "document.getElementById('sheets').textContent = 'sheets: ' + document.styleSheets.length + ', ' + extra.textContent.trim();"
+        "let n = 0; const ticking = setInterval(() => { document.getElementById('busy').textContent = String(++n);"
+        " if (n >= 100) clearInterval(ticking); }, 20);</script></body></html>")
     open(os.path.join(folder, "more.html"), "w").write(
         "<title>More</title><p id=mod>waiting</p><p id=cookie></p><p id=kept></p>"
         "<button id=old onclick=\"this.textContent='clicked inline'\" style='padding:10px'>old style</button>"
@@ -2075,9 +2125,373 @@ def test_javascript(app) -> None:
               until(view, lambda: hero() == "faded", 5), str(hero()))
         view.scrollbar.setValue(0)
         check("and scrolled back, it comes back", until(view, lambda: hero() == "", 5), str(hero()))
+        # Square's ways: defer scripts after the inline ones that set them up;
+        # and an error in a callback does not end the page's scripts
+        view.setUrl(QUrl(base + "/order.html"))
+        check("a defer script runs after the inline scripts below it, as HTML orders them",
+              until(view, lambda: text_of(view, "order") == "config: alterniTech", 15),
+              str(text_of(view, "order")))
+        check("document.domain is the page's host", text_of(view, "domain") == "domain: 127.0.0.1",
+              str(text_of(view, "domain")))
+        check("an error in a frame callback is reported, and the scripts go on",
+              until(view, lambda: text_of(view, "after") == "still running after the error", 5)
+              and view._script is not None, str(text_of(view, "after")))
+        check("and the console shows the code where it went wrong",
+              any(">>>HERE>>> charAt(0)" in text for level, text in view.console_lines),
+              str([t for level, t in view.console_lines if "near" in t][:1]))
+        # what GitHub, Google and Hugging Face tripped on
+        view.setUrl(QUrl(base + "/features.html"))
+        check("a page sees no Node globals (process, Buffer), as in a browser",
+              until(view, lambda: text_of(view, "a") == "process: undefined, Buffer: undefined", 15),
+              str(text_of(view, "a")))
+        check("CSS.escape and CSS.supports exist", text_of(view, "b") == "escape: \\31 a\\.b, supports: true",
+              str(text_of(view, "b")))
+        check("a selector with :target or :hover finds what it can rather than failing",
+              text_of(view, "c") == "selectors: 5 false", str(text_of(view, "c")))
+        check("import() in a plain script loads from the page's site, and strings are left alone",
+              until(view, lambda: text_of(view, "d") == "plain-script import(): 42", 5), str(text_of(view, "d")))
+        check("an inline module sees a plain script's const, and imports relative to the page",
+              until(view, lambda: text_of(view, "e") == "inline module static import: 42", 5),
+              str(text_of(view, "e")))
+        # Google's no-script fallback, Square's addresses, GitHub's elements
+        view.setUrl(QUrl(base + "/google-like.html"))
+        check("where scripts run, <noscript> is nothing: its style does not hide the page",
+              until(view, lambda: text_of(view, "made") == "made by script", 15)
+              and _shown_style(view, "made").get("display") != "none", str(text_of(view, "made")))
+        check("a link has its address's parts, as in a browser (Square reads link.pathname)",
+              text_of(view, "parts") == "https: | example.test | /shop/item | ?x=1 | #top | /",
+              str(text_of(view, "parts")))
+        check("document.getElementsByName, and a second definition refused with a NotSupportedError",
+              text_of(view, "elements") == "byName: 2 | refused: true NotSupportedError",
+              str(text_of(view, "elements")))
+        check("document.styleSheets lists the page's sheets, and insertRule adds to one (Google's CSS)",
+              text_of(view, "sheets") == "sheets: 2, .added { color: blue }", str(text_of(view, "sheets")))
+        applied = []
+        real_apply = view._apply_script_dom
+        view._apply_script_dom = lambda *a: (applied.append(1), real_apply(*a))
+        view._script_prepared.disconnect()
+        view._script_prepared.connect(view._apply_script_dom)
+        check("a page changed every 20ms is shown at a pace the browser can bear, ending as it ends",
+              until(view, lambda: text_of(view, "busy") == "100", 10) and len(applied) < 30,
+              f"{len(applied)} updates, showing {text_of(view, 'busy')}")
         view.close()
     finally:
         server.shutdown()
+
+
+def test_animations_and_3d(app) -> None:
+    """CSS animations, 2D and 3D transforms, played and drawn by Merlin Engine."""
+    from merlin.engine import MerlinView
+    from merlin.engine.animate import matrix, sample
+    from merlin.engine.css import parse_transform_ops
+
+    page = """<style>body{margin:0;background:#fff}
+    @media (min-width: 10px) { @keyframes slide { from { transform: translateX(0) } to { transform: translateX(-50%) } } }
+    @keyframes fadein { from { opacity: 0 } to { opacity: 1 } }
+    #strip { position:absolute; top:0; left:0; width:800px; height:40px; animation: slide 2s linear infinite;
+             background: #f00; border-left: 400px solid #00f }
+    #fade { position:absolute; top:60px; left:0; width:100px; height:40px; background:#0a0; opacity:0;
+            animation: fadein .3s linear forwards }
+    #turn { position:absolute; top:150px; left:50px; width:100px; height:100px; background:#000; transform: rotate(45deg) }
+    #stage { position:absolute; top:300px; left:300px; width:200px; height:120px; perspective: 400px }
+    #card { width:200px; height:120px; background:#f0f; transform: rotateY(60deg) }
+    #back { position:absolute; top:150px; left:300px; width:100px; height:100px; background:#ff0;
+            transform: rotateY(180deg); backface-visibility: hidden }
+    #tall { position:absolute; top:500px; height:3000px; width:10px }
+    </style><div id=strip></div><div id=fade></div><div id=turn></div><div id=stage><div id=card></div></div>
+    <div id=back></div><div id=tall></div>"""
+    view = MerlinView()
+    view.resize(700, 500)
+    view.show()
+    try:
+        view.setHtml(page, QUrl("about:blank"))
+        wait(app, 0.4)
+
+        def pixel(x, y):
+            return view.grab().toImage().pixelColor(x, y).name()
+
+        check("a page with animations keeps time", view._animation_timer.isActive())
+
+        def boundary():
+            # where the strip's blue border gives way to its red: it moves left
+            row = view.grab().toImage()
+            return next((x for x in range(0, 700) if row.pixelColor(x, 20).name() == "#ff0000"), None)
+
+        before = boundary()
+        wait(app, 0.5)
+        after = boundary()
+        check("a keyframes animation moves its element (a marquee)",
+              before is not None and after is not None and after < before - 30, f"{before} then {after}")
+        check("a fade-in from opacity 0 ends shown, and stays (forwards)", pixel(50, 80) == "#00aa00",
+              pixel(50, 80))
+        check("rotate(45deg) turns a square into a diamond",
+              pixel(52, 152) == "#ffffff" and pixel(100, 140) == "#000000",
+              f"corner {pixel(52, 152)}, top point {pixel(100, 140)}")
+        image = view.grab().toImage()
+
+        def height(x):
+            return sum(1 for y in range(260, 460) if image.pixelColor(x, y).name() == "#ff00ff")
+
+        columns = [x for x in range(280, 520) if height(x) > 0]
+        check("rotateY(60deg) in a parent's perspective is drawn foreshortened: its far edge shorter",
+              bool(columns) and columns[-1] - columns[0] < 150 and height(columns[0] + 2) > height(columns[-1] - 2) + 20,
+              f"{columns[0] if columns else None}..{columns[-1] if columns else None}")
+        check("a box turned to its back, with backface-visibility hidden, is not drawn",
+              pixel(350, 200) == "#ffffff", pixel(350, 200))
+        updates = []
+        real_update = view.update
+        view.update = lambda *a: updates.append(a)
+        view._animation_tick()
+        check("with an animation in view, its part of the window is drawn again", bool(updates))
+        view.scrollbar.setValue(1500)
+        wait(app, 0.2)
+        updates.clear()
+        view._animation_tick()
+        check("with it scrolled out of view, nothing is drawn again for it", not updates, str(updates))
+        view.update = real_update
+    finally:
+        view.close()
+    # GitHub's marquee: translateX(calc(-100% - gap)), a percentage and pixels
+    ops = parse_transform_ops("translatex(calc(-100% - 64px))", 16, 16, (1000, 800))
+    marquee = {"duration": 60.0, "iterations": float("inf"), "timing": "linear",
+               "frames": [(0.0, {"transform": parse_transform_ops("translate(0)", 16, 16, (1000, 800))}, None),
+                          (1.0, {"transform": ops}, None)]}
+    moved, _ = sample(marquee, 30.0, [], 1.0, (0, 0, 2000, 60))
+    shift = matrix(moved, (0, 0, 2000, 60), (0, 0, 0))[0][3]
+    check("calc() of a percentage and pixels in a keyframe: GitHub's marquee moves as it should",
+          abs(shift + 1032) < 1, f"{shift:.0f}px at 30s")
+
+
+def test_noscript_without_scripts_and_fonts(app) -> None:
+    """With JavaScript off, <noscript> shows, as it should; and a font list
+    with a generic family before an emoji font draws text in a text font."""
+    from merlin.engine import MerlinView
+    from merlin.engine.layout import _Fonts
+
+    view = MerlinView()
+    view.show()
+    try:
+        view.setHtml("<noscript><p id=fallback>for browsers without scripts</p></noscript>", QUrl("about:blank"))
+        wait(app, 0.3)
+        shown = next((x for x in view._document.root.elements() if x.id == "fallback"), None)
+        check("without scripts running, what is in <noscript> is shown", shown is not None)
+    finally:
+        view.close()
+    fonts = _Fonts(1.0)
+    font, metrics = fonts.get({"font-family": "Not A Real Font,sans-serif,Noto Color Emoji", "font-size": 20.0,
+                               "font-weight": 400, "font-style": "normal"})
+    families = font.families()
+    check("a generic family is real fonts in its place, and an emoji font comes after them",
+          families and "emoji" not in families[1].lower() and "emoji" in families[-1].lower()
+          if any("emoji" in f.lower() for f in families) else bool(families), str(families))
+    space, letter = metrics.horizontalAdvance(" "), metrics.horizontalAdvance("n")
+    check("so a space is an ordinary width, not an emoji font's", 0 < space <= letter, f"space {space:.1f}, n {letter:.1f}")
+
+
+def test_github_profile_layout(app) -> None:
+    """What GitHub's profile page needed: a grid column of calc(100% - ...),
+    the spare room going to it, a clearfix, and border-box flex items."""
+    from merlin.engine.css import Styler
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+    from merlin.engine.animate import sample
+
+    page = """<style>* { box-sizing: border-box } body { margin: 0 }
+    .layout { display: grid; grid-template-columns: auto 0 minmax(0, calc(100% - 300px - 20px)); grid-gap: 10px; width: 1000px }
+    .side { width: 300px } .main { grid-column: 3 }
+    .cf::after { content: ""; display: table; clear: both }
+    .name { float: left; width: 100%; height: 50px }
+    .list { display: flex; flex-wrap: wrap; width: 600px } .item { width: 50%; padding: 0 8px; height: 30px }
+    textarea { display: flex; width: 400px }</style>
+    <div class=layout><div class=side><div class=cf><div class=name>name</div></div><p id=details>details</p></div>
+    <div class=main id=main><div class=list><div class=item id=one>a</div><div class=item id=two>b</div></div></div></div>
+    <textarea name=q rows=1></textarea>"""
+    document = parse(page)
+    styles = Styler(document, viewport=(1200, 800)).compute()
+    layout = Layout(document, styles, 1200, viewport_height=800)
+    layout.live_controls = True
+    out = layout.run()
+    box = {e.attrs.get("id") or e.attrs.get("class"): r for r, e in out.boxes}
+    check("a grid column of minmax(0, calc(100% - sidebar - gutter)) gets its room, not a sliver",
+          box["main"].width() > 600, f"{box['main'].width():.0f}px")
+    check("a clearfix contains its floats: what follows starts below them, not beside",
+          box["details"].x() == box["side"].x() and box["details"].y() >= box["name"].bottom(),
+          f"details at x {box['details'].x():.0f}, y {box['details'].y():.0f}")
+    check("border-box flex items of 50% with padding sit two to a row",
+          abs(box["one"].y() - box["two"].y()) < 1 and box["two"].x() > box["one"].x(),
+          f"{box['one']} {box['two']}")
+    check("a textarea with display: flex is still a field, with a text box to type in",
+          any(it and it[0] == "control" and it[2].tag == "textarea" for it in out.items))
+    zero = {"duration": 0.0, "iterations": float("inf"), "timing": "linear", "fill": "none",
+            "frames": [(0.0, {"opacity": 0.0}, None), (1.0, {"opacity": 1.0}, None)]}
+    try:
+        result = sample(zero, 1.0, [], 1.0, (0, 0, 10, 10))
+        check("an infinite animation of no duration is over at once, not an error every frame",
+              result == (None, None), str(result))
+    except Exception as exc:                               # noqa: BLE001
+        check("an infinite animation of no duration is over at once, not an error every frame", False, str(exc))
+    document = parse("<style>:root{--d:1s}@keyframes b{from{opacity:0}to{opacity:1}}"
+                     "#x{animation-name:b;animation-duration:var(--d)}</style><div id=x></div>")
+    styles = Styler(document).compute()
+    timed = styles[next(e for e in document.root.elements() if e.id == "x")]["animations"][0]["duration"]
+    check("an animation's duration given by var() is read (animate.css)", timed == 1.0, f"{timed}s")
+
+
+def test_modern_colours() -> None:
+    """CSS Color 4 and 5, as GitHub uses them: unread, faint lines came out solid."""
+    from merlin.engine.css import parse_colour
+
+    for text, wanted in (("color-mix(in srgb, #fff 10%, transparent)", (255, 255, 255, 26)),
+                         ("color-mix(in srgb, red, blue)", (128, 0, 128, 255)),
+                         ("color-mix(in srgb, red 30%, blue 30%)", (128, 0, 128, 153)),
+                         ("color-mix(in oklab, white, black)", (99, 99, 99, 255)),
+                         ("oklab(0.5 0 0)", (99, 99, 99, 255)),
+                         ("hwb(120 0% 0%)", (0, 255, 0, 255)),
+                         ("color(srgb 1 0 0 / 0.5)", (255, 0, 0, 128)),
+                         ("light-dark(#fff, #000)", (255, 255, 255, 255)),
+                         ("rgb(from #ff0000 r g b / 50%)", (255, 0, 0, 128))):
+        check(f"{text} is {wanted}", parse_colour(text) == wanted, str(parse_colour(text)))
+
+
+def test_server_pages_and_http_fallback(app) -> None:
+    """A server's own error page is shown, as in a browser; and an address
+    typed with no scheme, whose site does not answer on https, opens over http."""
+    from PyQt6.QtWidgets import QLabel
+
+    from merlin.engine import MerlinView
+    import merlin.engine.view as engine_view
+
+    folder = tempfile.mkdtemp(prefix="merlin-pages-")
+    open(os.path.join(folder, "index.html"), "w").write("<title>Plain</title><p>over http</p>")
+
+    class Site(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+        def send_error(self, code, message=None, explain=None):
+            body = b"<title>Our own 404</title><p>Nothing here, from the site itself</p>"
+            self.send_response(code)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Site)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    said = []
+
+    class Host:
+        settings = {}
+        status_label = QLabel()
+
+        def javascript_allowed(self, site):
+            return False
+
+    host = Host()
+    real = host.status_label.setText
+    host.status_label.setText = lambda text: (said.append(text), real(text))
+    view = MerlinView()
+    view._host = host
+    view.show()
+    try:
+        view.setUrl(QUrl(f"http://127.0.0.1:{server.server_address[1]}/missing.html"))
+        wait(app, 1.5)
+        check("a server's own error page is shown, as browsers show it", view.title() == "Our own 404",
+              view.title())
+    finally:
+        server.shutdown()
+    try:
+        plain = http.server.ThreadingHTTPServer(("127.0.0.1", 80), Site)
+    except OSError:
+        print("  skip  http fallback: port 80 is not free here")
+        view.close()
+        return
+    threading.Thread(target=plain.serve_forever, daemon=True).start()
+    pauses = engine_view.RETRY_PAUSES
+    engine_view.RETRY_PAUSES = (0.1, 0.1)
+    try:
+        engine_view.HTTP_ONLY_HOSTS.clear()
+        view.setProperty("http_fallback", "127.0.0.1")
+        view.setUrl(QUrl("https://127.0.0.1/index.html"))
+        wait(app, 3.0)
+        check("from the address bar, a site not answering on https opens over http, saying so",
+              view.title() == "Plain" and any(t.startswith("Not secure") for t in said), view.title())
+        view.setUrl(QUrl("https://127.0.0.1/index.html"))
+        wait(app, 3.0)
+        check("found to answer only on http, the site is remembered: a link to it opens over http",
+              view.title() == "Plain", view.title())
+        engine_view.HTTP_ONLY_HOSTS.clear()
+        view.setUrl(QUrl("https://127.0.0.1/index.html"))
+        wait(app, 3.0)
+        check("but a link to https:// for a site not known to need http is never opened over http",
+              view.title() != "Plain", view.title())
+    finally:
+        engine_view.RETRY_PAUSES = pauses
+        plain.shutdown()
+        view.close()
+
+
+def test_connection_retry(app) -> None:
+    """A connection that fails is tried again before the page says it could
+    not be opened; a server's own answer, such as 404, is not."""
+    from PyQt6.QtWidgets import QLabel
+
+    from merlin.engine import MerlinView
+
+    folder = tempfile.mkdtemp(prefix="merlin-retry-")
+    open(os.path.join(folder, "index.html"), "w").write("<title>Late</title><p>here on a later try</p>")
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+    probe = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
+    port = probe.server_address[1]
+    probe.server_close()                      # a port that will be free, not yet listening
+    servers = []
+
+    def start_late():
+        time.sleep(1.5)
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Quiet)
+        servers.append(server)
+        server.serve_forever()
+
+    threading.Thread(target=start_late, daemon=True).start()
+    said = []
+
+    class Host:
+        settings = {}
+        status_label = QLabel()
+
+        def javascript_allowed(self, site):
+            return False
+
+    host = Host()
+    real = host.status_label.setText
+    host.status_label.setText = lambda text: (said.append(text), real(text))
+    view = MerlinView()
+    view._host = host
+    view.show()
+    try:
+        view.setUrl(QUrl(f"http://127.0.0.1:{port}/index.html"))
+        wait(app, 6.0)
+        check("a refused connection is retried, saying so, and the page then loads",
+              any(t.startswith("Retrying connection") for t in said) and view.title() == "Late",
+              f"{[t for t in said if 'Retrying' in t]} | {view.title()!r}")
+        said.clear()
+        view.setUrl(QUrl(f"http://127.0.0.1:{port}/missing.html"))
+        wait(app, 2.0)
+        check("a 404 is not retried", not any("Retrying" in t for t in said), str(said))
+    finally:
+        view.close()
+        for server in servers:
+            server.shutdown()
 
 
 def test_view(app) -> None:
@@ -2138,8 +2552,9 @@ def test_view(app) -> None:
               view.title() == "One" and view.history().canGoForward())
         view.setUrl(QUrl(base + "missing.html"))
         wait(app, 1.5)
-        check("a failed load shows an error page instead of hanging",
-              heard["finished"][-1] is False and "could not open" in view.title().lower())
+        # since 1.8.4 the server's own error page is shown, as browsers show it
+        check("a missing page shows the server's error page instead of hanging",
+              bool(heard["finished"]) and view.title() == "Error response", view.title())
     finally:
         server.shutdown()
         view.close()
@@ -2180,6 +2595,18 @@ def main() -> int:
     test_overlays_and_document_order(app)
     print("test_javascript")
     test_javascript(app)
+    print("test_connection_retry")
+    test_connection_retry(app)
+    print("test_modern_colours")
+    test_modern_colours()
+    print("test_noscript_without_scripts_and_fonts")
+    test_noscript_without_scripts_and_fonts(app)
+    print("test_github_profile_layout")
+    test_github_profile_layout(app)
+    print("test_animations_and_3d")
+    test_animations_and_3d(app)
+    print("test_server_pages_and_http_fallback")
+    test_server_pages_and_http_fallback(app)
     print("test_forms")
     test_forms(app)
     print("test_view")

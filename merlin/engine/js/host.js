@@ -6,6 +6,7 @@
 // the content blocker), storage, navigation. After scripts change the page,
 // the new page is sent back for Merlin Engine to style and lay out.
 import { parseHTML } from "./linkedom.bundle.js";
+import vm from "node:vm";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -235,6 +236,30 @@ function install(html) {
     });
   } catch (_) {}
   try { Object.defineProperty(document_, "visibilityState", { get: () => "visible", configurable: true }); } catch (_) {}
+  // what a browser's document has and linkedom's did not: GitHub's scripts
+  // stopped on "Unable to get document domain"
+  const documentProperties = {
+    domain: () => new URL(state.url).hostname, characterSet: () => "UTF-8", charset: () => "UTF-8",
+    inputEncoding: () => "UTF-8", compatMode: () => "CSS1Compat", contentType: () => "text/html",
+    designMode: () => "off", lastModified: () => new Date().toLocaleString("en-US"),
+    scrollingElement: () => document_.documentElement, fullscreenElement: () => null,
+    pointerLockElement: () => null, pictureInPictureElement: () => null,
+  };
+  for (const [name, getter] of Object.entries(documentProperties)) {
+    let present;
+    try { present = document_[name]; } catch (_) { present = undefined; }
+    if (present === undefined) { try { Object.defineProperty(document_, name, { get: getter, configurable: true }); } catch (_) {} }
+  }
+  let activeElement;
+  try { activeElement = document_.activeElement; } catch (_) {}
+  if (activeElement === undefined) { try { Object.defineProperty(document_, "activeElement", { get: () => document_.body, configurable: true }); } catch (_) {} }
+  if (!document_.fonts) {
+    const fonts = { ready: Promise.resolve(), status: "loaded", size: 0, check: () => true, load: async () => [],
+                    add() {}, delete() {}, clear() {}, forEach() {}, has: () => false, values: () => [][Symbol.iterator](),
+                    addEventListener() {}, removeEventListener() {} };
+    fonts.ready = Promise.resolve(fonts);
+    try { Object.defineProperty(document_, "fonts", { value: fonts, configurable: true }); } catch (_) {}
+  }
   try { Object.defineProperty(document_, "hidden", { get: () => false, configurable: true }); } catch (_) {}
   document_.hasFocus = () => true;
   g.history = {
@@ -273,9 +298,9 @@ function install(html) {
     media: String(query), get matches() { return evaluateMedia(query); }, onchange: null,
     addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent() { return false; },
   });
-  const frame = (cb) => setTimeout(() => cb(performance.now()), 16);
+  const frame = (cb) => setTimeout(() => { try { cb(performance.now()); } catch (e) { reportError(e); } }, 16);
   g.requestAnimationFrame = frame; g.cancelAnimationFrame = (id) => clearTimeout(id);
-  g.requestIdleCallback = (cb) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 10 }), 1);
+  g.requestIdleCallback = (cb) => setTimeout(() => { try { cb({ didTimeout: false, timeRemaining: () => 10 }); } catch (e) { reportError(e); } }, 1);
   g.cancelIdleCallback = (id) => clearTimeout(id);
   g.getComputedStyle = (element) => {
     const inline = element && element.style ? element.style : {};
@@ -364,6 +389,125 @@ function install(html) {
   typed(g.HTMLButtonElement, function () {
     const t = (this.getAttribute("type") || "").toLowerCase(); return ["submit", "reset", "button"].includes(t) ? t : "submit"; });
   installHandlers(g, made);
+  // document.styleSheets: the page's stylesheets, a live list, as Google's
+  // CSS loader reads its length. A rule inserted into a <style> sheet is added
+  // to its text, so Merlin Engine styles the page with it.
+  const sheets = new WeakMap();
+  const sheetOf = (node) => {
+    let sheet = sheets.get(node);
+    if (sheet) return sheet;
+    const rules = [];
+    sheet = {
+      ownerNode: node, type: "text/css", disabled: false, title: node.getAttribute("title"),
+      get href() { return node.tagName === "LINK" ? new URL(node.getAttribute("href") || "", state.url).href : null; },
+      media: { mediaText: node.getAttribute("media") || "", length: 0 },
+      get cssRules() { return rules; }, get rules() { return rules; },
+      insertRule(text, index = 0) {
+        rules.splice(index, 0, { cssText: String(text) });
+        if (node.tagName === "STYLE") node.textContent = (node.textContent || "") + "\n" + String(text);
+        return index;
+      },
+      deleteRule(index) { rules.splice(index, 1); },
+      addRule(selector, body, index) { return this.insertRule(`${selector} { ${body} }`, index ?? rules.length); },
+      removeRule(index) { this.deleteRule(index ?? 0); },
+    };
+    sheets.set(node, sheet);
+    return sheet;
+  };
+  try {
+    Object.defineProperty(document_, "styleSheets", { configurable: true, get() {
+      return [...document_.querySelectorAll("style, link[rel~=stylesheet]")].map(sheetOf);
+    } });
+  } catch (_) {}
+  for (const cls of [g.HTMLStyleElement, g.HTMLLinkElement]) {
+    if (typeof cls !== "function") continue;
+    try { Object.defineProperty(cls.prototype, "sheet", { configurable: true, get() { return sheetOf(this); } }); } catch (_) {}
+  }
+  // document.getElementsByName, which GitHub's behaviours script uses
+  for (const proto of [Object.getPrototypeOf(document_), g.Document?.prototype].filter(Boolean)) {
+    if (typeof proto.getElementsByName !== "function") {
+      try {
+        Object.defineProperty(proto, "getElementsByName", { configurable: true, writable: true,
+          value(name) { return this.querySelectorAll(`[name="${String(name).replace(/["\\]/g, "\\$&")}"]`); } });
+      } catch (_) {}
+    }
+  }
+  // A second definition of an element is refused as browsers refuse it, with
+  // a NotSupportedError: GitHub defines some twice and expects that refusal,
+  // which linkedom gave as a plain Error that GitHub's code did not recognise.
+  if (g.customElements && typeof g.customElements.define === "function") {
+    const registry = g.customElements;
+    const define = registry.define.bind(registry);
+    registry.define = (name, constructor, options) => {
+      if (registry.get(name)) {
+        throw new DOMException(`Failed to execute 'define' on 'CustomElementRegistry': the name "${name}" has already been used with this registry`, "NotSupportedError");
+      }
+      return define(name, constructor, options);
+    };
+  }
+  // A link's address and its parts, as every browser's <a> and <area> have
+  // them: Square's sites read link.pathname to take addresses apart, and,
+  // with it undefined, stopped before building the site.
+  for (const cls of [g.HTMLAnchorElement, g.HTMLAreaElement]) {
+    if (typeof cls !== "function") continue;
+    const whole = function () {
+      const raw = this.getAttribute("href");
+      if (raw === null) return null;
+      try { return new URL(raw, state.url); } catch (_) { return null; }
+    };
+    const parts = ["protocol", "host", "hostname", "port", "pathname", "search", "hash", "username", "password"];
+    try {
+      Object.defineProperty(cls.prototype, "href", { configurable: true,
+        get() { const u = whole.call(this); return u ? u.href : (this.getAttribute("href") ?? ""); },
+        set(value) { this.setAttribute("href", String(value)); } });
+      Object.defineProperty(cls.prototype, "origin", { configurable: true,
+        get() { const u = whole.call(this); return u ? u.origin : ""; } });
+    } catch (_) {}
+    for (const part of parts) {
+      try {
+        Object.defineProperty(cls.prototype, part, { configurable: true,
+          get() { const u = whole.call(this); return u ? u[part] : ""; },
+          set(value) {
+            const u = whole.call(this);
+            if (!u) return;
+            u[part] = value;
+            this.setAttribute("href", u.href);
+          } });
+      } catch (_) {}
+    }
+  }
+  // Node's globals, which Deno has and no browser does, go: GitHub's code saw
+  // process, took itself to be in Node, and failed reading process.env
+  for (const name of ["process", "Buffer", "global", "setImmediate", "clearImmediate"]) {
+    try { delete g[name]; } catch (_) {}
+  }
+  g.CSS = {
+    escape(value) {
+      // as the CSSOM specification gives it
+      const text = String(value); let out = "";
+      for (let i = 0; i < text.length; i++) {
+        const c = text.charCodeAt(i), ch = text[i];
+        if (c === 0) out += "\uFFFD";
+        else if ((c >= 1 && c <= 31) || c === 127 || (i === 0 && c >= 48 && c <= 57)
+                 || (i === 1 && c >= 48 && c <= 57 && text.charCodeAt(0) === 45)) out += "\\" + c.toString(16) + " ";
+        else if (i === 0 && text.length === 1 && c === 45) out += "\\" + ch;
+        else if (c >= 128 || c === 45 || c === 95 || (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)) out += ch;
+        else out += "\\" + ch;
+      }
+      return out;
+    },
+    supports(property, value) {
+      if (value === undefined) {
+        const text = String(property).trim();
+        const selector = text.match(/^selector\((.*)\)$/s);
+        if (selector) { try { document_.querySelector(selector[1]); return true; } catch (_) { return false; } }
+        return /[a-z-]+\s*:/.test(text);
+      }
+      return /^-{0,2}[a-z][a-z-]*$/i.test(String(property));
+    },
+    registerProperty() {}, highlights: new Map(), paintWorklet: { addModule: async () => {} },
+  };
+  patchSelectors(g);
   // In a browser HTMLElement has no observedAttributes, and a page may assign
   // one to its element class; linkedom's base class has it as a getter only,
   // and GitHub's elements failed to load on assigning it.
@@ -399,8 +543,15 @@ function install(html) {
     if (!proto[name]) proto[name] = function () { return name === "animate" ? { finished: Promise.resolve(), cancel() {}, play() {}, pause() {}, addEventListener() {} } : undefined; };
   }
   if (!("isConnected" in proto)) Object.defineProperty(proto, "isConnected", { get() { return this.ownerDocument?.contains?.(this) ?? true; }, configurable: true });
-  g.reportError = (error) => send({ type: "console", level: "error", text: `Uncaught ${safeString(error)}${error && error.stack ? "\n" + String(error.stack).split("\n").slice(1, 4).join("\n") : ""}` });
-  g.addEventListener("error", (event) => { g.reportError(event.error ?? event.message); });
+  g.reportError = (error) => {
+    send({ type: "console", level: "error", text: `Uncaught ${safeString(error)}${error && error.stack ? "\n" + String(error.stack).split("\n").slice(1, 4).join("\n") : ""}` });
+    showWhere(error).catch(() => {});
+  };
+  // An uncaught error, in a timer or an event, is reported and the page goes
+  // on, as in a browser. Deno ends the process on one by default: one error in
+  // GitHub's scripts had ended all of them.
+  g.addEventListener("error", (event) => { event.preventDefault?.(); g.reportError(event.error ?? event.message); });
+  g.addEventListener("unhandledrejection", (event) => { event.preventDefault?.(); g.reportError(event.reason); });
 }
 
 // Event handler properties (oninput, onclick...), as every browser has them on
@@ -417,6 +568,43 @@ const HANDLED = ["abort", "animationend", "animationstart", "auxclick", "beforei
   "selectionchange", "submit", "toggle", "transitionend", "wheel", "beforeunload", "hashchange",
   "message", "popstate", "storage", "unload", "readystatechange", "DOMContentLoaded", "visibilitychange"];
 const handlers = new WeakMap();
+
+// Selectors linkedom does not know, which a browser does: a state no script
+// can be in here (:target, :hover...) matches nothing, as it would at that
+// moment; :defined matches all. GitHub's scripts stopped on :target.
+const ALWAYS = new Set(["defined", "scope"]);
+function forgiving(original) {
+  return function (selector, ...rest) {
+    let text = String(selector);
+    for (let tries = 0; tries < 8; tries++) {
+      try { return original.call(this, text, ...rest); }
+      catch (error) {
+        const found = String(error && error.message).match(/Unknown pseudo-class :([\w-]+)/i);
+        if (!found) throw error;
+        const name = found[1];
+        const pattern = new RegExp(":" + name + "(\\([^)]*\\))?", "g");
+        const next = text.replace(pattern, ALWAYS.has(name) ? "" : ":not(*)");
+        if (next === text) throw error;
+        text = next;
+      }
+    }
+    return original.call(this, text, ...rest);
+  };
+}
+function patchSelectors(g) {
+  const protos = [g.Element?.prototype, g.Document?.prototype, Object.getPrototypeOf(document_),
+                  g.DocumentFragment?.prototype].filter(Boolean);
+  for (const proto of protos) {
+    for (const name of ["querySelector", "querySelectorAll", "matches", "closest", "webkitMatchesSelector"]) {
+      let owner = proto;
+      while (owner && !Object.prototype.hasOwnProperty.call(owner, name)) owner = Object.getPrototypeOf(owner);
+      if (!owner || typeof owner[name] !== "function" || owner[name].__forgiving) continue;
+      const wrapped = forgiving(owner[name]);
+      wrapped.__forgiving = true;
+      try { Object.defineProperty(owner, name, { value: wrapped, configurable: true, writable: true }); } catch (_) {}
+    }
+  }
+}
 function installHandlers(g, made) {
   const targets = [g.HTMLElement?.prototype, g.Element?.prototype, made.window?.Document?.prototype,
                    Object.getPrototypeOf(document_), g.SVGElement?.prototype].filter(Boolean);
@@ -504,6 +692,100 @@ function makeXHR() {
 const JS_TYPES = ["", "text/javascript", "application/javascript", "module", "text/ecmascript", "application/ecmascript"];
 const ran = new WeakSet();
 
+const sources = new Map();   // a script's address -> its text, to show the code of an error
+async function sourceOf(url) {
+  if (sources.has(url)) return sources.get(url);
+  try {
+    const response = await merlinFetch(url);
+    const text = response.ok ? await response.text() : "";
+    sources.set(url, text);
+    return text;
+  } catch (_) { return ""; }
+}
+async function showWhere(error) {
+  // the first place in the stack that is the page's own: its code, around
+  // the line and column, so an error says what it tripped on
+  const stack = String(error && error.stack || "");
+  const found = stack.match(/(https?:\/\/[^\s(),]+?)(?:, <anonymous>)?:(\d+):(\d+)/);
+  if (!found) return;
+  const [, url, line, column] = found;
+  const text = await sourceOf(url);
+  const lines = text.split("\n");
+  const row = lines[Number(line) - 1];
+  if (row === undefined) return;
+  const at = Number(column) - 1;
+  const excerpt = row.slice(Math.max(0, at - 160), at) + " >>>HERE>>> " + row.slice(at, at + 120);
+  send({ type: "console", level: "error", text: `  near ${url.split("/").pop()}:${line}:${column}: ${excerpt}` });
+}
+
+// import() in a plain script, or an inline module, is resolved against the
+// page's address, as in a browser. Deno resolved it against this file on the
+// disk: Hugging Face's import("/front/build/...") asked to read C:\front\...
+globalThis.__merlinImport = (specifier) => import(new URL(String(specifier), state.url).href);
+// Rewrites import() to __merlinImport(), and in inline modules the addresses
+// of static imports, outside strings, comments, templates and regular
+// expressions: a plain pattern had changed the text of a page's own strings.
+function pageImports(code, rewriteStatic) {
+  const out = [];
+  let i = 0, last = "", word = "";
+  const n = code.length;
+  const templateDepth = [];
+  const regexAllowed = () => !last || /[(,=:[!&|?{};+\-*%<>~^]$/.test(last) || /^(return|typeof|case|do|else|in|of|new|delete|void|throw|yield|await)$/.test(word);
+  while (i < n) {
+    const c = code[i], next = code[i + 1];
+    if (c === "/" && next === "/") { const end = code.indexOf("\n", i); const stop = end < 0 ? n : end; out.push(code.slice(i, stop)); i = stop; continue; }
+    if (c === "/" && next === "*") { const end = code.indexOf("*/", i + 2); const stop = end < 0 ? n : end + 2; out.push(code.slice(i, stop)); i = stop; continue; }
+    if (c === "'" || c === '"') {
+      let j = i + 1;
+      while (j < n && code[j] !== c) { if (code[j] === "\\") j++; if (code[j] === "\n") break; j++; }
+      const literal = code.slice(i, j + 1);
+      if (rewriteStatic && (word === "from" || word === "import") && /^["'](\.{0,2}\/)/.test(literal)) {
+        try { out.push(c + new URL(literal.slice(1, -1), state.url).href + c); } catch (_) { out.push(literal); }
+      } else out.push(literal);
+      i = j + 1; last = c; word = ""; continue;
+    }
+    if (c === "`" || (c === "}" && templateDepth.length && templateDepth[templateDepth.length - 1] === 0)) {
+      if (c === "}") templateDepth.pop();
+      let j = i + 1;
+      while (j < n && code[j] !== "`") {
+        if (code[j] === "\\") { j += 2; continue; }
+        if (code[j] === "$" && code[j + 1] === "{") { templateDepth.push(0); j += 2; break; }
+        j++;
+      }
+      const closed = code[j] === "`";
+      out.push(code.slice(i, closed ? j + 1 : j)); i = closed ? j + 1 : j; last = "`"; word = ""; continue;
+    }
+    if (c === "{" && templateDepth.length) templateDepth[templateDepth.length - 1]++;
+    if (c === "}" && templateDepth.length) templateDepth[templateDepth.length - 1]--;
+    if (c === "/" && regexAllowed()) {
+      let j = i + 1, inClass = false;
+      while (j < n && (code[j] !== "/" || inClass)) {
+        if (code[j] === "\\") j++;
+        else if (code[j] === "[") inClass = true;
+        else if (code[j] === "]") inClass = false;
+        else if (code[j] === "\n") break;
+        j++;
+      }
+      j++;
+      while (j < n && /[a-z]/i.test(code[j])) j++;
+      out.push(code.slice(i, j)); i = j; last = "/"; word = ""; continue;
+    }
+    if (/[A-Za-z_$]/.test(c)) {
+      let j = i + 1;
+      while (j < n && /[\w$]/.test(code[j])) j++;
+      const name = code.slice(i, j);
+      const before = out.length ? out[out.length - 1].slice(-1) : "";
+      if (name === "import" && before !== "." && /^\s*\(/.test(code.slice(j, j + 40))) out.push("__merlinImport");
+      else out.push(name);
+      word = name; last = name.slice(-1); i = j; continue;
+    }
+    out.push(c);
+    if (!/\s/.test(c)) { last = c; word = ""; }
+    i++;
+  }
+  return out.join("");
+}
+
 async function classic(script) {
   const src = script.getAttribute("src");
   let code = script.textContent;
@@ -512,10 +794,15 @@ async function classic(script) {
       const response = await merlinFetch(src, { credentials: "same-origin" });
       if (!response.ok) { send({ type: "console", level: "warn", text: `script ${src}: ${response.status}` }); return; }
       code = await response.text();
+      sources.set(new URL(src, state.url).href, code);
     } catch (e) { send({ type: "console", level: "warn", text: `script ${src}: ${e.message}` }); return; }
   }
   try { document_.currentScript = script; } catch (_) {}
-  try { (0, eval)(code + (src ? `\n//# sourceURL=${src}` : "")); }
+  // named by its whole address, so an error's place can be found in it
+  // a real script, as in a browser: its top-level const, let and class are
+  // seen by the scripts and modules after it, as eval's were not
+  const name = src ? new URL(src, state.url).href : `${state.url}#inline-script`;
+  try { new vm.Script(pageImports(code, false), { filename: name }).runInThisContext(); }
   catch (e) { reportError(e); }
   try { document_.currentScript = null; } catch (_) {}
   fire(script, "load");
@@ -532,10 +819,11 @@ async function moduleScript(script) {
   const src = script.getAttribute("src");
   try {
     if (src) await withinTime(import(new URL(src, state.url).href), 20, src);
-    else await withinTime(import("data:text/javascript;charset=utf-8," + encodeURIComponent(script.textContent)), 20, "inline module");
+    else await withinTime(import("data:text/javascript;charset=utf-8," + encodeURIComponent(pageImports(script.textContent, true))), 20, "inline module");
     fire(script, "load");
   } catch (e) {
     send({ type: "console", level: "warn", text: `module ${src || "(inline)"}: ${e.message}` });
+    showWhere(e).catch(() => {});
     fire(script, "error");
   }
 }
@@ -551,16 +839,31 @@ function runnable(script) {
 
 async function runScripts() {
   bindInlineHandlers(document_);
+  // As HTML orders them: scripts as the page is read; then, the page read,
+  // defer scripts and modules together in their order; then async ones.
+  // Square's sites put their main scripts under defer, after the inline ones
+  // that set them up: run in plain order, they found nothing set up, and the
+  // site was never built.
   const scripts = [...document_.querySelectorAll("script")].filter(runnable);
-  const modules = [];
+  const later = [], whenever = [];
   for (const script of scripts) {
     ran.add(script);
-    if ((script.getAttribute("type") || "").toLowerCase() === "module") modules.push(script);
+    const isModule = (script.getAttribute("type") || "").toLowerCase() === "module";
+    const external = script.hasAttribute("src");
+    if (script.hasAttribute("async") && (external || isModule)) whenever.push(script);
+    else if (isModule || (external && script.hasAttribute("defer"))) later.push(script);
     else await classic(script);
   }
   __setReadyState("interactive");
-  changed();                     // what the classic scripts made, without waiting for modules
-  for (const script of modules) await moduleScript(script);   // in order, each within its time
+  changed();                     // what the parser-time scripts made, without waiting for the rest
+  for (const script of later) {
+    if ((script.getAttribute("type") || "").toLowerCase() === "module") await moduleScript(script);
+    else await classic(script);
+  }
+  for (const script of whenever) {
+    if ((script.getAttribute("type") || "").toLowerCase() === "module") await moduleScript(script);
+    else await classic(script);
+  }
   fire(document_, "DOMContentLoaded");
   await new Promise(r => setTimeout(r, 0));
   __setReadyState("complete");

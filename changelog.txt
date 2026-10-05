@@ -5,6 +5,144 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.7
+  The start page's Wikipedia tile is now Convert Files (http://convert.to.it/),
+  in a new install and, once, in an existing one where the Wikipedia tile is
+  still there; a tile removed or added after stays so.
+  GitHub's profile and repository pages lay out as on GitHub. Four layout
+  fixes, none of them GitHub's alone:
+  - A grid track may be a calc() of a percentage and lengths, as GitHub sizes
+    its main column: calc(100% - sidebar - gutter). Read as auto, it shrank to
+    a sliver, a word to a line.
+  - Room left in a grid first grows tracks with a definite most towards it,
+    before auto tracks are stretched, as the specification orders it.
+  - The clearfix (.x::after { clear: both }) contains its floats. GitHub's
+    floated profile name had run on and put the sidebar's details beside it.
+  - Flex items honour box-sizing: border-box, their width taking in padding
+    and border. Two at 50% with padding had wrapped to one a row.
+  Google: its search box takes typing. It is a textarea given display: flex,
+  which had been laid out as a flex box with no field in it; a form field is
+  now a field whatever its display. document.styleSheets, with insertRule,
+  which Google's CSS loader uses.
+  Hugging Face no longer slows the whole browser. An infinite animation of no
+  duration made every frame fail, about thirty times a second: such an
+  animation is now over at once, as CSS has it; an animation that cannot be
+  drawn is drawn still and not tried again; and a duration given by var(), as
+  animate.css gives it, is read. And a page whose scripts change it all the
+  time is shown at a pace the browser can bear: after each update the next
+  waits at least 0.3 seconds, or twice what the last took, the latest change
+  always shown.
+  The fallback from https to http now covers what is entered in the address
+  bar whether typed or completed from history (the completion had put
+  https:// in front, and the fallback never came), and a site found to answer
+  only on http is remembered for the session, so reloads and links reach it.
+
+1.8.6
+  Google shows again in Merlin Engine. Its page holds a <noscript> block for
+  browsers without scripts, which hides every div and sends them to its basic
+  page; a browser running scripts ignores all of it, and Merlin Engine had
+  applied it on top of the page Google's scripts built. Where a page's
+  scripts run, <noscript> is now nothing, its styles and refreshes included;
+  where they do not, it is shown, as before.
+  A generic font family (sans-serif, serif, monospace, system-ui) now stands
+  for real installed fonts in its place in the list, and emoji fonts come after
+  every font for text. Before, a generic name was only a hint, and a font named
+  after it drew the text: Google's list ends in Noto Color Emoji, whose wide
+  spaces opened gaps between every word.
+  The download popup follows the theme: its panel, border and text are the
+  light or dark theme's, its buttons are the theme's own, and a change of theme
+  is picked up the next time it shows. Its labels had taken the light theme's
+  white background under light text.
+  JavaScript, from the 1.8.5 debugging zips, which now carry the sites' own
+  scripts:
+  - Links have their address's parts (protocol, host, hostname, port,
+    pathname, search, hash, origin) and a whole href, as in a browser. Square's
+    sites take addresses apart with them, and stopped without: AlterniTech's
+    site was left a white page.
+  - document.getElementsByName, which GitHub's behaviours script uses.
+  - A second definition of a custom element is refused with a NotSupportedError,
+    as browsers refuse it. GitHub defines some twice and expects that refusal.
+  The debugging zip now also carries the page as it came from the server
+  (original.html), so with its scripts a page can be run again from the start.
+
+1.8.5
+  CSS animations in Merlin Engine. @keyframes are read from every stylesheet,
+  inside @media and @supports too, and the animation property and its parts:
+  name, duration, timing function (ease and its kin, cubic-bezier(), steps()),
+  delay, iteration count, direction, fill mode and play state, several to an
+  element. Animations of transform and opacity are played as browsers play
+  them, by drawing again, not laying out again: marquees such as GitHub's logo
+  bar, spinners, fades and slides. A page is drawn again about 30 times a
+  second only where something animated is in view, and not at all otherwise.
+  2D and 3D transforms, all of them: translate, scale, rotate and skew in each
+  form, rotateX, rotateY and rotate3d, translateZ, matrix(), matrix3d() and
+  perspective(); the translate, rotate and scale properties; transform-origin;
+  a parent's perspective and perspective-origin, so a card turned with
+  rotateY() is drawn foreshortened as in a browser; and backface-visibility.
+  calc() of a percentage and pixels in a transform, as GitHub's marquee ends
+  at translateX(calc(-100% - gap)). A transformed element is a stacking
+  context, as in CSS. Translation alone still moves links with it; links in
+  rotated or scaled elements stay where they were laid out, for now.
+  The arrows by GitHub's menu names point down, as in Brave: they are turned
+  with rotate(), which had been left out.
+  A box counts towards the page's height whether or not anything is drawn in
+  it: an empty absolutely placed box below the rest had been out of reach.
+  Save page as > the debugging zip now carries the scripts the page ran: plain
+  scripts as Merlin fetched them, and its modules from Deno's cache. A page
+  can then be run again elsewhere, offline, with its own code. Scripts only:
+  not the data a page fetches.
+  Not yet: CSS transitions (changes eased over time when a page's classes
+  change), filter and backdrop-filter (blur), and mask-image.
+
+1.8.4
+  An address typed with no scheme is taken as https, as before; if its site
+  does not answer on https at all, it is now tried over http, as Brave does,
+  and the status bar says it is not secure. alternitech.co.uk answers only on
+  http. A link or an address given as https:// is never opened over http.
+  A server's own page for an error (a site's 404 page, Google's page for a
+  429) is shown, as browsers show it, rather than Merlin Engine's own.
+  Modern CSS colours: color-mix() (in srgb, srgb-linear and oklab, with
+  premultiplied alpha and the specification's percentages), oklch(), oklab(),
+  hwb(), color(), light-dark() and relative colours (rgb(from ...)). GitHub
+  uses color-mix() 102 times; unread, its faint lines became the text colour
+  and were drawn solid around everything.
+  JavaScript, from the debugging zips of GitHub, Google and Hugging Face:
+  - Node's globals (process, Buffer, global, setImmediate), which Deno has and
+    browsers do not, are gone. GitHub's code saw process, took itself to be in
+    Node, and its landing page script, which fades the opening section, failed.
+  - The CSS object (CSS.escape, CSS.supports), which GitHub and Google use.
+  - Selectors the DOM does not know (:target, :hover, :focus-visible...) match
+    nothing rather than throwing; :defined matches all.
+  - Plain scripts run as real scripts, so their top-level const, let and class
+    are seen by the scripts and modules after them, as in a browser.
+  - import() in a plain script or inline module, and an inline module's
+    relative imports, are resolved against the page's address. Hugging Face's
+    import("/front/build/...") had been resolved against Merlin's own folder.
+
+1.8.3
+  The download popup's corners are as round as the window's (Settings >
+  Appearance), and its panel is painted by Merlin: on a see-through window Qt
+  paints no stylesheet background, which would have left its text floating.
+  A connection that fails (refused, reset, timed out, the name not found yet)
+  is tried twice more, with "Retrying connection... (2 of 3)" in the status
+  bar, before Merlin Engine says the page could not be opened. A site that
+  answers on a later try had shown "could not open" first. A server's own
+  answer, such as 404, and certificate problems are not retried.
+  JavaScript, from the debugging zips of GitHub and a Square site:
+  - Scripts run in the order HTML gives them: those read as the page is
+    parsed, then defer scripts and modules together in their order, then
+    async ones. Square's sites put their main scripts under defer, after the
+    inline scripts that set them up; run in plain order, they found nothing
+    set up, stopped, and the site stayed a white page.
+  - An uncaught error or rejected promise, in a timer, frame or event, is
+    reported and the page's scripts go on, as in a browser. Deno ends its
+    process on one, and a single error had ended all of GitHub's scripts.
+  - document.domain, characterSet, compatMode, contentType, fonts,
+    scrollingElement, activeElement and others, which the DOM lacked. GitHub
+    stopped on "Unable to get document domain".
+  - An error in the console now comes with the page's code where it went
+    wrong, marked, so a debugging zip shows what a site tripped on.
+
 1.8.2
   A finished download says so in a popup under the downloads button, as Brave
   does: the file's name, its size and folder, and Open and Show in folder (on

@@ -13,7 +13,9 @@ from __future__ import annotations
 import os
 import re
 import threading
+import time
 import urllib.parse
+import urllib.error
 import urllib.request
 
 from PyQt6.QtCore import QObject, QRectF, QStandardPaths, Qt, QTimer, QUrl, pyqtSignal
@@ -344,6 +346,19 @@ def fetch_page(url: str, headers: dict | None = None, data: bytes | None = None,
                 total = 0                  # the length given is of the compressed body
             path, size = remote.save_stream(_reader(response), download_dir, name, progress, total)
             return True, final, remote.download_page(path, size), path
+    except urllib.error.HTTPError as error:
+        # A server's own answer to an error (a site's 404 page, Google's
+        # "unusual traffic" page for a 429) is shown, as browsers show it;
+        # only an answer with no page in it gets Merlin Engine's own.
+        try:
+            kind = error.headers.get("Content-Type", "") if error.headers else ""
+            if "html" in kind or "text/plain" in kind:
+                body = _decode(_body(error, 8 * 1024 * 1024), kind)
+                if body.strip():
+                    return True, error.geturl() or url, body, ""
+        except Exception:                                  # noqa: BLE001
+            pass
+        return False, url, str(error), ""
     except Exception as exc:                              # noqa: BLE001
         return False, url, str(exc), ""
 
@@ -480,6 +495,34 @@ def _gather_fonts(sheets_with_bases) -> list:
     return faces
 
 
+HTTP_ONLY_HOSTS: set = set()       # sites found this session to answer only on http
+RETRIES = 2                        # further tries for a connection that failed
+RETRY_PAUSES = (1.0, 2.5)          # seconds before each
+
+
+def without_noscript(markup: str) -> str:
+    """markup with its <noscript> blocks taken out: for a page whose scripts
+    run, as their content is then nothing at all, styles and refreshes too."""
+    return re.sub(r"<noscript\b[^>]*>.*?</noscript\s*>", "", markup or "", flags=re.I | re.S)
+
+
+def connection_failure(text: str) -> bool:
+    """Whether a page failed to connect at all, which trying again can mend.
+
+    Not a server's answer (404, 500), nor a certificate problem: those come
+    back the same however often asked.
+    """
+    text = (text or "").lower()
+    if "certificate_verify_failed" in text or "http error" in text:
+        return False
+    return any(sign in text for sign in (
+        "connection refused", "connection reset", "connection aborted", "timed out", "timeout",
+        "name or service not known", "getaddrinfo failed", "temporary failure in name resolution",
+        "nodename nor servname", "no route to host", "network is unreachable", "remote end closed",
+        "eof occurred", "winerror 10054", "winerror 10060", "winerror 10061", "winerror 11001",
+        "urlopen error"))
+
+
 def _note(text: str) -> None:
     """A line in merlin-log.txt."""
     try:
@@ -614,6 +657,8 @@ class MerlinView(QWidget):
     loginSubmitted = pyqtSignal(str, str, str)       # page, username, password
     downloadFinished = pyqtSignal(str)               # the saved file
     certTrouble = pyqtSignal(str, str)               # host, certificate problem
+    _retrying = pyqtSignal(int, int, int)            # load number, attempt, attempts in all
+    _fell_back = pyqtSignal(int, str)                # load number, host opened over http
     _laid_out = pyqtSignal(int, object)              # layout number, the display list
     _script_prepared = pyqtSignal(int, str, object)  # load number, page from scripts, prepared
     _restyled = pyqtSignal(int, object)              # load number, the worker's answer
@@ -671,6 +716,8 @@ class MerlinView(QWidget):
         self._fetched.connect(self._on_fetched)
         self._image_fetched.connect(self._on_image)
         self._restyled.connect(self._on_restyled)
+        self._retrying.connect(self._on_retrying)
+        self._fell_back.connect(self._on_fell_back)
         self._laid_out.connect(self._on_laid_out)
         self._script_prepared.connect(self._apply_script_dom)
         # JavaScript: a Deno process for the page, where the site is allowed
@@ -679,11 +726,21 @@ class MerlinView(QWidget):
         self._script_next = 0
         self._script_busy = False
         self._script_queued = None
+        self._script_rest_until = 0.0
+        self._script_rest = QTimer(self)
+        self._script_rest.setSingleShot(True)
+        self._script_rest.timeout.connect(self._script_rested)
         self._by_script_id: dict = {}
         from collections import deque
 
         self.console_lines = deque(maxlen=400)
         self.script_status = "not started"
+        # CSS animations: drawn about 30 times a second, only while the page
+        # has some and the tab can be seen
+        self._animation_epoch = time.monotonic()
+        self._animation_timer = QTimer(self)
+        self._animation_timer.setInterval(33)
+        self._animation_timer.timeout.connect(self._animation_tick)
         self._script_scroll = QTimer(self)
         self._script_scroll.setSingleShot(True)
         self._script_scroll.setInterval(100)
@@ -833,6 +890,18 @@ class MerlinView(QWidget):
         scheme = url.scheme().lower()
         if scheme != "merlin":
             self._stop_script()
+        # for this navigation only: the host typed with no scheme, if it was
+        fallback_host = self.property("http_fallback") or ""
+        self.setProperty("http_fallback", None)
+        # a site found to answer only on http, earlier this session: reloads
+        # and links to its https address are tried over http too
+        if not fallback_host and url.host().lower() in HTTP_ONLY_HOSTS:
+            fallback_host = url.host()
+        # whether this page's scripts will run: then <noscript> is nothing
+        scripting = False
+        allowed = getattr(self._host, "javascript_allowed", None)
+        if allowed is not None and scheme in ("http", "https") and allowed(_registrable(url.host())):
+            scripting = bool(getattr(self._host, "deno_for_scripts", lambda: "")())
         if scheme == "merlin":
             # Merlin's own addresses, handled by the window as for Chromium's tabs
             if url.host() == "allow-certificate":
@@ -908,11 +977,47 @@ class MerlinView(QWidget):
             # left loading for ever
             prepared = None
             try:
-                ok, final, text, saved = fetch_page(
-                    target, headers=headers, data=body, content_type=content_type,
-                    opener=opener, download_dir=download_dir, progress=progress)
+                for attempt in range(1, RETRIES + 2):
+                    ok, final, text, saved = fetch_page(
+                        target, headers=headers, data=body, content_type=content_type,
+                        opener=opener, download_dir=download_dir, progress=progress)
+                    # a connection that failed is tried again, twice, before the
+                    # page says it could not be opened: a site that answers on
+                    # the second try had shown "could not open" first
+                    if ok or attempt > RETRIES or not connection_failure(text) or body is not None:
+                        break
+                    try:
+                        self._retrying.emit(number, attempt + 1, RETRIES + 1)
+                    except RuntimeError:
+                        return
+                    time.sleep(RETRY_PAUSES[attempt - 1])
+                    if number != self._load_number:
+                        return                         # gone elsewhere meanwhile
+                if (not ok and body is None and connection_failure(text) and fallback_host
+                        and target.startswith("https://")
+                        and urllib.parse.urlsplit(target).hostname == fallback_host.lower()):
+                    # typed with no scheme: a site that does not answer on
+                    # https at all is tried over http, as Brave does
+                    plain = "http://" + target[len("https://"):]
+                    ok, final, text, saved = fetch_page(
+                        plain, headers=headers, data=body, content_type=content_type,
+                        opener=opener, download_dir=download_dir, progress=progress)
+                    if ok:
+                        try:
+                            self._fell_back.emit(number, fallback_host)
+                        except RuntimeError:
+                            return
                 progress(25)                      # the page is here
                 if ok:
+                    # the page as it came, for the debugging zip: with the
+                    # scripts kept beside it, it can be run again from the start
+                    if number == self._load_number and not saved:
+                        self._arrived_markup = text
+                    if scripting and not saved:
+                        # As a browser running scripts does: what is inside
+                        # <noscript> is nothing. Google's hid every div there,
+                        # for browsers without scripts, and sent them elsewhere.
+                        text = without_noscript(text)
                     # parsed here, off the UI thread, with its stylesheets
                     # fetched before the page is shown, as browsers do
                     prepared = self._prepare(text, final, headers, opener, host_name,
@@ -1138,6 +1243,7 @@ class MerlinView(QWidget):
 
     # ----------------------------------------------------- the pipeline
     def _show(self, markup: str, prepared=None) -> None:
+        self._animation_epoch = time.monotonic()        # a new page's animations begin now
         if prepared is not None:
             self._document = prepared["document"]
             self._sheets = prepared["sheets"]
@@ -1492,6 +1598,9 @@ class MerlinView(QWidget):
             return
         self.script_status = f"started with {deno}"
         self._script = host
+        self._script_bodies = {}
+        self._script_cache = cache
+        self._script_hosts = import_hosts(self._markup, self._url.toString())
         host.message.connect(self._on_script_message)
         host.ended.connect(lambda h=host: self._script_ended(h))
         storage = getattr(self._host, "local_storage", None)
@@ -1533,6 +1642,21 @@ class MerlinView(QWidget):
                 pass
         self._script_waiting.clear()
         self._script_queued = None
+
+    def _on_fell_back(self, number: int, host: str) -> None:
+        HTTP_ONLY_HOSTS.add(host.lower())
+        if number != self._load_number:
+            return
+        label = getattr(self._host, "status_label", None)
+        if label is not None:
+            label.setText(f"Not secure: {host} does not answer over https, so it was opened over http")
+
+    def _on_retrying(self, number: int, attempt: int, attempts: int) -> None:
+        if number != self._load_number:
+            return
+        label = getattr(self._host, "status_label", None)
+        if label is not None:
+            label.setText(f"Retrying connection... ({attempt} of {attempts})")
 
     def _script_ended(self, host) -> None:
         if host is self._script:
@@ -1689,17 +1813,37 @@ class MerlinView(QWidget):
         def work():
             answer = ({"error": "blocked by the content blocker"} if blocked else
                       page_fetch(url, message.get("method", "GET"), headers, message.get("body"), opener))
+            # a script, kept for the debugging zip (scripts only, not data)
+            kind = str((answer.get("headers") or {}).get("content-type", "")).lower()
+            if "javascript" in kind or "ecmascript" in kind or url.split("?")[0].endswith((".js", ".mjs")):
+                try:
+                    import base64 as _b64
+
+                    self._script_bodies[url] = _b64.b64decode(answer.get("body") or "")
+                except Exception:                          # noqa: BLE001
+                    pass
             answer.update(type="answer", id=message.get("id"))
             host.send(answer)
 
         threading.Thread(target=work, daemon=True).start()
 
     def _script_dom(self, markup: str, title: str) -> None:
-        """The page as scripts left it: styled off the UI thread, then shown."""
-        if self._script_busy:
+        """The page as scripts left it: styled off the UI thread, then shown.
+
+        Not more often than the page can bear: after each update the next
+        waits at least 0.3 seconds, or twice what the last one took to style
+        and lay out. A page whose scripts change it all the time (Hugging
+        Face's) had kept the whole browser busy restyling it. Only the latest
+        change waiting is shown.
+        """
+        now = time.monotonic()
+        if self._script_busy or now < self._script_rest_until:
             self._script_queued = (markup, title)          # only the latest counts
+            if not self._script_busy and not self._script_rest.isActive():
+                self._script_rest.start(max(1, int((self._script_rest_until - now) * 1000)))
             return
         self._script_busy = True
+        self._script_started = now
         number = self._load_number
         page_url = self._url.toString()
         headers = self._headers()
@@ -1724,10 +1868,17 @@ class MerlinView(QWidget):
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _script_rested(self) -> None:
+        if self._script_queued is not None and self._script is not None:
+            markup, title = self._script_queued
+            self._script_queued = None
+            self._script_dom(markup, title)
+
     def _apply_script_dom(self, number: int, markup: str, prepared) -> None:
         """Show the page as scripts changed it, keeping the scroll, the fields and
         what is typed in them, and the pictures already fetched."""
         self._script_busy = False
+        applied = number == self._load_number and prepared is not None and self._script is not None
         if number == self._load_number and prepared is not None and self._script is not None:
             old = {e.attrs.get("data-mjs"): w for e, w in self._widgets.items() if e.attrs.get("data-mjs")}
             self._document = prepared["document"]
@@ -1762,6 +1913,9 @@ class MerlinView(QWidget):
                 self.titleChanged.emit(title)
             self._layout()
             self._load_images()
+        if applied:
+            cost = time.monotonic() - getattr(self, "_script_started", time.monotonic())
+            self._script_rest_until = time.monotonic() + max(0.3, 2 * cost)
         if self._script_queued is not None:
             markup, title = self._script_queued
             self._script_queued = None
@@ -1844,6 +1998,42 @@ class MerlinView(QWidget):
         self._sync_controls()
         self.update()
         self._send_geometry()
+        display = self._display
+        moving = display is not None and (display.animated or (
+            display.fixed is not None and getattr(display.fixed, "animated", False)))
+        if moving and not self._animation_timer.isActive():
+            self._animation_timer.start()
+        elif not moving:
+            self._animation_timer.stop()
+
+    def _animation_tick(self) -> None:
+        """Draw again only where something animated is in view, with room for
+        how far it moves; nothing at all when none is."""
+        if not self.isVisible() or self.window() is None or self.window().isMinimized():
+            return
+        display = self._display
+        if display is None:
+            return
+        zoom = getattr(self, "_zoom", 1.0) or 1.0
+        view_height = self.height() / zoom
+        from PyQt6.QtCore import QRect
+        from PyQt6.QtGui import QRegion
+
+        region = QRegion()
+        pieces = [(rect, self._scroll) for rect in display.animated_boxes]
+        if display.fixed is not None:
+            pieces += [(rect, 0.0) for rect in getattr(display.fixed, "animated_boxes", [])]
+        for rect, scroll in pieces:
+            top = rect.top() - scroll
+            # room around it: a transform or marquee may carry it a box's size away
+            reach_x, reach_y = rect.width(), rect.height()
+            if top + rect.height() + reach_y < 0 or top - reach_y > view_height:
+                continue
+            region += QRect(int((rect.left() - reach_x) * zoom), int((top - reach_y) * zoom),
+                            int((rect.width() + 2 * reach_x) * zoom) + 2,
+                            int((rect.height() + 2 * reach_y) * zoom) + 2)
+        if not region.isEmpty():
+            self.update(region)
         if self._display.simplified:
             label = getattr(self._host, "status_label", None)
             if label is not None:
@@ -2335,7 +2525,43 @@ class MerlinView(QWidget):
             bundle.writestr("manifest.json", json.dumps(manifest, indent=2))
             bundle.writestr("console.txt", "\n".join(f"[{level}] {text}" for level, text
                                                      in getattr(self, "console_lines", [])))
+            self._bundle_scripts(bundle)
+            arrived = getattr(self, "_arrived_markup", "")
+            if arrived:
+                bundle.writestr("original.html", arrived)
         return path
+
+    def _bundle_scripts(self, bundle) -> None:
+        """The scripts the page ran, so it can be run again elsewhere, offline,
+        as it ran here: plain scripts as Merlin fetched them for it, and the
+        page's modules from Deno's cache. Scripts only, not what the page
+        fetched as data."""
+        import json
+
+        index = []
+        for number, (url, body) in enumerate(list(getattr(self, "_script_bodies", {}).items())):
+            name = f"scripts/{number:04d}.js"
+            bundle.writestr(name, body)
+            index.append({"url": url, "file": name})
+        bundle.writestr("scripts/index.json", json.dumps(index, indent=1))
+        cache = getattr(self, "_script_cache", "")
+        hosts = getattr(self, "_script_hosts", [])
+        remote = os.path.join(cache, "remote") if cache else ""
+        if not remote or not os.path.isdir(remote):
+            return
+        for host in hosts:
+            for scheme in ("https", "http"):
+                folder = os.path.join(remote, scheme, host.replace(":", "_port_"))   # as Deno names them
+                if not os.path.isdir(folder):
+                    continue
+                for base, _dirs, files in os.walk(folder):
+                    for file in files:
+                        full = os.path.join(base, file)
+                        try:
+                            if os.path.getsize(full) <= 20 * 1024 * 1024:
+                                bundle.write(full, "deno-cache/" + os.path.relpath(full, cache).replace(os.sep, "/"))
+                        except OSError:
+                            pass
 
     # ------------------------------------------------------ saving the page
     def html_with_stylesheets(self) -> str:
@@ -2518,6 +2744,10 @@ class MerlinView(QWidget):
                 painter.fillRect(self._found_rect.adjusted(-1, -1, 1, 1), QColor(255, 214, 0, 200))
             pictures = {k: v for k, v in self._images.items() if v is not False}
             # fixed boxes are in the page, in the stacking order, pinned there
+            from . import paint as painting
+
+            # animations are drawn at the time since this page was shown
+            painting.NOW = time.monotonic() - self._animation_epoch
             paint(painter, self._display, visible, pictures)
         painter.end()
 

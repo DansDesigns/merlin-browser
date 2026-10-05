@@ -71,8 +71,42 @@ def _colour(rgba) -> QColor:
     return QColor(rgba[0], rgba[1], rgba[2], rgba[3])
 
 
-_PUSHES = ("clip_push", "opacity_push", "sticky_push", "fixed_push")
-_POPS = ("clip_pop", "opacity_pop", "sticky_pop", "fixed_pop")
+_PUSHES = ("clip_push", "opacity_push", "sticky_push", "fixed_push", "xform_push")
+_POPS = ("clip_pop", "opacity_pop", "sticky_pop", "fixed_pop", "xform_pop")
+
+# The time animations are drawn at, in seconds since the page was shown: set
+# by the view before each paint.
+NOW = 0.0
+
+
+def _transform(spec: dict):
+    """An element's transform at NOW, as a QTransform, and the opacity it is
+    drawn with (or None to leave it): its own transform, its animations
+    sampled, about its origin, seen through its parent's perspective."""
+    from PyQt6.QtGui import QTransform
+
+    from . import animate
+    from .layout import _origin
+
+    ops, opacity = spec["ops"], None
+    box = spec["box"]
+    for animation in spec.get("animations") or []:
+        moved, faded = animate.sample(animation, NOW, spec["ops"], spec["opacity"], box)
+        if moved is not None:
+            ops = moved
+        if faded is not None:
+            opacity = faded
+    if spec.get("animates_opacity") and opacity is None:
+        opacity = spec["opacity"]
+    m = animate.matrix(ops, box, spec["origin"])
+    seen = spec.get("perspective")
+    if seen and seen.get("box"):
+        pb = seen["box"]
+        px, py = _origin(seen.get("origin"), pb[2], pb[3])
+        m = animate.with_perspective(m, (seen["depth"], pb[0] + px, pb[1] + py))
+    if spec.get("backface") and animate.facing_away(m):
+        opacity = 0.0                       # turned away, with its back hidden
+    return QTransform(*animate.projected(m)), opacity
 
 
 def _layer_ends(display: DisplayList) -> dict:
@@ -111,6 +145,23 @@ def _apply(painter, display: DisplayList, item, shown: list, scroll: float) -> N
     elif kind == "opacity_push":
         painter.setOpacity(painter.opacity() * item[1])
         shown.append(shown[-1])
+    elif kind == "xform_push":
+        try:
+            transform, opacity = _transform(item[1])
+        except Exception:                                  # noqa: BLE001
+            # an animation that cannot be drawn is drawn still, and not tried
+            # again on every frame
+            item[1]["animations"] = None
+            from PyQt6.QtGui import QTransform as _Q
+
+            transform, opacity = _Q(), None
+        painter.setTransform(transform, True)
+        if opacity is not None:
+            painter.setOpacity(painter.opacity() * opacity)
+        inverse, invertible = transform.inverted()
+        # what is in view, in the element's own terms, so culling stays right
+        shown.append(inverse.mapRect(shown[-1]) if invertible
+                     else QRectF(-1e7, -1e7, 2e7, 2e7))
     elif kind == "fixed_push":
         # pinned to the window: the page's scroll undone for what is inside
         painter.translate(0, scroll)

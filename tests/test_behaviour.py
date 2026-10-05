@@ -1728,6 +1728,10 @@ def test_javascript_permission(app) -> None:
     fresh._data = dict(cfg.DEFAULTS)
     check("a fresh install draws pages with Merlin Engine and runs their JavaScript",
           fresh.get("merlin_engine") is True and fresh.get("javascript") is True)
+    check("and its start page offers Convert Files where Wikipedia was",
+          [t["title"] for t in fresh.get("start_tiles")][0] == "Convert Files"
+          and fresh.get("start_tiles")[0]["url"] == "http://convert.to.it/",
+          str([t["title"] for t in fresh.get("start_tiles")]))
     deno = os.environ.get("MERLIN_DENO") or deno_path()
     if not deno or not os.path.exists(deno):
         print("  skip  JavaScript: Deno is not here (set MERLIN_DENO)")
@@ -1780,6 +1784,9 @@ def test_javascript_permission(app) -> None:
             check("the debugging zip says the scripts ran and changed the page, with their console",
                   manifest.get("scripts") == "running" and manifest.get("scripts_changed_page")
                   and "hello from the page" in console, f"{manifest.get('scripts')} | {console[:80]}")
+            check("and it carries the scripts the page ran, and the page as it came, to run it again",
+                  "scripts/index.json" in bundle.namelist() and "original.html" in bundle.namelist(),
+                  str(bundle.namelist()[:8]))
             os.remove(path)
         else:
             check("the debugging zip says the scripts ran and changed the page, with their console",
@@ -1836,6 +1843,36 @@ def test_download_popup(app) -> None:
         wait(app, 0.1)
         popup.open_button.click()
         check("Open opens the file", opened == [path] and not popup.isVisible(), str(opened))
+        # it follows the theme, its labels on its own panel in either
+        from merlin.ui import apply_theme
+
+        for dark in (False, True):
+            apply_theme(app, dark)
+            window.record_download(path)
+            wait(app, 0.2)
+            image = popup.grab().toImage()
+            spot = popup.name.geometry()
+            behind = image.pixelColor(spot.right() - 2, spot.center().y()).name()
+            panel = image.pixelColor(image.width() // 2, image.height() - 5).name()
+            check(f"in the {'dark' if dark else 'light'} theme, the popup's text sits on its own panel",
+                  behind == panel and (panel == "#232429" if dark else panel == "#ffffff"),
+                  f"behind the name {behind}, panel {panel}")
+            popup.hide()
+        apply_theme(app, False)
+        # its corners are the window's (Settings > Appearance > corner radius)
+        for radius, round_corner in ((20, True), (0, False)):
+            settings.set("page_corner_radius", radius, save=False)
+            window.record_download(path)
+            wait(app, 0.2)
+            image = popup.grab().toImage()
+            corner = image.pixelColor(1, 1).alpha()
+            middle = image.pixelColor(image.width() // 2, image.height() // 2).alpha()
+            # the middle solid: a popup with no panel painted at all is see-through everywhere
+            check(f"with the window's corner radius ({radius}): corners "
+                  f"{'rounded' if round_corner else 'square'}, panel solid",
+                  middle == 255 and ((corner < 128) if round_corner else (corner == 255)),
+                  f"corner alpha {corner}, middle alpha {middle}")
+            popup.hide()
     finally:
         QDesktopServices.openUrl = real_open
         DownloadPopup.SHOWN_FOR = real_time

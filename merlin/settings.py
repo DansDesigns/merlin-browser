@@ -104,7 +104,7 @@ DEFAULTS = {
     "smooth_corners": _compositing_is_likely(),          # 0 turns the rounded page corners off
     "start_background": "midnight",    # see ui.START_BACKGROUNDS, or image:<path>
     "start_tiles": [
-        {"title": "Wikipedia", "url": "https://wikipedia.org"},
+        {"title": "Convert Files", "url": "http://convert.to.it/"},
         {"title": "Hacker News", "url": "https://news.ycombinator.com"},
         {"title": "GitHub", "url": "https://github.com"},
         {"title": "Codeberg", "url": "https://codeberg.org"},
@@ -152,6 +152,7 @@ DEFAULTS = {
     "invert_swipe": False,
     "merlin_engine": True,             # pages drawn by Merlin Engine; Chromium as a fallback
     "engine_switched": False,          # existing settings moved to Merlin Engine, once
+    "tiles_convert": False,            # the Wikipedia tile became Convert Files, once
     "offer_save_passwords": True,      # after a login in a Merlin Engine tab
     "ui_scale": 1.0,                   # interface size, 1.0 = 100%: applied at start
     "web_fonts": True,                 # Merlin Engine uses sites' own fonts
@@ -197,6 +198,17 @@ class Settings(QObject):
                 # Merlin Engine became the engine for every page in 1.8.1:
                 # settings saved before then are moved over once, and after
                 # that the choice in Settings stands
+                # 1.8.7: the start page's Wikipedia tile is Convert Files, in
+                # its place; once, so a tile removed or added later stays so
+                if not stored.get("tiles_convert"):
+                    tiles = self._data.get("start_tiles")
+                    if isinstance(tiles, list):
+                        self._data["start_tiles"] = [
+                            {"title": "Convert Files", "url": "http://convert.to.it/"}
+                            if isinstance(t, dict) and "wikipedia.org" in str(t.get("url", ""))
+                            and str(t.get("title", "")).lower() == "wikipedia" else t
+                            for t in tiles]
+                    self._data["tiles_convert"] = True
                 if not stored.get("engine_switched"):
                     self._data["merlin_engine"] = True
                     self._data["engine_switched"] = True

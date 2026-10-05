@@ -39,6 +39,200 @@ NAMED_COLOURS = {
 }
 
 
+def _split_top(text: str, separator: str = ",") -> list:
+    """text split at separator, but not inside brackets."""
+    parts, depth, start = [], 0, 0
+    for i, ch in enumerate(text):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif depth == 0 and (ch == separator if separator != " " else ch.isspace()):
+            parts.append(text[start:i])
+            start = i + 1
+    parts.append(text[start:])
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _to_linear(c: float) -> float:
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def _from_linear(c: float) -> float:
+    return 12.92 * c if c <= 0.0031308 else 1.055 * (max(c, 0.0) ** (1 / 2.4)) - 0.055
+
+
+def _oklab_to_rgb(L: float, a: float, b: float):
+    l_ = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3
+    m_ = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3
+    s_ = (L - 0.0894841775 * a - 1.2914855480 * b) ** 3
+    r = 4.0767416621 * l_ - 3.3077115913 * m_ + 0.2309699292 * s_
+    g = -1.2684380046 * l_ + 2.6097574011 * m_ - 0.3413193965 * s_
+    bl = -0.0041960863 * l_ - 0.7034186147 * m_ + 1.7076147010 * s_
+    return tuple(min(1.0, max(0.0, _from_linear(c))) for c in (r, g, bl))
+
+
+def _rgb_to_oklab(r: float, g: float, b: float):
+    r, g, b = _to_linear(r), _to_linear(g), _to_linear(b)
+    l_ = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b) ** (1 / 3)
+    m_ = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b) ** (1 / 3)
+    s_ = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b) ** (1 / 3)
+    return (0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+            1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+            0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_)
+
+
+def _number(text: str, scale: float = 1.0, percent_of: float = 1.0) -> float:
+    text = text.strip()
+    if text == "none":
+        return 0.0
+    if text.endswith("%"):
+        return float(text[:-1]) / 100 * percent_of
+    if text.endswith("deg"):
+        return float(text[:-3])
+    if text.endswith("turn"):
+        return float(text[:-4]) * 360
+    if text.endswith("rad"):
+        return float(text[:-3]) * 57.29577951308232
+    return float(text) * scale
+
+
+def _channels(inner: str):
+    """'a b c / alpha' (or with commas): the three channels and alpha."""
+    alpha = "1"
+    if "/" in inner:
+        inner, alpha = inner.rsplit("/", 1)
+    parts = _split_top(inner.replace(",", " "), " ")
+    return parts, alpha.strip()
+
+
+def _modern_colour(value: str, current):
+    """Colour functions of CSS Color 4 and 5, which GitHub uses throughout:
+    color-mix(), oklch(), oklab(), hwb(), color(), light-dark(), and relative
+    colours (rgb(from ...)). Unread, each had become the text colour, and lines
+    meant to be faint were drawn solid."""
+    name, _, rest = value.partition("(")
+    if not rest.endswith(")"):
+        return None
+    inner = rest[:-1].strip()
+    try:
+        if name == "light-dark":
+            parts = _split_top(inner)
+            return parse_colour(parts[0], current) if parts else None
+        if name == "color-mix":
+            return _color_mix(inner, current)
+        if name in ("oklch", "oklab"):
+            parts, alpha = _channels(inner)
+            L = _number(parts[0], percent_of=1.0)
+            if name == "oklab":
+                a, b = _number(parts[1], percent_of=0.4), _number(parts[2], percent_of=0.4)
+            else:
+                import math
+
+                chroma, hue = _number(parts[1], percent_of=0.4), _number(parts[2])
+                a, b = chroma * math.cos(math.radians(hue)), chroma * math.sin(math.radians(hue))
+            r, g, bl = _oklab_to_rgb(L, a, b)
+            return (round(r * 255), round(g * 255), round(bl * 255), round(_alpha(alpha) * 255))
+        if name == "hwb":
+            import colorsys
+
+            parts, alpha = _channels(inner)
+            hue = _number(parts[0]) % 360 / 360
+            white, black = _number(parts[1], 0.01), _number(parts[2], 0.01)
+            if white + black >= 1:
+                grey = white / (white + black)
+                return (round(grey * 255),) * 3 + (round(_alpha(alpha) * 255),)
+            r, g, b = colorsys.hls_to_rgb(hue, 0.5, 1.0)
+            r, g, b = (c * (1 - white - black) + white for c in (r, g, b))
+            return (round(r * 255), round(g * 255), round(b * 255), round(_alpha(alpha) * 255))
+        if name == "color":
+            parts, alpha = _channels(inner)
+            space, values = parts[0], [_number(p) for p in parts[1:4]]
+            if space == "srgb-linear":
+                values = [_from_linear(v) for v in values]
+            # display-p3 and the rest are near enough to sRGB for drawing
+            return tuple(round(min(1, max(0, v)) * 255) for v in values) + (round(_alpha(alpha) * 255),)
+        if name in ("rgb", "rgba", "hsl", "hsla") and inner.startswith("from "):
+            return _relative(name, inner[5:], current)
+    except (ValueError, IndexError, ZeroDivisionError):
+        return None
+    return None
+
+
+def _alpha(text: str) -> float:
+    text = text.strip()
+    if text in ("", "none"):
+        return 1.0
+    return max(0.0, min(1.0, float(text[:-1]) / 100 if text.endswith("%") else float(text)))
+
+
+def _relative(name: str, inner: str, current):
+    """rgb(from <colour> r g b / alpha): channels by name or as numbers."""
+    parts = _split_top(inner, " ")
+    origin = parse_colour(parts[0], current)
+    if origin is None:
+        return None
+    rest = " ".join(parts[1:])
+    channels, alpha = _channels(rest) if rest else ([], "alpha")
+    r, g, b, a = origin
+    names = {"r": r, "g": g, "b": b, "alpha": a / 255}
+    if name.startswith("hsl"):
+        return (r, g, b, round(_alpha(str(names.get(alpha, alpha))) * 255)) if alpha else origin
+    values = [names.get(c, None) for c in channels]
+    values = [v if v is not None else _number(c, percent_of=255) for v, c in zip(values, channels)]
+    if len(values) != 3:
+        return None
+    out_alpha = names["alpha"] if alpha == "alpha" else _alpha(alpha)
+    return tuple(round(min(255, max(0, v))) for v in values) + (round(out_alpha * 255),)
+
+
+def _color_mix(inner: str, current):
+    parts = _split_top(inner)
+    if len(parts) != 3 or not parts[0].startswith("in "):
+        return None
+    space = parts[0][3:].split()[0]
+
+    def colour_and_share(text):
+        bits = _split_top(text, " ")
+        share = next((b for b in bits if b.endswith("%") and parse_colour(b, current) is None), None)
+        colour = " ".join(b for b in bits if b is not share)
+        return parse_colour(colour, current), (float(share[:-1]) / 100 if share else None)
+
+    (c1, p1), (c2, p2) = colour_and_share(parts[1]), colour_and_share(parts[2])
+    if c1 is None or c2 is None:
+        return None
+    if p1 is None and p2 is None:
+        p1 = p2 = 0.5
+    elif p1 is None:
+        p1 = 1 - p2
+    elif p2 is None:
+        p2 = 1 - p1
+    total = p1 + p2
+    if total <= 0:
+        return None
+    multiplier = min(1.0, total)               # under 100% in all: that much less opaque
+    p1, p2 = p1 / total, p2 / total
+    a1, a2 = c1[3] / 255, c2[3] / 255
+    alpha = a1 * p1 + a2 * p2
+    if alpha <= 0:
+        return (0, 0, 0, 0)
+
+    def premultiplied(colour, a):
+        rgb = [v / 255 for v in colour[:3]]
+        if space == "srgb-linear":
+            rgb = [_to_linear(v) for v in rgb]
+        elif space not in ("srgb",):
+            rgb = list(_rgb_to_oklab(*rgb))   # oklab, and near enough for the others
+        return [v * a for v in rgb]
+
+    mixed = [(x * p1 + y * p2) / alpha for x, y in zip(premultiplied(c1, a1), premultiplied(c2, a2))]
+    if space == "srgb-linear":
+        mixed = [_from_linear(v) for v in mixed]
+    elif space not in ("srgb",):
+        mixed = list(_oklab_to_rgb(*mixed))
+    return tuple(round(min(1, max(0, v)) * 255) for v in mixed) + (round(alpha * multiplier * 255),)
+
+
 def parse_colour(value: str, current=(0, 0, 0, 255)):
     """A CSS colour as (r, g, b, a) with 0-255 parts, or None if not one."""
     value = value.strip().lower()
@@ -46,6 +240,9 @@ def parse_colour(value: str, current=(0, 0, 0, 255)):
         return (0, 0, 0, 0)
     if value == "currentcolor":
         return current
+    if value.startswith(("color-mix(", "oklch(", "oklab(", "hwb(", "color(", "light-dark(")) or \
+            value.startswith(("rgb(from ", "rgba(from ", "hsl(from ", "hsla(from ")):
+        return _modern_colour(value, current)
     value = NAMED_COLOURS.get(value, value)
     if value.startswith("#"):
         digits = value[1:]
@@ -641,11 +838,23 @@ def parse_stylesheet(text: str, start_order: int = 0, media: tuple = ()) -> list
         declarations = parse_declarations(body)
         if not declarations:
             continue
+        clears = next((value.strip().lower() for name, value, *_rest in declarations
+                       if name == "clear"), None)
         for part in _split_outside(prelude, ","):
             selector = parse_selector(part)
             if selector is not None:
                 rules.append(Rule(selector, declarations, order, media))
                 order += 1
+            # The clearfix, .x::after { clear: both }: pseudo-elements are not
+            # drawn yet, but this one ends the floats inside its element, and
+            # left out, GitHub's floated profile name ran on past the sidebar.
+            if clears in ("left", "right", "both"):
+                bare = re.sub(r"::?after\s*$", "", part.strip())
+                if bare != part.strip() and bare:
+                    owner = parse_selector(bare)
+                    if owner is not None:
+                        rules.append(Rule(owner, [("-merlin-clear-after", clears, False)], order, media))
+                        order += 1
     return rules
 
 
@@ -895,10 +1104,13 @@ class Styler:
         texts = list(author_css if author_css is not None else document.stylesheets())
         if extra_css:                          # Merlin's own additions, such as hiding rules
             texts.append(extra_css)
+        self.keyframes: dict = {}
         for text in texts:
             rules = parsed(text)
             self._sheets.append((base, rules))
             base += 1000000
+            if "keyframes" in text:
+                self.keyframes.update(keyframes_in(text))
         self._choose()
         self.styles: dict = {}
 
@@ -1062,10 +1274,87 @@ class Styler:
         style.setdefault("white-space", "normal")
         style.setdefault("text-decoration", "none")
         style.setdefault("list-style-type", "disc")
+        self._motion(style, font, root_size)
         self.styles[element] = style
         for child in element.children:
             if isinstance(child, Element):
                 self._compute(child, style, root_size)
+
+    def _motion(self, style: dict, font: float, root_size: float) -> None:
+        """translate, rotate and scale folded into transform; and the element's
+        animations of transform and opacity, with their keyframes read for it
+        (its var()s, its font size), for paint to play."""
+        individual = _individual_transforms(style, font, root_size, self.viewport)
+        if individual:
+            current = style.get("transform")
+            if isinstance(current, TransformOps):
+                rest = list(current)
+            elif isinstance(current, tuple):
+                rest = [("translate", [("%", v[1]) if isinstance(v, tuple) else ("px", v) for v in current])]
+            else:
+                rest = []
+            style["transform"] = TransformOps(individual + rest)
+        if not self.keyframes or not (style.get("animation") or style.get("animation-name")):
+            return
+        custom = style.get("--", {})
+        animations = []
+        for entry in _animation_list(style):
+            frames_raw = self.keyframes.get(str(entry.get("name", "")).lower())
+            if not frames_raw:
+                continue
+            frames = []
+            for offsets, props in frames_raw:
+                values = {}
+                timing_here = None
+                for prop, raw in props.items():
+                    prop = prop.lower()
+                    if "var(" in raw:
+                        raw = _var(raw, custom)
+                        if raw is None:
+                            continue
+                    if prop == "animation-timing-function":
+                        timing_here = raw.strip().lower()
+                    elif prop == "opacity":
+                        try:
+                            text = raw.strip()
+                            values["opacity"] = max(0.0, min(1.0, float(text[:-1]) / 100 if text.endswith("%") else float(text)))
+                        except ValueError:
+                            pass
+                    elif prop in ("transform", "translate", "rotate", "scale"):
+                        if prop == "transform":
+                            ops = parse_transform_ops(raw, font, root_size, self.viewport)
+                        else:
+                            ops = _individual_transforms({prop: raw.strip().lower()}, font, root_size, self.viewport)
+                        if ops is not None:
+                            values["transform"] = values.get("transform", []) + ops if prop != "transform" \
+                                else ops + values.get("transform", [])
+                if values:
+                    for offset in offsets:
+                        frames.append((offset, values, timing_here))
+            if not frames:
+                continue
+            frames.sort(key=lambda f: f[0])
+            iterations = str(entry.get("iterations", "1")).strip()
+            times = entry.get("times", [])
+            # timings given by var(), as animate.css gives its durations
+            for key in ("duration", "delay"):
+                if "var(" in str(entry.get(key, "")):
+                    entry[key] = _var(str(entry[key]), custom) or "0s"
+            times = [(_var(t, custom) or "0s") if "var(" in t else t for t in times]
+            if "var(" in iterations:
+                iterations = (_var(iterations, custom) or "1").strip()
+            animations.append({
+                "frames": frames,
+                "duration": _seconds(entry.get("duration", times[0] if times else "0s")),
+                "delay": _seconds(entry.get("delay", times[1] if len(times) > 1 else "0s")),
+                "iterations": float("inf") if iterations == "infinite" else float(iterations or 1),
+                "direction": entry.get("direction", "normal"),
+                "fill": entry.get("fill", "none"),
+                "timing": entry.get("timing", "ease"),
+                "paused": entry.get("play") == "paused",
+            })
+        if animations:
+            style["animations"] = animations
 
     def _font_size(self, value, parent_size: float, root_size: float) -> float:
         if not value:
@@ -1124,8 +1413,19 @@ class Styler:
                 return int(float(lowered))
             except ValueError:
                 return 0
+        if name == "perspective":
+            # a length, in pixels, for the children's 3D transforms; none is none
+            if lowered == "none":
+                return "none"
+            length = parse_length(lowered, font, root_size, self.viewport)
+            return float(length) if isinstance(length, (int, float)) and length > 0 else "none"
         if name == "transform":
-            return _translation(lowered, font, root_size, self.viewport)
+            ops = parse_transform_ops(lowered, font, root_size, self.viewport)
+            if ops and all(op in ("translate", "translatex", "translatey") for op, _a in ops):
+                return _translation(lowered, font, root_size, self.viewport)
+            if ops:
+                return TransformOps(ops)
+            return None if ops == [] else _translation(lowered, font, root_size, self.viewport)
         if name == "opacity":
             try:
                 number = float(lowered[:-1]) / 100 if lowered.endswith("%") else float(lowered)
@@ -1474,6 +1774,224 @@ def _translation(value: str, font: float, root_size: float, viewport):
     return (x, y) if found else None
 
 
+# ------------------------------------------------------------ transforms
+
+
+class TransformOps(list):
+    """A transform as [(function, arguments)]: lengths as ("px", n) or
+    ("%", n) of the box, angles in degrees, numbers as they are. Drawn by
+    paint at the element's box; a list of translations alone stays a plain
+    (x, y) for layout, which moves links with it."""
+
+
+_ANGLE = re.compile(r"^(-?[\d.]+(?:e-?\d+)?)(deg|rad|grad|turn)?$")
+
+
+def _angle(text: str):
+    found = _ANGLE.match(text.strip())
+    if not found:
+        return None
+    number, unit = float(found.group(1)), found.group(2) or "deg"
+    if unit == "deg" or (unit == "deg" and number == 0):
+        return number
+    return {"rad": number * 57.29577951308232, "grad": number * 0.9, "turn": number * 360}.get(unit, number)
+
+
+def parse_transform_ops(value: str, font: float, root_size: float, viewport):
+    """A transform's functions, or None if it cannot be read; [] for none."""
+    value = (value or "").strip().lower()
+    if value in ("", "none"):
+        return []
+    ops = []
+    for name, body in re.findall(r"([a-z0-9]+)\(([^()]*(?:\([^()]*(?:\([^()]*\)[^()]*)*\)[^()]*)*)\)", value):
+        # split on commas or spaces, but not inside calc(): GitHub's marquee
+        # ends at translateX(calc(-100% - var(--marquee-gap)))
+        if "," in body:
+            parts = [p.strip() for p in _split_outside(body, ",") if p.strip()]
+        else:
+            parts = _split_top(body.strip(), " ")
+        args = []
+        for i, part in enumerate(parts):
+            if name.startswith(("rotate", "skew")) and not (name == "rotate3d" and i < 3):
+                angle = _angle(part)
+                if angle is None:
+                    return None
+                args.append(angle)
+            elif name.startswith(("scale", "matrix")) or (name == "rotate3d" and i < 3):
+                try:
+                    args.append(float(part[:-1]) / 100 if part.endswith("%") else float(part))
+                except ValueError:
+                    return None
+            else:
+                length = parse_length(part, font, root_size, viewport)
+                if length is None and part.startswith("calc("):
+                    mixed = _mixed_length(part[5:-1], font, root_size, viewport)
+                    if mixed is None:
+                        return None
+                    args.append(mixed)
+                    continue
+                if length is None or length == "auto":
+                    return None
+                args.append(("%", length[1]) if isinstance(length, tuple) else ("px", float(length)))
+        ops.append((name, args))
+    return ops
+
+
+def _mixed_length(expression: str, font: float, root_size: float, viewport):
+    """A calc() of a percentage and lengths, as ("mix", percent, px): so much
+    of the box, which only paint knows, and so many pixels."""
+    percent = pixels = 0.0
+    terms = re.split(r"\s+([+-])\s+", " " + expression.strip())
+    sign = 1.0
+    for token in terms:
+        token = token.strip()
+        if token in ("+", "-"):
+            sign = 1.0 if token == "+" else -1.0
+            continue
+        if not token:
+            continue
+        if token.endswith("%") and re.match(r"^-?[\d.]+%$", token):
+            percent += sign * float(token[:-1])
+        else:
+            length = parse_length(token if not re.search(r"[*/]", token) else f"calc({token})",
+                                  font, root_size, viewport)
+            if not isinstance(length, (int, float)):
+                return None
+            pixels += sign * float(length)
+        sign = 1.0
+    return ("mix", percent, pixels)
+
+
+def _individual_transforms(style: dict, font: float, root_size: float, viewport) -> list:
+    """translate, rotate and scale, the properties: applied before transform,
+    in that order, as CSS Transforms 2 gives them."""
+    ops = []
+    translate = style.get("translate")
+    if isinstance(translate, str) and translate not in ("none", ""):
+        parts = translate.split()
+        lengths = [parse_length(p, font, root_size, viewport) for p in parts[:3]]
+        if all(length is not None and length != "auto" for length in lengths):
+            args = [("%", n[1]) if isinstance(n, tuple) else ("px", float(n)) for n in lengths]
+            ops.append(("translate3d" if len(args) == 3 else "translate", args))
+    rotate = style.get("rotate")
+    if isinstance(rotate, str) and rotate not in ("none", ""):
+        parts = rotate.split()
+        angle = _angle(parts[-1])
+        if angle is not None:
+            if len(parts) == 2 and parts[0] in ("x", "y", "z"):
+                ops.append(("rotate" + parts[0], [angle]))
+            elif len(parts) == 4:
+                try:
+                    ops.append(("rotate3d", [float(p) for p in parts[:3]] + [angle]))
+                except ValueError:
+                    pass
+            else:
+                ops.append(("rotate", [angle]))
+    scale = style.get("scale")
+    if isinstance(scale, str) and scale not in ("none", ""):
+        try:
+            numbers = [float(p[:-1]) / 100 if p.endswith("%") else float(p) for p in scale.split()]
+            ops.append(("scale3d" if len(numbers) == 3 else "scale", numbers if len(numbers) > 1 else numbers * 2))
+        except ValueError:
+            pass
+    return ops
+
+
+def keyframes_in(text: str) -> dict:
+    """Every @keyframes in a stylesheet, wherever it is (inside @media and
+    @supports too): name -> [(offsets, {property: raw value}, timing)]."""
+    found = {}
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    for match in re.finditer(r"@(?:-webkit-|-moz-)?keyframes\s+([^\s{]+)\s*\{", text):
+        name = match.group(1).strip().strip("'\"").lower()
+        depth, position = 1, match.end()
+        while position < len(text) and depth:
+            if text[position] == "{":
+                depth += 1
+            elif text[position] == "}":
+                depth -= 1
+            position += 1
+        body = text[match.end():position - 1]
+        frames = []
+        for selector, declarations in re.findall(r"([^{}]+)\{([^{}]*)\}", body):
+            offsets = []
+            for part in selector.split(","):
+                part = part.strip().lower()
+                offset = {"from": 0.0, "to": 1.0}.get(part)
+                if offset is None and part.endswith("%"):
+                    try:
+                        offset = float(part[:-1]) / 100
+                    except ValueError:
+                        offset = None
+                if offset is not None:
+                    offsets.append(offset)
+            props = {d[0]: d[1] for d in parse_declarations(declarations)}
+            if offsets and props:
+                frames.append((offsets, props))
+        if frames:
+            found[name] = frames
+    return found
+
+
+_ANIMATED = ("transform", "opacity", "translate", "rotate", "scale")
+_ITERATION = re.compile(r"^(infinite|[\d.]+)$")
+_TIME = re.compile(r"^(-?[\d.]+)(ms|s)$")
+_DIRECTIONS = {"normal", "reverse", "alternate", "alternate-reverse"}
+_FILLS = {"none", "forwards", "backwards", "both"}
+
+
+def _animation_list(style: dict) -> list:
+    """animation and its longhands, as one dict per animation named."""
+    entries = []
+    shorthand = style.get("animation")
+    if isinstance(shorthand, str) and shorthand.strip() not in ("", "none"):
+        for part in _split_outside(shorthand, ","):
+            entry = {"times": []}
+            for token in re.findall(r"[a-z-]+\([^)]*\)|[^\s]+", part.strip()):
+                if _TIME.match(token):
+                    entry["times"].append(token)
+                elif token.startswith(("cubic-bezier(", "steps(", "linear(")) or token in (
+                        "ease", "ease-in", "ease-out", "ease-in-out", "linear", "step-start", "step-end"):
+                    entry["timing"] = token
+                elif _ITERATION.match(token):
+                    entry["iterations"] = token
+                elif token in _DIRECTIONS:
+                    entry["direction"] = token
+                elif token in _FILLS and "fill" not in entry:
+                    entry["fill"] = token
+                elif token in ("running", "paused"):
+                    entry["play"] = token
+                else:
+                    entry["name"] = token.strip("'\"")
+            entries.append(entry)
+    longhands = {"name": "animation-name", "timing": "animation-timing-function",
+                 "iterations": "animation-iteration-count", "direction": "animation-direction",
+                 "fill": "animation-fill-mode", "play": "animation-play-state"}
+    names = style.get("animation-name")
+    if isinstance(names, str) and names.strip():
+        count = len(_split_outside(names, ","))
+        while len(entries) < count:
+            entries.append({"times": []})
+    for key, prop in longhands.items():
+        value = style.get(prop)
+        if isinstance(value, str) and value.strip():
+            for entry, item in zip(entries, _split_outside(value, ",")):
+                entry[key] = item.strip().strip("'\"")
+    for key, prop in (("duration", "animation-duration"), ("delay", "animation-delay")):
+        value = style.get(prop)
+        if isinstance(value, str) and value.strip():
+            for entry, item in zip(entries, _split_outside(value, ",")):
+                entry[key] = item.strip()
+    return entries
+
+
+def _seconds(text) -> float:
+    found = _TIME.match(str(text or "").strip())
+    if not found:
+        return 0.0
+    return float(found.group(1)) / (1000 if found.group(2) == "ms" else 1)
+
+
 # ------------------------------------------------------------ grid tracks
 
 
@@ -1496,6 +2014,13 @@ def _track(token: str, font: float, root_size: float, viewport):
         return ("pct", length[1])
     if isinstance(length, float):
         return ("px", length)
+    if token.startswith("calc(") and token.endswith(")"):
+        # a percentage of the grid and lengths together: GitHub's profile and
+        # repository pages size their main column with calc(100% - sidebar
+        # - gutter); read as auto, it shrank to a sliver
+        mixed = _mixed_length(token[5:-1], font, root_size, viewport)
+        if mixed is not None:
+            return ("mix", mixed[1], mixed[2])
     return ("auto",)
 
 

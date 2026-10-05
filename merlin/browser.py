@@ -1486,6 +1486,11 @@ class BrowserWindow(QMainWindow):
             return
         view.setProperty("merlin_start", False)
         view.setProperty("merlin_icon", None)
+        # Entered in the address bar and https: if the site does not answer on
+        # https at all, it may be tried over http, as Brave does. Typed with
+        # no scheme or filled in by autocomplete alike: the address bar's
+        # completion had put https:// in front, and the fallback never came.
+        view.setProperty("http_fallback", url.host() if url.scheme() == "https" else None)
         view.setUrl(url)
 
     def normalise(self, text: str) -> QUrl | None:
@@ -3188,6 +3193,7 @@ class BrowserWindow(QMainWindow):
 
         if getattr(self, "_download_popup", None) is None:
             self._download_popup = DownloadPopup(self)
+        self._download_popup.set_radius(self.settings.get("page_corner_radius", 10))
         self._download_popup.announce(path, getattr(self, "btn_downloads", None))
 
     def _fill_downloads_menu(self) -> None:
