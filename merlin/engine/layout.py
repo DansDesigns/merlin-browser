@@ -2070,6 +2070,8 @@ class Layout:
                 limit = self._track_floor(track[2], width)
                 if limit > sizes[index]:
                     limits[index] = limit
+        if getattr(self, "_grid_measuring", 0):
+            limits = {}                          # measuring: no room to hand out
         while free > 0.5 and limits:
             share = free / len(limits)
             for index in list(limits):
@@ -2094,7 +2096,7 @@ class Layout:
                     sizes[i] = active[i][1]
                     room_left -= active[i][1]
                     del active[i]
-        elif free > 0 and not flexible:
+        elif free > 0 and not flexible and not getattr(self, "_grid_measuring", 0):
             # with no fr track to take it, the room left stretches the auto
             # tracks, as the specification's last sizing step says
             stretchy = [i for i, t in enumerate(column_tracks) if t[0] == "auto"]
@@ -2378,7 +2380,16 @@ class _Measure:
             if style.get("display") in ("flex", "inline-flex"):
                 return self._flex_natural(element, style, narrowest=width <= 1.0)
             elif style.get("display") in ("grid", "inline-grid"):
-                self.layout._grid(element, style, 0.0, 0.0, width)
+                # A grid's natural width is what its content needs: laid out
+                # from the start, with no room handed out. Centred in the
+                # 100,000 pixels it was measured in, GitHub's button content
+                # came to 50,000 wide, its "Code" drawn off to the right.
+                plain = dict(style, **{"justify-content": "start", "justify-items": "start"})
+                self.layout._grid_measuring = getattr(self.layout, "_grid_measuring", 0) + 1
+                try:
+                    self.layout._grid(element, plain, 0.0, 0.0, width)
+                finally:
+                    self.layout._grid_measuring -= 1
             else:
                 stacked = self._stacked_natural(element, width <= 1.0)
                 if stacked is not None:

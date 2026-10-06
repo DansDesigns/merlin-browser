@@ -5,6 +5,53 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.11
+  A stylesheet or preload <link> a page's script adds, and an image given a
+  src (new Image() too), fire their load, as in a browser. Webpack loads a
+  route's CSS with a <link> and waits for its load: none came, and Square's
+  router waited for ever on its first page. AlterniTech's site, its data all
+  there, was never shown: replayed from its debugging zip, the router now
+  finishes its first navigation where it had stayed pending, and the page's
+  components are made (123 where there had been 59).
+  A whole TreeWalker, as the DOM specification gives it (parentNode,
+  firstChild, lastChild, previousSibling, nextSibling, previousNode, nextNode,
+  with filters and whatToShow), and NodeFilter's constants, which were missing:
+  a walker for elements had walked text too. GitHub's and YouTube's code use
+  them.
+  performance.timing and performance.navigation, which YouTube reads as it
+  starts, and document.implementation.createHTMLDocument, which its web
+  components library uses.
+  From the zips: AlterniTech's network log showed every request answered, so
+  the page's data was not what was missing; Ponder's showed none failing and
+  no errors. GitHub's repository page, with 1.8.10's fixes, now has its Code
+  button, 1 Branch and 7 Tags, the latest commit's line laid out with its 123
+  commits, and the Contributors.
+  Not yet: the column headings over GitHub's file list, which GitHub hides,
+  show; its branch name loses a letter ("mai"). YouTube plays no video.
+
+1.8.10
+  Escaped class names match, as CSS reads them. Tailwind writes its classes
+  with backslashes (.w-1\/2, .lg\:flex, .size-\[\.6rem\], .\32 xl\:p-4) and
+  none of them had matched: on every Tailwind site most of the styling was
+  missing, Hugging Face's huge icons and wrong layout among it. Names may hold
+  any character beyond ASCII too, as Square's class names hold emoji. The one
+  space after a hex escape is part of it, not a descendant combinator, and an
+  escaped bracket is no bracket.
+  A grid's natural width is what its content needs. Measured, it had been laid
+  out in 100,000 pixels and centred there: GitHub's Code button's content came
+  to 50,000 pixels wide, and its label was drawn far off to the right, leaving
+  the button blank. The branch button's name, squeezed beside it, had lost a
+  letter ("mai").
+  A page's own button for a file input (input.click() or showPicker(), as
+  Ponder's Browse for a wallpaper) opens Merlin's file dialog, by the input's
+  accept and multiple; what is chosen reaches the page as Files in
+  input.files, with input and change, read as in a browser (FileReader).
+  Files chosen with Merlin's own file field reach the page's scripts too.
+  Not yet: Google answers Merlin Engine's searches with its "unusual traffic"
+  page. It tells browsers from programs by how the connection is made (TLS and
+  HTTP/2), not by anything a page sends, and Merlin Engine's connections are
+  Python's. Ponder, giving Google's results through Serper, searches instead.
+
 1.8.9
   ::before and ::after in Merlin Engine. Their rules are matched with the
   element's, their style inherits from it, and where content gives them some

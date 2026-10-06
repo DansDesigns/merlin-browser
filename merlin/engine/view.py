@@ -1829,6 +1829,12 @@ class MerlinView(QWidget):
             self._script_fetch(host, message)
         elif kind == "handled":
             self._script_answered(message.get("id"), bool(message.get("prevented")))
+        elif kind == "pick_file":
+            # the page's own button asked for its file input's dialog
+            element = self._by_script_id.get(str(message.get("target")))
+            if element is not None:
+                widget = self._widgets.get(element)
+                QTimer.singleShot(0, lambda e=element, w=widget: self._choose_files(e, w))
         elif kind == "form":
             # form.submit() or requestSubmit(): sent as a form is, its handlers
             # having run in the page already
@@ -2380,7 +2386,7 @@ class MerlinView(QWidget):
             widget.setText(f"{len(files)} files")
         widget.setToolTip("\n".join(files))
 
-    def _choose_files(self, element, widget) -> None:
+    def _choose_files(self, element, widget=None) -> None:
         from PyQt6.QtWidgets import QFileDialog
 
         from . import forms
@@ -2391,9 +2397,33 @@ class MerlinView(QWidget):
         else:
             path, _filter = QFileDialog.getOpenFileName(self, "Choose a file", "", which)
             files = [path] if path else []
-        if files:
+        if files and widget is not None:
             widget.setProperty("merlin_files", files)
             self._show_files(widget, element)
+        if files:
+            self._send_files(element, files)
+
+    def _send_files(self, element, paths: list) -> None:
+        """Chosen files to the page's scripts, as Files in the input."""
+        import base64
+        import mimetypes
+
+        element = self._current(element)
+        if self._script is None or not element.attrs.get("data-mjs"):
+            return
+        sent = []
+        for path in paths:
+            try:
+                if os.path.getsize(path) > 50 * 1024 * 1024:
+                    continue                          # too big to hand to a page
+                with open(path, "rb") as handle:
+                    data = handle.read()
+            except OSError:
+                continue
+            sent.append({"name": os.path.basename(path), "data": base64.b64encode(data).decode("ascii"),
+                         "type": mimetypes.guess_type(path)[0] or "", "size": len(data),
+                         "lastModified": int(os.path.getmtime(path) * 1000)})
+        self._script.send({"type": "files", "target": int(element.attrs["data-mjs"]), "files": sent})
 
     def _radio_toggled(self, element, on: bool) -> None:
         if not on:

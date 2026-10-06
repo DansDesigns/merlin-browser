@@ -228,6 +228,22 @@ function install(html) {
     try { Object.defineProperty(found, "name", { value: name }); } catch (_) {}
     if (!(name in g) || typeof g[name] !== "function") g[name] = found;
   }
+  if (g.HTMLImageElement?.prototype) {
+    const imageProto = g.HTMLImageElement.prototype;
+    const srcOwner = (() => { let p = imageProto; while (p && !Object.getOwnPropertyDescriptor(p, "src")) p = Object.getPrototypeOf(p); return p; })();
+    const srcDescriptor = srcOwner && Object.getOwnPropertyDescriptor(srcOwner, "src");
+    Object.defineProperty(imageProto, "src", { configurable: true,
+      get() { return srcDescriptor?.get ? srcDescriptor.get.call(this) : (this.getAttribute("src") || ""); },
+      set(value) {
+        if (srcDescriptor?.set) srcDescriptor.set.call(this, value); else this.setAttribute("src", String(value));
+        loadsFired.delete(this);
+        arrived(this);
+      } });
+    for (const [name, value] of [["complete", true], ["naturalWidth", 1], ["naturalHeight", 1]]) {
+      if (!(name in imageProto)) Object.defineProperty(imageProto, name, { configurable: true, get() { return value; } });
+    }
+    if (typeof imageProto.decode !== "function") imageProto.decode = function () { return Promise.resolve(); };
+  }
   g.Image = function Image(width, height) { const img = document_.createElement("img"); if (width) img.width = width; if (height) img.height = height; return img; };
   g.Option = function Option(text = "", value) { const o = document_.createElement("option"); o.textContent = text; if (value !== undefined) o.value = value; return o; };
   g.window = g; g.self = g; g.globalThis = g; g.document = document_; g.top = g; g.parent = g; g.frames = g;
@@ -439,6 +455,20 @@ function install(html) {
   // form.submit() and requestSubmit(), which the DOM had as nothing at all:
   // search boxes that send their form from a script (Google's, Ponder's) did
   // nothing on Enter. requestSubmit runs the page's submit handlers first.
+  // A file input clicked, or its picker asked for, by the page's own button
+  // (Ponder's Browse): Merlin opens the file dialog, and what is chosen comes
+  // back as Files in input.files, with input and change, as in a browser.
+  {
+    const elementProto = (g.HTMLElement || made.HTMLElement).prototype;
+    const isFile = (el) => el.tagName === "INPUT" && (el.getAttribute("type") || "").toLowerCase() === "file";
+    const originalClick = elementProto.click;
+    elementProto.click = function () {
+      if (isFile(this)) { if (!this.hasAttribute("disabled")) send({ type: "pick_file", target: idOf(this) }); return; }
+      if (typeof originalClick === "function") return originalClick.call(this);
+      this.dispatchEvent(new g.MouseEvent("click", { bubbles: true, cancelable: true }));
+    };
+    elementProto.showPicker = function () { if (isFile(this)) send({ type: "pick_file", target: idOf(this) }); };
+  }
   // on the element class itself: the DOM does not make <form> an
   // HTMLFormElement, and methods put there never reached a form
   const formProto = (g.HTMLElement || made.HTMLElement).prototype;
@@ -452,6 +482,149 @@ function install(html) {
       if (!event.defaultPrevented) send({ type: "form", target: idOf(this), submitter: submitter ? idOf(submitter) : null });
     };
   }
+  // performance.timing and .navigation, the older page timings YouTube reads
+  // as it starts; and document.implementation, for a separate inert document
+  // (YouTube's web components library makes one)
+  if (!performance.timing) {
+    const start = Date.now() - Math.round(performance.now());
+    const timing = {};
+    for (const [name, at] of Object.entries({ navigationStart: 0, fetchStart: 1, domainLookupStart: 1,
+      domainLookupEnd: 2, connectStart: 2, connectEnd: 5, secureConnectionStart: 3, requestStart: 6,
+      responseStart: 40, responseEnd: 60, domLoading: 61, domInteractive: 200, domContentLoadedEventStart: 210,
+      domContentLoadedEventEnd: 215, domComplete: 400, loadEventStart: 401, loadEventEnd: 402,
+      redirectStart: 0, redirectEnd: 0, unloadEventStart: 0, unloadEventEnd: 0 })) timing[name] = at ? start + at : (name === "navigationStart" ? start : 0);
+    timing.toJSON = () => ({ ...timing });
+    try { Object.defineProperty(performance, "timing", { value: timing, configurable: true }); } catch (_) {}
+    try { Object.defineProperty(performance, "navigation", { value: { type: 0, redirectCount: 0 }, configurable: true }); } catch (_) {}
+  }
+  if (!document_.implementation || typeof document_.implementation.createHTMLDocument !== "function") {
+    const implementation = {
+      createHTMLDocument(title = "") {
+        return parseHTML(`<!DOCTYPE html><html><head><title>${String(title)}</title></head><body></body></html>`).document;
+      },
+      createDocument() { return parseHTML("<html></html>").document; },
+      createDocumentType(name) { return { nodeType: 10, name }; },
+      hasFeature() { return true; },
+    };
+    try { Object.defineProperty(document_, "implementation", { value: implementation, configurable: true }); } catch (_) {}
+  }
+  // A whole TreeWalker, as the DOM specification gives it: the DOM's had only
+  // nextNode, and GitHub's code (firstChild) and YouTube's failed on it
+  const SHOW = (node, mask) => (mask >>> 0) & (1 << ((node.nodeType || 1) - 1));
+  class MerlinTreeWalker {
+    constructor(root, whatToShow = 0xFFFFFFFF, filter = null) {
+      this.root = root; this.whatToShow = whatToShow >>> 0; this.filter = filter; this.currentNode = root;
+    }
+    _accept(node) {
+      if (!SHOW(node, this.whatToShow)) return 3;                    // skip
+      const f = this.filter;
+      if (!f) return 1;
+      const answer = typeof f === "function" ? f(node) : f.acceptNode(node);
+      return answer === 2 ? 2 : answer === 3 ? 3 : 1;                // reject, skip, accept
+    }
+    parentNode() {
+      let node = this.currentNode;
+      while (node && node !== this.root) {
+        node = node.parentNode;
+        if (node && this._accept(node) === 1) { this.currentNode = node; return node; }
+      }
+      return null;
+    }
+    _child(first) {
+      let node = first ? this.currentNode.firstChild : this.currentNode.lastChild;
+      while (node) {
+        const answer = this._accept(node);
+        if (answer === 1) { this.currentNode = node; return node; }
+        if (answer === 3) {
+          const inner = first ? node.firstChild : node.lastChild;
+          if (inner) { node = inner; continue; }
+        }
+        while (node) {
+          const sibling = first ? node.nextSibling : node.previousSibling;
+          if (sibling) { node = sibling; break; }
+          const up = node.parentNode;
+          if (!up || up === this.root || up === this.currentNode) return null;
+          node = up;
+        }
+      }
+      return null;
+    }
+    firstChild() { return this._child(true); }
+    lastChild() { return this._child(false); }
+    _sibling(next) {
+      let node = this.currentNode;
+      if (node === this.root) return null;
+      for (;;) {
+        let sibling = next ? node.nextSibling : node.previousSibling;
+        while (sibling) {
+          node = sibling;
+          const answer = this._accept(node);
+          if (answer === 1) { this.currentNode = node; return node; }
+          sibling = next ? node.firstChild : node.lastChild;
+          if (answer === 2 || !sibling) sibling = next ? node.nextSibling : node.previousSibling;
+        }
+        node = node.parentNode;
+        if (!node || node === this.root) return null;
+        if (this._accept(node) === 1) return null;
+      }
+    }
+    nextSibling() { return this._sibling(true); }
+    previousSibling() { return this._sibling(false); }
+    previousNode() {
+      let node = this.currentNode;
+      while (node !== this.root) {
+        let sibling = node.previousSibling;
+        while (sibling) {
+          node = sibling;
+          let answer = this._accept(node);
+          while (answer !== 2 && node.lastChild) { node = node.lastChild; answer = this._accept(node); }
+          if (answer === 1) { this.currentNode = node; return node; }
+          sibling = node.previousSibling;
+        }
+        if (node === this.root || !node.parentNode) return null;
+        node = node.parentNode;
+        if (this._accept(node) === 1) { this.currentNode = node; return node; }
+      }
+      return null;
+    }
+    nextNode() {
+      let node = this.currentNode, answer = 1;
+      for (;;) {
+        while (answer !== 2 && node.firstChild) {
+          node = node.firstChild;
+          answer = this._accept(node);
+          if (answer === 1) { this.currentNode = node; return node; }
+        }
+        let sibling = null, temporary = node;
+        while (temporary) {
+          if (temporary === this.root) return null;
+          sibling = temporary.nextSibling;
+          if (sibling) break;
+          temporary = temporary.parentNode;
+        }
+        if (!sibling) return null;
+        node = sibling;
+        answer = this._accept(node);
+        if (answer === 1) { this.currentNode = node; return node; }
+      }
+    }
+  }
+  const walkerOwner = Object.getPrototypeOf(document_);
+  try {
+    Object.defineProperty(walkerOwner, "createTreeWalker", { configurable: true, writable: true,
+      value(root, whatToShow, filter) { return new MerlinTreeWalker(root, whatToShow ?? 0xFFFFFFFF, filter ?? null); } });
+  } catch (_) {}
+  g.TreeWalker = MerlinTreeWalker;
+  // NodeFilter's constants, which the DOM's lacked: SHOW_ELEMENT undefined,
+  // a walker for elements walked everything
+  const filters = { FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3, SHOW_ALL: 0xFFFFFFFF, SHOW_ELEMENT: 0x1,
+    SHOW_ATTRIBUTE: 0x2, SHOW_TEXT: 0x4, SHOW_CDATA_SECTION: 0x8, SHOW_PROCESSING_INSTRUCTION: 0x40,
+    SHOW_COMMENT: 0x80, SHOW_DOCUMENT: 0x100, SHOW_DOCUMENT_TYPE: 0x200, SHOW_DOCUMENT_FRAGMENT: 0x400 };
+  const nodeFilter = (typeof g.NodeFilter === "function" || typeof g.NodeFilter === "object") && g.NodeFilter ? g.NodeFilter : {};
+  for (const [name, value] of Object.entries(filters)) {
+    if (nodeFilter[name] === undefined) { try { Object.defineProperty(nodeFilter, name, { value, enumerable: true }); } catch (_) {} }
+  }
+  g.NodeFilter = nodeFilter;
   // document.styleSheets: the page's stylesheets, a live list, as Google's
   // CSS loader reads its length. A rule inserted into a <style> sheet is added
   // to its text, so Merlin Engine styles the page with it.
@@ -953,10 +1126,29 @@ async function runScripts() {
   state.loaded = true;
 }
 
+// A stylesheet or preload <link>, or an image, a page adds: its load
+// fires once it is there, as in a browser (Merlin fetches what it draws).
+// Webpack loads a route's CSS with a <link> and waits for that load: none
+// came, and Square's router waited for ever on its first page, which was
+// never shown.
+const LOADING_LINKS = /(^|\s)(stylesheet|preload|prefetch|modulepreload|icon|preconnect|dns-prefetch)(\s|$)/i;
+const loadsFired = new WeakSet();
+function arrived(node) {
+  if (!node || loadsFired.has(node)) return;
+  const tag = node.tagName;
+  if (tag === "LINK" && !LOADING_LINKS.test(node.getAttribute("rel") || "")) return;
+  if (tag === "LINK" && !node.getAttribute("href")) return;
+  if (tag === "IMG" && !node.getAttribute("src")) return;
+  loadsFired.add(node);
+  setTimeout(() => fire(node, "load"), 10);
+}
+
 // scripts a page adds later run as they arrive, as in a browser
 function watchForScripts() {
   new globalThis.MutationObserver((records) => {
     for (const record of records) for (const node of record.addedNodes || []) {
+      if (node.tagName === "LINK" || node.tagName === "IMG") arrived(node);
+      for (const inner of node.querySelectorAll ? node.querySelectorAll("link, img") : []) arrived(inner);
       const scripts = node.tagName === "SCRIPT" ? [node] : (node.querySelectorAll ? [...node.querySelectorAll("script")] : []);
       for (const script of scripts) {
         if (ran.has(script) || !runnable(script)) continue;
@@ -1014,6 +1206,19 @@ function dispatch(message) {
     state.scrollX = message.x || 0; state.scrollY = message.y || 0;
     fire(globalThis, "scroll"); fire(document_, "scroll");
     for (const observer of observers) observer._check();
+    return;
+  }
+  if (message.type === "files") {
+    const input = nodeOf(message.target);
+    if (!input) return;
+    const files = (message.files || []).map((f) => new File([fromBase64(f.data)], f.name,
+      { type: f.type || "", lastModified: f.lastModified || Date.now() }));
+    const list = Object.assign([...files], { item(i) { return this[i] ?? null; } });
+    try { Object.defineProperty(input, "files", { value: list, configurable: true, writable: true }); } catch (_) {}
+    try { Object.defineProperty(input, "value", { value: files.length ? "C:\\fakepath\\" + files[0].name : "",
+                                                   configurable: true, writable: true }); } catch (_) {}
+    input.dispatchEvent(new globalThis.Event("input", { bubbles: true }));
+    input.dispatchEvent(new globalThis.Event("change", { bubbles: true }));
     return;
   }
   if (message.type === "geometry") {

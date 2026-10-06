@@ -2556,6 +2556,197 @@ def test_pseudo_elements(app) -> None:
     check("styled again, none doubles", sum(1 for e in document.root.elements() if e.pseudo) == 5)
 
 
+def test_escaped_selectors_grids_and_files(app) -> None:
+    """Tailwind's escaped class names, emoji in class names, a grid's natural
+    width, and a page's own button opening the file dialog."""
+    from PyQt6.QtWidgets import QFileDialog
+
+    from merlin.engine import MerlinView
+    from merlin.engine.css import Styler
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+    from merlin.engine.script import LocalStorage
+
+    css = (r".size-\[\.6rem\] { width: 9.6px } .w-1\/2 { width: 50px } .lg\:flex { display: flex }"
+           r" .\!hidden { display: none } .h-\[calc\(100\%-2rem\)\] { height: 77px }"
+           r" .\32 xl\:p-4 { padding: 4px } .📚19-10-3qfj5z { width: 31px } .\31 23 span { width: 7px }")
+    document = parse("<style>" + css + "</style><svg id=a class='size-[.6rem]'></svg><div id=b class='w-1/2'></div>"
+                     "<div id=c class='lg:flex'></div><div id=d class='!hidden'></div><div id=e class='h-[calc(100%-2rem)]'></div>"
+                     "<div id=f class='2xl:p-4'></div><div id=g class='📚19-10-3qfj5z'></div><div class='123'><span id=h>x</span></div>")
+    styles = Styler(document, viewport=(1461, 737)).compute()
+
+    def style(eid):
+        return styles[next(e for e in document.root.elements() if e.id == eid)]
+
+    check("Tailwind's escaped class names match: size-[.6rem], w-1/2, lg:flex, !hidden, h-[calc(...)], 2xl:p-4",
+          style("a").get("width") == 9.6 and style("b").get("width") == 50.0 and style("c").get("display") == "flex"
+          and style("d").get("display") == "none" and style("e").get("height") == 77.0 and style("f").get("padding-top") == 4.0)
+    check("a class name with emoji in it matches (Square's), and a hex escape with its space",
+          style("g").get("width") == 31.0 and style("h").get("width") == 7.0)
+    page = ("<style>body{margin:0} button{display:flex;justify-content:space-between;padding:0 12px;font-size:14px}"
+            ".content{display:grid;flex:1 0 auto;grid-template-areas:'lead text trail';justify-content:center;"
+            "grid-template-columns:min-content minmax(0,auto) min-content}"
+            ".label{grid-area:text;white-space:nowrap}</style><div style='display:flex'><button id=code>"
+            "<span class=content><span class=label id=label>Code</span></span></button></div>")
+    document = parse(page)
+    styles = Styler(document).compute()
+    out = Layout(document, styles, 1400, viewport_height=600).run()
+    boxes = {e.attrs.get("id"): r for r, e in out.boxes if e.attrs.get("id")}
+    check("a grid in a flex button is as wide as its content, its label inside (GitHub's Code button)",
+          boxes["code"].width() < 200 and boxes["code"].x() <= boxes["label"].x() < boxes["code"].right(),
+          f"button {boxes['code'].width():.0f} wide, label at {boxes['label'].x():.0f}")
+    deno = _deno_for_tests()
+    if not deno:
+        print("  skip  file picker: Deno is not here")
+        return
+    folder = tempfile.mkdtemp(prefix="merlin-pick-")
+    open(os.path.join(folder, "index.html"), "w").write(
+        "<!DOCTYPE html><html><head><title>Pick</title></head><body>"
+        "<input type=file id=file accept='image/*' style='display:none'><button id=browse>Browse</button><p id=out>none</p>"
+        "<script>const input = document.getElementById('file');"
+        "document.getElementById('browse').addEventListener('click', () => input.click());"
+        "input.addEventListener('change', () => { const f = input.files[0]; const r = new FileReader();"
+        "r.onload = () => { document.getElementById('out').textContent = f.name + ' ' + f.type + ' ' + String(r.result).slice(0, 22); };"
+        "r.readAsDataURL(f); });</script></body></html>")
+    picture = os.path.join(folder, "wallpaper.png")
+    open(picture, "wb").write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 40)
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    class Host:
+        settings = {}
+
+        def javascript_allowed(self, site):
+            return True
+
+        def deno_for_scripts(self):
+            return deno
+
+        def script_cache_dir(self):
+            return os.path.join(folder, "cache")
+
+        def local_storage(self):
+            return LocalStorage(None)
+
+    asked = []
+    real_dialog = QFileDialog.getOpenFileName
+    QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (asked.append(1), (picture, ""))[1])
+    view = MerlinView()
+    view._host = Host()
+    view.resize(600, 400)
+    view.show()
+    try:
+        view.setUrl(QUrl(f"http://127.0.0.1:{server.server_address[1]}/index.html"))
+        wait(app, 3.0)
+        box = next(r for r, e in view._display.boxes if e.id == "browse")
+        from PyQt6.QtTest import QTest
+
+        QTest.mouseClick(view, Qt.MouseButton.LeftButton, pos=QPoint(int(box.center().x()), int(box.center().y())))
+        end = time.time() + 6
+        out = ""
+        while time.time() < end and "wallpaper" not in out:
+            app.processEvents()
+            time.sleep(0.02)
+            out = " ".join(next(e for e in view._document.root.elements() if e.id == "out").text().split())
+        check("a page's own Browse button opens the file dialog, and the page reads the file chosen (Ponder)",
+              asked and out.startswith("wallpaper.png image/png data:image/png;base64,"), out)
+    finally:
+        QFileDialog.getOpenFileName = real_dialog
+        view.close()
+        server.shutdown()
+
+
+def test_loads_and_walkers(app) -> None:
+    """A stylesheet link or image a page adds fires its load (webpack waits for
+    a route's CSS so: Square's router had waited for ever), and the whole
+    TreeWalker, NodeFilter, document.implementation and performance.timing."""
+    from merlin.engine import MerlinView
+
+    deno = _deno_for_tests()
+    if not deno:
+        print("  skip  loads and walkers: Deno is not here")
+        return
+    page = ("<!DOCTYPE html><html><head><title>Loads</title></head><body><div id=r><p id=a>A<b id=b>B</b></p><p id=c>C</p></div>"
+            "<p id=css>waiting</p><p id=img>waiting</p><p id=walk></p><script>"
+            "const link = document.createElement('link'); link.rel = 'stylesheet'; link.href = '/route.css';"
+            "new Promise((resolve, reject) => { link.onload = resolve; link.onerror = reject; document.head.appendChild(link); })"
+            ".then(() => { document.getElementById('css').textContent = 'route css loaded'; });"
+            "const picture = new Image(); picture.onload = () => { document.getElementById('img').textContent = 'image preloaded'; };"
+            "picture.src = '/photo.png';"
+            "const out = ['timing ' + (performance.timing.responseStart > 0),"
+            " 'inert ' + document.implementation.createHTMLDocument('x').body.tagName];"
+            "const w = document.createTreeWalker(document.getElementById('r'), NodeFilter.SHOW_ELEMENT);"
+            "const seen = []; while (w.nextNode()) seen.push(w.currentNode.id); out.push('next ' + seen.join(','));"
+            "const v = document.createTreeWalker(document.getElementById('r'), NodeFilter.SHOW_ELEMENT);"
+            "out.push('first ' + v.firstChild().id + ' sibling ' + v.nextSibling().id);"
+            "const f = document.createTreeWalker(document.getElementById('r'), NodeFilter.SHOW_ELEMENT,"
+            " { acceptNode: (n) => n.id === 'b' ? NodeFilter.FILTER_SKIP : NodeFilter.FILTER_ACCEPT });"
+            "const kept = []; while (f.nextNode()) kept.push(f.currentNode.id); out.push('filtered ' + kept.join(','));"
+            "document.getElementById('walk').textContent = out.join(' | ');</script></body></html>")
+    folder = tempfile.mkdtemp(prefix="merlin-loads-")
+    open(os.path.join(folder, "index.html"), "w").write(page)
+    open(os.path.join(folder, "route.css"), "w").write("p { margin: 0 }")
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    from merlin.engine.script import LocalStorage
+
+    class Host:
+        settings = {}
+
+        def javascript_allowed(self, site):
+            return True
+
+        def deno_for_scripts(self):
+            return deno
+
+        def script_cache_dir(self):
+            return os.path.join(folder, "cache")
+
+        def local_storage(self):
+            return LocalStorage(None)
+
+    view = MerlinView()
+    view._host = Host()
+    view.show()
+    try:
+        view.setUrl(QUrl(f"http://127.0.0.1:{server.server_address[1]}/index.html"))
+
+        def text(eid):
+            if view._document is None:
+                return ""
+            found = next((x for x in view._document.root.elements() if x.id == eid), None)
+            return " ".join(found.text().split()) if found is not None else ""
+
+        end = time.time() + 15
+        while time.time() < end and not (text("css") == "route css loaded" and text("img") == "image preloaded"):
+            app.processEvents()
+            time.sleep(0.02)
+        check("a stylesheet link a script adds fires its load (webpack's way of loading a route's CSS)",
+              text("css") == "route css loaded", text("css"))
+        check("an image preloaded with new Image() fires its load", text("img") == "image preloaded", text("img"))
+        check("TreeWalker whole, with NodeFilter's constants; document.implementation; performance.timing",
+              text("walk") == "timing true | inert BODY | next a,b,c | first a sibling c | filtered a,c", text("walk"))
+    finally:
+        view.close()
+        server.shutdown()
+
+
 def test_modern_colours() -> None:
     """CSS Color 4 and 5, as GitHub uses them: unread, faint lines came out solid."""
     from merlin.engine.css import parse_colour
@@ -2826,6 +3017,10 @@ def main() -> int:
     test_window_events_enter_dns_and_saving(app)
     print("test_pseudo_elements")
     test_pseudo_elements(app)
+    print("test_escaped_selectors_grids_and_files")
+    test_escaped_selectors_grids_and_files(app)
+    print("test_loads_and_walkers")
+    test_loads_and_walkers(app)
     print("test_animations_and_3d")
     test_animations_and_3d(app)
     print("test_server_pages_and_http_fallback")

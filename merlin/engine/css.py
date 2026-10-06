@@ -418,10 +418,25 @@ def index_keys(selector) -> list:
     return [("any", "")]
 
 
+# A name in a selector, as CSS reads it: letters, digits, _ and -, any
+# character beyond ASCII (Square's class names have emoji in them), and
+# \-escapes (Tailwind's .w-1\/2, .lg\:flex, .size-\[\.6rem\], .\32 xl\:p-4)
+_NAME = r"(?:[\w-]|[^\x00-\x7f]|\\[0-9a-fA-F]{1,6}[ ]?|\\[^\n0-9a-fA-F])+"
+
+
+def _unescape(name: str) -> str:
+    """A selector name with its CSS escapes made the characters they stand for."""
+    if "\\" not in name:
+        return name
+    return re.sub(r"\\([0-9a-fA-F]{1,6})[ ]?|\\(.)",
+                  lambda m: chr(int(m.group(1), 16)) if m.group(1) and int(m.group(1), 16) <= 0x10FFFF
+                  else (m.group(2) or "\ufffd"), name)
+
+
 _SIMPLE = re.compile(
     r"""(?P<tag>\*|[a-zA-Z][\w-]*)
-      | \#(?P<id>[\w-]+)
-      | \.(?P<cls>[\w-]+)
+      | \#(?P<id>""" + _NAME + r""")
+      | \.(?P<cls>""" + _NAME + r""")
       | \[(?P<attr>[^\]]+)\]
       | (?P<colons>::?)(?P<pseudo>[\w-]+)""", re.X)
 
@@ -444,9 +459,9 @@ def _compound(text: str):
         if match.group("tag"):
             compound["tag"] = match.group("tag").lower()
         elif match.group("id"):
-            compound["id"] = match.group("id")
+            compound["id"] = _unescape(match.group("id"))
         elif match.group("cls"):
-            compound["classes"].add(match.group("cls"))
+            compound["classes"].add(_unescape(match.group("cls")))
         elif match.group("attr"):
             body = match.group("attr").strip()
             op = re.match(r"^([\w-]+)\s*([~|^$*]?=)?\s*(.*)$", body)
@@ -665,7 +680,31 @@ def _selector_tokens(text: str) -> list:
     :nth-child(2n + 1) and :not(.a .b) keep their spaces and plus signs.
     """
     tokens, current, depth, quote = [], [], 0, ""
+    escape = 0                 # characters still part of a \-escape: never a combinator or bracket
+    hexed = False
     for character in text:
+        if escape:
+            if escape == 1 and character in "0123456789abcdefABCDEF":
+                hexed = True
+            if hexed and escape > 1 and character not in "0123456789abcdefABCDEF":
+                escape = 0                   # the hex escape has ended: this is ordinary
+            elif hexed and escape < 6:
+                current.append(character)
+                escape += 1
+                continue
+            else:
+                current.append(character)
+                escape = 0
+                continue
+        if hexed:
+            hexed = False
+            if character == " ":
+                current.append(character)   # the one space after a hex escape is its own
+                continue
+        if character == "\\" and not quote:
+            current.append(character)
+            escape, hexed = 1, False
+            continue
         if quote:
             current.append(character)
             if character == quote:
