@@ -12,6 +12,7 @@ from __future__ import annotations
 import http.server
 import os
 import sys
+import socket
 import tempfile
 import shutil
 import threading
@@ -2337,6 +2338,224 @@ def test_github_profile_layout(app) -> None:
     check("an animation's duration given by var() is read (animate.css)", timed == 1.0, f"{timed}s")
 
 
+def test_window_events_enter_dns_and_saving(app) -> None:
+    """Window events heard, a timer's error survived, Enter to the page's
+    scripts and forms they send, secure DNS, and the debugging zip written in
+    the background."""
+    import json as _json
+    import zipfile
+
+    from PyQt6.QtCore import QTimer
+    from PyQt6.QtTest import QTest
+
+    from merlin import securedns
+    from merlin.engine import MerlinView
+    from merlin.engine.script import LocalStorage
+
+    deno = _deno_for_tests()
+    folder = tempfile.mkdtemp(prefix="merlin-events-")
+    open(os.path.join(folder, "index.html"), "w").write(
+        "<!DOCTYPE html><html><head><title>Search</title></head><body><p id=heard></p>"
+        "<input id=box name=q><form id=f action=/results.html><textarea id=ta name=q rows=1></textarea></form>"
+        "<script>const out = []; const show = () => document.getElementById('heard').textContent = out.join(' | ');"
+        "addEventListener('load', () => { out.push('load'); show(); });"
+        "addEventListener('scroll', () => { out.push('scroll ' + scrollY); show(); });"
+        "addEventListener('popstate', (e) => out.push('popstate ' + e.state.page));"
+        "dispatchEvent(new PopStateEvent('popstate', { state: { page: 2 } }));"
+        "setTimeout(() => { undefinedThing.call(); }, 50);"
+        "setTimeout(() => { out.push('alive'); show(); }, 300);"
+        "document.getElementById('box').addEventListener('keydown', (e) => { if (e.key === 'Enter') {"
+        " e.preventDefault(); location.href = '/results.html?from=box&q=' + encodeURIComponent(e.target.value); } });"
+        "document.getElementById('ta').addEventListener('keydown', (e) => { if (e.key === 'Enter') {"
+        " e.preventDefault(); document.getElementById('f').requestSubmit(); } });</script>"
+        "<div style='height:3000px'></div></body></html>")
+    open(os.path.join(folder, "results.html"), "w").write("<title>Results</title><p>results</p>")
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+
+    class Host:
+        settings = {}
+
+        def javascript_allowed(self, site):
+            return True
+
+        def deno_for_scripts(self):
+            return deno
+
+        def script_cache_dir(self):
+            return os.path.join(folder, "cache")
+
+        def local_storage(self):
+            return LocalStorage(None)
+
+    def until(view, test, seconds):
+        end = time.time() + seconds
+        while time.time() < end and not test():
+            app.processEvents()
+            time.sleep(0.02)
+        return test()
+
+    def heard(view):
+        found = next((x for x in view._document.root.elements() if x.id == "heard"), None) if view._document else None
+        return " ".join(found.text().split()) if found is not None else ""
+
+    try:
+        if deno:
+            view = MerlinView()
+            view._host = Host()
+            view.resize(700, 400)
+            view.show()
+            finished = []
+            view.loadFinished.connect(finished.append)
+            view.setUrl(QUrl(base + "/index.html"))
+            check("the window's load is heard once, and a popstate with its state",
+                  until(view, lambda: "load" in heard(view), 15) and heard(view).count("load") == 1
+                  and "popstate 2" in heard(view), heard(view))
+            check("an error in a timer is reported, and the page's scripts go on",
+                  until(view, lambda: "alive" in heard(view), 5) and view._script is not None, heard(view))
+            view.scrollbar.setValue(400)
+            check("scrolling is heard by the window's scroll listeners",
+                  until(view, lambda: "scroll 400" in heard(view), 5), heard(view))
+            check("the page's load finishes, its scripts running", bool(finished))
+            view.close()
+            for field, wanted in (("box", "from=box&q=steam"), ("ta", "results.html?q=steam")):
+                # a view of its own each time: on a reload in the same view the
+                # previous page could answer for the new one
+                view = MerlinView()
+                view._host = Host()
+                view.resize(700, 400)
+                view.show()
+                view.setUrl(QUrl(base + "/index.html"))
+                until(view, lambda: "load" in heard(view), 15)
+                widget = next(w for e, w in view._widgets.items() if e.id == field)
+                widget.setFocus()
+                QTest.keyClicks(widget, "steam")
+                wait(app, 0.4)
+                widget = next(w for e, w in view._widgets.items() if e.id == field)
+                QTest.keyClick(widget, Qt.Key.Key_Return)
+                check(f"Enter in a {'text field' if field == 'box' else 'textarea'} goes to the page's keydown,"
+                      " which sends the search",
+                      until(view, lambda: wanted in view.url().toString(), 8), view.url().toString())
+                view.close()
+        else:
+            print("  skip  window events and Enter: Deno is not here")
+        # the debugging zip, written in the background: the window goes on
+        view = MerlinView()
+        view.show()
+        view.setHtml("<title>t</title><p>page</p>", QUrl("about:blank"))
+        wait(app, 0.3)
+        view._script_bodies = {f"https://example.test/{i}.js": os.urandom(40000) for i in range(120)}
+        ticks, result = [], {}
+        timer = QTimer()
+        timer.timeout.connect(lambda: ticks.append(time.monotonic()))
+        timer.start(20)
+        started = time.monotonic()
+        view.save_for_debugging(tempfile.mkdtemp(), "t", done=lambda path, error: result.update(path=path, error=error))
+        while "path" not in result and time.monotonic() - started < 30:
+            app.processEvents()
+            time.sleep(0.005)
+        timer.stop()
+        gaps = [b - a for a, b in zip(ticks, ticks[1:])]
+        check("the debugging zip is written in the background, the window going on meanwhile",
+              not result.get("error") and zipfile.ZipFile(result["path"]).namelist().count("scripts/index.json") == 1
+              and "network.txt" in zipfile.ZipFile(result["path"]).namelist()
+              and (max(gaps) if gaps else 0) < 0.25, f"longest pause {max(gaps) * 1000 if gaps else 0:.0f}ms")
+        view.close()
+    finally:
+        server.shutdown()
+    # secure DNS, against a pretend service in Cloudflare's JSON form
+    asked = []
+
+    class DoH(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            from urllib.parse import parse_qs, urlparse
+
+            query = parse_qs(urlparse(self.path).query)
+            name, kind = query["name"][0], query["type"][0]
+            asked.append(name)
+            answer = [{"name": name, "type": 1, "TTL": 120, "data": "127.0.0.1"}] \
+                if name == "merlin-test.example" and kind == "A" else []
+            body = _json.dumps({"Status": 0, "Answer": answer}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/dns-json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    doh = http.server.ThreadingHTTPServer(("127.0.0.1", 0), DoH)
+    threading.Thread(target=doh.serve_forever, daemon=True).start()
+    site = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
+    threading.Thread(target=site.serve_forever, daemon=True).start()
+    endpoints, original = securedns.ENDPOINTS, socket.getaddrinfo
+    try:
+        securedns.ENDPOINTS = [f"http://127.0.0.1:{doh.server_address[1]}/resolve"]
+        securedns._cache.clear()
+        securedns.install(True)
+        body = urllib.request.urlopen(f"http://merlin-test.example:{site.server_address[1]}/results.html",
+                                      timeout=5).read().decode()
+        check("with secure DNS, a name is looked up over HTTPS (a name only the service knows loads)",
+              "results" in body and "merlin-test.example" in asked)
+        asked.clear()
+        urllib.request.urlopen(f"http://127.0.0.1:{site.server_address[1]}/results.html", timeout=5).read()
+        check("an address or a local name is never sent to the service", not asked, str(asked))
+    finally:
+        securedns.install(False)
+        securedns.ENDPOINTS = endpoints
+        socket.getaddrinfo = original
+        doh.shutdown()
+        site.shutdown()
+
+
+def test_pseudo_elements(app) -> None:
+    """::before and ::after: icon fonts' icons, quotes, separators, attr();
+    drawn, but never part of the page scripts see."""
+    from merlin.engine.css import Styler
+    from merlin.engine.dom import to_html
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+
+    page = ("<style>.ti-settings::before { content: \"\\eb20\"; color: rgb(200, 0, 0) }"
+            "q::before { content: open-quote } q:after { content: close-quote }"
+            ".crumb + .crumb::before { content: ' / ' }"
+            "a[data-count]::after { content: ' (' attr(data-count) ')' }"
+            ".none::before { content: none } img::before { content: 'never' }</style>"
+            "<p id=icon><i class='ti ti-settings'></i></p><p id=quote><q>quoted</q></p>"
+            "<p id=crumbs><span class=crumb>Home</span><span class=crumb>Docs</span></p>"
+            "<p id=count><a data-count=5 href=#>Issues</a></p><p id=none class=none>plain</p><img src=x.png>")
+    document = parse(page)
+    styles = Styler(document).compute()
+
+    def text(eid):
+        return " ".join(next(e for e in document.root.elements() if e.id == eid).text().split())
+
+    check("an icon font's ::before gives its character (Tabler's settings icon)", text("icon") == "\ueb20",
+          repr(text("icon")))
+    icon = next(e for e in document.root.elements() if e.pseudo and e.parent.tag == "i")
+    check("with its own style", styles[icon].get("color") == (200, 0, 0, 255), str(styles[icon].get("color")))
+    check("quotes, separators and attr() in content, :after with one colon too",
+          text("quote") == "\u201cquoted\u201d" and text("crumbs") == "Home / Docs" and text("count") == "Issues (5)",
+          f"{text('quote')} | {text('crumbs')} | {text('count')}")
+    check("content: none makes nothing, and an image has no ::before",
+          text("none") == "plain" and not any(e.pseudo and e.parent.tag == "img" for e in document.root.elements()))
+    out = Layout(document, styles, 800, viewport_height=600).run()
+    check("the icon is drawn", any(it and it[0] == "text" and "\ueb20" in it[3] for it in out.items))
+    check("but scripts never see a pseudo-element, as in a browser",
+          "merlin-pseudo" not in to_html(document) and "\ueb20" not in to_html(document))
+    Styler(document).compute()
+    check("styled again, none doubles", sum(1 for e in document.root.elements() if e.pseudo) == 5)
+
+
 def test_modern_colours() -> None:
     """CSS Color 4 and 5, as GitHub uses them: unread, faint lines came out solid."""
     from merlin.engine.css import parse_colour
@@ -2603,6 +2822,10 @@ def main() -> int:
     test_noscript_without_scripts_and_fonts(app)
     print("test_github_profile_layout")
     test_github_profile_layout(app)
+    print("test_window_events_enter_dns_and_saving")
+    test_window_events_enter_dns_and_saving(app)
+    print("test_pseudo_elements")
+    test_pseudo_elements(app)
     print("test_animations_and_3d")
     test_animations_and_3d(app)
     print("test_server_pages_and_http_fallback")

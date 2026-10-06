@@ -33,12 +33,13 @@ class Text(Node):
 
 
 class Element(Node):
-    __slots__ = ("tag", "attrs", "_class_cache")
+    __slots__ = ("tag", "attrs", "_class_cache", "pseudo")
 
     def __init__(self, tag: str, attrs: dict | None = None):
         super().__init__()
         self.tag = tag
         self.attrs = attrs or {}
+        self.pseudo = None          # "before" or "after": a pseudo-element's box, made by the cascade
 
     @property
     def id(self) -> str:
@@ -148,8 +149,8 @@ def to_html(document) -> str:
         if isinstance(node, Text):
             out.append(node.data if raw else escape(node.data))
             return
-        if not isinstance(node, Element):
-            return
+        if not isinstance(node, Element) or node.pseudo:
+            return                   # ::before and ::after are drawn, not part of the page
         out.append("<" + node.tag)
         for name, value in node.attrs.items():
             out.append(f' {name}="{escape(value, True)}"')

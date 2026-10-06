@@ -1257,6 +1257,11 @@ class SettingsDialog(QDialog):
             lambda: getattr(self.window_ref, "reopen_in_other_engine", lambda: None)())
         layout.addWidget(compare)
         layout.addWidget(self._check(
+            "Use secure DNS (DNS over HTTPS)", "secure_dns",
+            "Look site names up over HTTPS, as Brave does, rather than with Windows' or the "
+            "router's own DNS, which can hold old addresses and can be read on the way. "
+            "Local names still use the system. Takes effect next start."))
+        layout.addWidget(self._check(
             "Run JavaScript", "javascript",
             "Run pages' JavaScript, as other browsers do. Each tab's scripts run in a "
             "process of their own with no access to your files or network: Merlin fetches "

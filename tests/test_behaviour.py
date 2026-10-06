@@ -1375,6 +1375,11 @@ def test_script_sites_and_debug_save(app) -> None:
         wait(app, 1.5)
         window.tabs.setCurrentIndex(window.tabs.indexOf(engine))
         window.save_engine_page()
+        # written in the background since 1.8.8: wait for it, as a person would
+        for _wait in range(300):
+            if window.status_label.text().startswith(("Saved for debugging", "Could not save")):
+                break
+            wait(app, 0.05)
         path = window.status_label.text().split("Saved for debugging: ", 1)[-1]
         names = zipfile.ZipFile(path).namelist() if os.path.exists(path) else []
         check("a Merlin Engine page saves for debugging",
@@ -1728,6 +1733,20 @@ def test_javascript_permission(app) -> None:
     fresh._data = dict(cfg.DEFAULTS)
     check("a fresh install draws pages with Merlin Engine and runs their JavaScript",
           fresh.get("merlin_engine") is True and fresh.get("javascript") is True)
+    from merlin.tabs import PlusButton
+
+    plus = PlusButton()
+    plus.show()
+    app.processEvents()
+    picture = plus.grab().toImage()
+    inked = [(x, y) for y in range(picture.height()) for x in range(picture.width())
+             if picture.pixelColor(x, y).lightness() > 150]
+    middle_x = (min(x for x, _ in inked) + max(x for x, _ in inked)) / 2 if inked else -1
+    middle_y = (min(y for _, y in inked) + max(y for _, y in inked)) / 2 if inked else -1
+    check("the new-tab button's plus is drawn at its very centre, whatever the font",
+          abs(middle_x - (picture.width() - 1) / 2) <= 0.5 and abs(middle_y - (picture.height() - 1) / 2) <= 0.5,
+          f"centre ({middle_x}, {middle_y}) in {picture.width()}x{picture.height()}")
+    plus.close()
     check("and its start page offers Convert Files where Wikipedia was",
           [t["title"] for t in fresh.get("start_tiles")][0] == "Convert Files"
           and fresh.get("start_tiles")[0]["url"] == "http://convert.to.it/",
@@ -1776,6 +1795,11 @@ def test_javascript_permission(app) -> None:
               not any("JavaScript on this site" in t for t in menu_texts))
         window.tabs.setCurrentIndex(window.tabs.indexOf(view))
         window.save_engine_page()
+        # written in the background since 1.8.8: wait for it, as a person would
+        for _wait in range(300):
+            if window.status_label.text().startswith(("Saved for debugging", "Could not save")):
+                break
+            wait(app, 0.05)
         path = window.status_label.text().split("Saved for debugging: ", 1)[-1]
         if os.path.exists(path):
             bundle = zipfile.ZipFile(path)

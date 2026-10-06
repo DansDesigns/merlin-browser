@@ -215,9 +215,17 @@ def _save_engine(window, view, kind: str, path: str) -> None:
     if kind == "zip":
         from .updater import APP_VERSION
 
-        made = view.save_for_debugging(os.path.dirname(path), APP_VERSION)
-        if os.path.abspath(made) != os.path.abspath(path):
-            os.replace(made, path)
+        # written in the background, with the page's scripts and modules:
+        # done there, it had frozen the browser on a page with many
+        window.status_label.setText(f"Saving {os.path.basename(path)}...")
+
+        def finished(made: str, error: str) -> None:
+            if error:
+                window.status_label.setText(f"Could not save the page: {error}")
+            else:
+                _done(window, made)
+        view.save_for_debugging(os.path.dirname(path), APP_VERSION, target=path, done=finished)
+        return
     elif kind == "html":
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(view._markup or "")

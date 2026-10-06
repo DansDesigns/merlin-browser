@@ -5,6 +5,59 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.9
+  ::before and ::after in Merlin Engine. Their rules are matched with the
+  element's, their style inherits from it, and where content gives them some
+  they are boxes at the start and end of it, laid out and drawn like any other:
+  icon fonts' icons (Tabler, Font Awesome, Bootstrap Icons: Ponder's settings
+  cog among them), quotes, separators, attr(), badges and the clearfix. content
+  takes strings with their CSS escapes ("\eb20" being an icon font's
+  character), attr(), and open and close quotes; none and normal make no box;
+  images and replaced elements have none, as in a browser. Scripts never see
+  them, as in a browser.
+  IntersectionObserver counts a box with no size as in view where it lies in
+  view, as browsers do: a page that fills an empty placeholder once it is seen
+  had waited for ever.
+  The debugging zip carries a network log (network.txt): every request a page's
+  scripts made, with its method, status, size and time. A page left empty with
+  nothing in its console, as a Square site can be, shows there which data
+  request failed.
+  From the 1.8.8 zips: GitHub's repository page now shows each file's last
+  commit and date, and its releases, its code view's scripts running now that
+  window events reach them.
+
+1.8.8
+  Secure DNS, as Brave has it: site names are looked up over HTTPS
+  (Cloudflare, then Google, reached by address), not with Windows' or the
+  router's own DNS, which can hold an old address after a site's records change
+  and can be read on the way. Certificates are still checked against the site's
+  own name. Local names (localhost, addresses, names with no dot, .local) use
+  the system, and so does everything if neither service can be reached.
+  Chromium tabs are given it too, secure with a fallback. Settings > Merlin
+  Engine > "Use secure DNS (DNS over HTTPS)", on by default.
+  Enter in a search box: to the page's scripts first, as a keydown, as in a
+  browser, and the form is sent only if they do not take it; in a textarea, a
+  newline only if they do not. form.submit() and requestSubmit() send the form
+  through Merlin; they had done nothing. Google's search box (a textarea whose
+  keydown sends the search) and Ponder's search now search on Enter.
+  The window's own events reach pages: load (once, after the page's scripts),
+  scroll, resize and popstate. The window is Deno's event target, which took
+  only Deno's events, and every one from the page's DOM had failed on it,
+  quietly: no page had ever heard its window load or scroll. GitHub's code view
+  and landing page scripts stopped on it. PopStateEvent, HashChangeEvent,
+  SubmitEvent and the other event classes missing, carrying what they are made
+  with.
+  An error in a timer, through Node's timers as scripts in node:vm use them,
+  had ended the whole process: it is reported, and the page goes on.
+  The status bar no longer stays at "Loading... 60%": a page is loaded once it
+  is shown, laid out, rather than after a layout with none waiting behind it,
+  which never came on a page whose scripts change it all the time.
+  The debugging zip, and Save page as > zip, are written in the background:
+  with a page's modules (Hugging Face's are over a thousand), writing them had
+  frozen the browser.
+  The new-tab button's plus is drawn through its very centre: a "+" of text sat
+  where Windows' font put it, off centre.
+
 1.8.7
   The start page's Wikipedia tile is now Convert Files (http://convert.to.it/),
   in a new install and, once, in an existing one where the Wikipedia tile is

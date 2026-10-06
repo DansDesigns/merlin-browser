@@ -106,9 +106,12 @@ PLUS_SIZE = 38
 
 
 class PlusButton(QToolButton):
+    """The new-tab button. Its plus is drawn, two lines through the very middle:
+    a "+" of text sits where its font puts it, off centre in Windows' font."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setText("+")
+        self.setText("")
         self.setFixedSize(QSize(PLUS_SIZE, PLUS_SIZE))
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setToolTip("New tab (Ctrl+T)")
@@ -117,6 +120,22 @@ class PlusButton(QToolButton):
             " font-size: 21px; font-weight: 500; background: transparent; }"
             "QToolButton:hover { background: #34363d; color: #fff; }"
         )
+
+    def paintEvent(self, event):                            # noqa: N802
+        super().paintEvent(event)                           # its round background, by the theme
+        from PyQt6.QtCore import QPointF
+        from PyQt6.QtGui import QPainter, QPen
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(self.palette().color(self.foregroundRole()), 2.0)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        middle = QPointF(self.width() / 2, self.height() / 2)
+        arm = min(self.width(), self.height()) * 0.2
+        painter.drawLine(QPointF(middle.x() - arm, middle.y()), QPointF(middle.x() + arm, middle.y()))
+        painter.drawLine(QPointF(middle.x(), middle.y() - arm), QPointF(middle.x(), middle.y() + arm))
+        painter.end()
 
 
 # ------------------------------------------------------------- horizontal

@@ -500,6 +500,37 @@ RETRIES = 2                        # further tries for a connection that failed
 RETRY_PAUSES = (1.0, 2.5)          # seconds before each
 
 
+def _bundle_scripts(bundle, bodies: dict, cache: str, hosts: list) -> None:
+    """The scripts the page ran, so it can be run again elsewhere, offline,
+    as it ran here: plain scripts as Merlin fetched them for it, and the
+    page's modules from Deno's cache. Scripts only, not what the page
+    fetched as data."""
+    import json
+
+    index = []
+    for number, (url, body) in enumerate(list(bodies.items())):
+        name = f"scripts/{number:04d}.js"
+        bundle.writestr(name, body)
+        index.append({"url": url, "file": name})
+    bundle.writestr("scripts/index.json", json.dumps(index, indent=1))
+    remote = os.path.join(cache, "remote") if cache else ""
+    if not remote or not os.path.isdir(remote):
+        return
+    for host in hosts:
+        for scheme in ("https", "http"):
+            folder = os.path.join(remote, scheme, host.replace(":", "_port_"))   # as Deno names them
+            if not os.path.isdir(folder):
+                continue
+            for base, _dirs, files in os.walk(folder):
+                for file in files:
+                    full = os.path.join(base, file)
+                    try:
+                        if os.path.getsize(full) <= 20 * 1024 * 1024:
+                            bundle.write(full, "deno-cache/" + os.path.relpath(full, cache).replace(os.sep, "/"))
+                    except OSError:
+                        pass
+
+
 def without_noscript(markup: str) -> str:
     """markup with its <noscript> blocks taken out: for a page whose scripts
     run, as their content is then nothing at all, styles and refreshes too."""
@@ -658,6 +689,7 @@ class MerlinView(QWidget):
     downloadFinished = pyqtSignal(str)               # the saved file
     certTrouble = pyqtSignal(str, str)               # host, certificate problem
     _retrying = pyqtSignal(int, int, int)            # load number, attempt, attempts in all
+    _debug_written = pyqtSignal(object, str, str)    # what to call, the zip, an error if any
     _fell_back = pyqtSignal(int, str)                # load number, host opened over http
     _laid_out = pyqtSignal(int, object)              # layout number, the display list
     _script_prepared = pyqtSignal(int, str, object)  # load number, page from scripts, prepared
@@ -717,6 +749,7 @@ class MerlinView(QWidget):
         self._image_fetched.connect(self._on_image)
         self._restyled.connect(self._on_restyled)
         self._retrying.connect(self._on_retrying)
+        self._debug_written.connect(lambda done, path, error: done(path, error))
         self._fell_back.connect(self._on_fell_back)
         self._laid_out.connect(self._on_laid_out)
         self._script_prepared.connect(self._apply_script_dom)
@@ -734,6 +767,7 @@ class MerlinView(QWidget):
         from collections import deque
 
         self.console_lines = deque(maxlen=400)
+        self.network_lines = deque(maxlen=600)
         self.script_status = "not started"
         # CSS animations: drawn about 30 times a second, only while the page
         # has some and the tab can be seen
@@ -1598,6 +1632,7 @@ class MerlinView(QWidget):
             return
         self.script_status = f"started with {deno}"
         self._script = host
+        self.network_lines.clear()
         self._script_bodies = {}
         self._script_cache = cache
         self._script_hosts = import_hosts(self._markup, self._url.toString())
@@ -1613,8 +1648,11 @@ class MerlinView(QWidget):
         # their first measurements are real rather than 0.
         from .dom import to_html
 
-        for number, element in enumerate([self._document.root] + list(self._document.root.elements()), 1):
+        self._by_script_id = {}
+        real = [e for e in [self._document.root] + list(self._document.root.elements()) if not e.pseudo]
+        for number, element in enumerate(real, 1):
             element.attrs["data-mjs"] = str(number)
+            self._by_script_id[str(number)] = element
         whole = to_html(self._document)
         host.send({"type": "load", "html": whole, "geometry": self._geometry_now(), "state": {
             "url": self._url.toString(), "width": self._page_width(), "height": float(self.height()),
@@ -1690,6 +1728,34 @@ class MerlinView(QWidget):
         timer.deleteLater()
         then(prevented)
 
+    def eventFilter(self, watched, event) -> bool:                # noqa: N802
+        from PyQt6.QtCore import QEvent
+
+        if (event.type() == QEvent.Type.KeyPress and self._script is not None
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+            element = self._current(watched.property("merlin_element"))
+            if element is not None and element.attrs.get("data-mjs"):
+                # a newline only if the page does not take Enter for itself
+                self._script_event({"type": "key", "target": int(element.attrs["data-mjs"]),
+                                    "key": "Enter", "code": "Enter", "keyCode": 13},
+                                   lambda prevented, w=watched: None if prevented
+                                   else w.insertPlainText("\n"))
+                return True
+        return super().eventFilter(watched, event)
+
+    def _enter_pressed(self, element) -> None:
+        """Enter in a text field: to the page's scripts first, as a keydown, as
+        in a browser; then, unless they take it, the form is sent. Search boxes
+        that act on Enter themselves had been sent past."""
+        element = self._current(element)
+        if self._script is not None and element.attrs.get("data-mjs"):
+            self._script_event({"type": "key", "target": int(element.attrs["data-mjs"]),
+                                "key": "Enter", "code": "Enter", "keyCode": 13},
+                               lambda prevented, e=element: None if prevented else self._submit(e))
+            return
+        self._submit(element)
+
     def _script_input(self, element, text, checked=None) -> None:
         element = self._current(element)
         if self._script is None or not element.attrs.get("data-mjs"):
@@ -1763,6 +1829,13 @@ class MerlinView(QWidget):
             self._script_fetch(host, message)
         elif kind == "handled":
             self._script_answered(message.get("id"), bool(message.get("prevented")))
+        elif kind == "form":
+            # form.submit() or requestSubmit(): sent as a form is, its handlers
+            # having run in the page already
+            form = self._by_script_id.get(str(message.get("target")))
+            submitter = self._by_script_id.get(str(message.get("submitter"))) if message.get("submitter") else None
+            if form is not None:
+                QTimer.singleShot(0, lambda f=form, b=submitter: self._submit(f, b, scripts_asked=True))
         elif kind == "url":
             self._url = QUrl(message.get("url", ""))
             self.urlChanged.emit(self.url())
@@ -1811,8 +1884,16 @@ class MerlinView(QWidget):
         headers.setdefault("Referer", self._url.toString())
 
         def work():
+            started = time.monotonic()
             answer = ({"error": "blocked by the content blocker"} if blocked else
                       page_fetch(url, message.get("method", "GET"), headers, message.get("body"), opener))
+            # the network log, for the debugging zip: a data request failing
+            # quietly is how a page stays empty with nothing in its console
+            size = len(answer.get("body") or "") * 3 // 4
+            self.network_lines.append(
+                f"{message.get('method', 'GET'):6} {answer.get('status', 'failed')!s:6} "
+                f"{size:>9} B {int((time.monotonic() - started) * 1000):>6} ms  {url}"
+                + (f"  ({answer['error']})" if answer.get("error") else ""))
             # a script, kept for the debugging zip (scripts only, not data)
             kind = str((answer.get("headers") or {}).get("content-type", "")).lower()
             if "javascript" in kind or "ecmascript" in kind or url.split("?")[0].endswith((".js", ".mjs")):
@@ -1987,6 +2068,11 @@ class MerlinView(QWidget):
         if number == self._layout_number and out is not None:
             self._display = out
             self._shown_laid_out()
+            # The page is loaded once it is shown, laid out: finishing only
+            # after a layout with none waiting behind it never came on a page
+            # whose scripts change it all the time, and the status bar stayed
+            # at "Loading... 60%". (Finishing again does nothing.)
+            self._finish_load()
         if self._layout_again:
             self._layout_again = False
             self._layout_in_background()
@@ -2226,6 +2312,11 @@ class MerlinView(QWidget):
             widget.setPlaceholderText(element.attrs.get("placeholder", ""))
             if "readonly" in element.attrs:
                 widget.setReadOnly(True)
+            # Enter goes to the page's scripts first: Google's search box is a
+            # textarea whose keydown sends the search
+            widget.setProperty("merlin_element", element)
+            widget.installEventFilter(self)
+            widget.textChanged.connect(lambda w=widget, e=element: self._script_input(e, w.toPlainText()))
         elif kind == "file":
             from PyQt6.QtWidgets import QPushButton
 
@@ -2249,7 +2340,7 @@ class MerlinView(QWidget):
             if "readonly" in element.attrs:
                 widget.setReadOnly(True)
             # Enter sends the form, as in any browser
-            widget.returnPressed.connect(lambda e=element: self._submit(e))
+            widget.returnPressed.connect(lambda e=element: self._enter_pressed(e))
             widget.textEdited.connect(lambda text, e=element: self._script_input(e, text))
         if forms._disabled(element):
             widget.setEnabled(False)
@@ -2487,7 +2578,7 @@ class MerlinView(QWidget):
             widget.setFocus()
 
     # ------------------------------------------------------ for debugging
-    def save_for_debugging(self, folder: str, version: str = "") -> str:
+    def save_for_debugging(self, folder: str, version: str = "", target: str = "", done=None) -> str:
         """The page as Merlin Engine has it, zipped, to send for a look.
 
         The HTML as it came, every stylesheet in the order the cascade reads
@@ -2504,7 +2595,7 @@ class MerlinView(QWidget):
 
         os.makedirs(folder, exist_ok=True)
         host = (self._url.host() or "page").replace(":", "_")
-        path = unique_path(folder, f"merlin-engine-{host}-{time.strftime('%Y%m%d-%H%M%S')}.zip")
+        path = target or unique_path(folder, f"merlin-engine-{host}-{time.strftime('%Y%m%d-%H%M%S')}.zip")
         shot = QByteArray()
         buffer = QBuffer(shot)
         buffer.open(QIODevice.OpenModeFlag.WriteOnly)
@@ -2517,51 +2608,53 @@ class MerlinView(QWidget):
                     "simplified": bool(self._display and self._display.simplified),
                     "scripts": getattr(self, "script_status", ""),
                     "scripts_changed_page": "data-mjs=" in (self._markup or "")}
-        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as bundle:
-            bundle.writestr("page.html", self._markup or "")
-            for number, text in enumerate(sheets):
-                bundle.writestr(f"sheets/{number:03d}.css", text or "")
-            bundle.writestr("screenshot.png", bytes(shot))
-            bundle.writestr("manifest.json", json.dumps(manifest, indent=2))
-            bundle.writestr("console.txt", "\n".join(f"[{level}] {text}" for level, text
-                                                     in getattr(self, "console_lines", [])))
-            self._bundle_scripts(bundle)
-            arrived = getattr(self, "_arrived_markup", "")
-            if arrived:
-                bundle.writestr("original.html", arrived)
+        # what needs the page as it is now, taken here; the writing, with all
+        # the page's modules (Hugging Face's are over a thousand), is done off
+        # the UI thread when asked to be, which had frozen the browser
+        markup = self._markup or ""
+        console = "\n".join(f"[{level}] {text}" for level, text in getattr(self, "console_lines", []))
+        network = "\n".join(getattr(self, "network_lines", []))
+        bodies = dict(getattr(self, "_script_bodies", {}))
+        cache = getattr(self, "_script_cache", "")
+        hosts = list(getattr(self, "_script_hosts", []))
+        arrived = getattr(self, "_arrived_markup", "")
+        shot_bytes = bytes(shot)
+        sheet_texts = list(sheets)
+
+        def write() -> None:
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as bundle:
+                bundle.writestr("page.html", markup)
+                for number, text in enumerate(sheet_texts):
+                    bundle.writestr(f"sheets/{number:03d}.css", text or "")
+                bundle.writestr("screenshot.png", shot_bytes)
+                bundle.writestr("manifest.json", json.dumps(manifest, indent=2))
+                bundle.writestr("console.txt", console)
+                bundle.writestr("network.txt", network)
+                _bundle_scripts(bundle, bodies, cache, hosts)
+                if arrived:
+                    bundle.writestr("original.html", arrived)
+
+        if done is None:
+            write()
+            return path
+
+        def work() -> None:
+            try:
+                write()
+                error = ""
+            except Exception as exc:                       # noqa: BLE001
+                error = str(exc)
+            try:
+                self._debug_written.emit(done, path, error)
+            except RuntimeError:
+                pass
+
+        import threading as _threading
+
+        _threading.Thread(target=work, daemon=True).start()
         return path
 
-    def _bundle_scripts(self, bundle) -> None:
-        """The scripts the page ran, so it can be run again elsewhere, offline,
-        as it ran here: plain scripts as Merlin fetched them for it, and the
-        page's modules from Deno's cache. Scripts only, not what the page
-        fetched as data."""
-        import json
 
-        index = []
-        for number, (url, body) in enumerate(list(getattr(self, "_script_bodies", {}).items())):
-            name = f"scripts/{number:04d}.js"
-            bundle.writestr(name, body)
-            index.append({"url": url, "file": name})
-        bundle.writestr("scripts/index.json", json.dumps(index, indent=1))
-        cache = getattr(self, "_script_cache", "")
-        hosts = getattr(self, "_script_hosts", [])
-        remote = os.path.join(cache, "remote") if cache else ""
-        if not remote or not os.path.isdir(remote):
-            return
-        for host in hosts:
-            for scheme in ("https", "http"):
-                folder = os.path.join(remote, scheme, host.replace(":", "_port_"))   # as Deno names them
-                if not os.path.isdir(folder):
-                    continue
-                for base, _dirs, files in os.walk(folder):
-                    for file in files:
-                        full = os.path.join(base, file)
-                        try:
-                            if os.path.getsize(full) <= 20 * 1024 * 1024:
-                                bundle.write(full, "deno-cache/" + os.path.relpath(full, cache).replace(os.sep, "/"))
-                        except OSError:
-                            pass
 
     # ------------------------------------------------------ saving the page
     def html_with_stylesheets(self) -> str:

@@ -1785,12 +1785,15 @@ class BrowserWindow(QMainWindow):
 
         folder = QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.DownloadLocation) or os.path.expanduser("~")
+        self.status_label.setText("Saving the page for debugging...")
+
+        def finished(path: str, error: str) -> None:
+            self.status_label.setText(f"Could not save the page: {error}" if error
+                                      else f"Saved for debugging: {path}")
         try:
-            path = view.save_for_debugging(folder, APP_VERSION)
+            view.save_for_debugging(folder, APP_VERSION, done=finished)
         except Exception as exc:                         # noqa: BLE001
             self.status_label.setText(f"Could not save the page: {exc}")
-            return
-        self.status_label.setText(f"Saved for debugging: {path}")
 
     def certificate_allowed(self, site: str) -> str:
         """How far the site's certificate problems are allowed: "", "dates" or "any"."""

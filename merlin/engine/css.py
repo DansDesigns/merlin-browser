@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 
-from .dom import Document, Element
+from .dom import Document, Element, Text
 
 # ------------------------------------------------------------------ values
 
@@ -365,10 +365,11 @@ INHERITED = {
 class Selector:
     """One complex selector, stored right to left for matching."""
 
-    __slots__ = ("parts", "specificity", "key", "matchable")
+    __slots__ = ("parts", "specificity", "key", "matchable", "pseudo")
 
     def __init__(self, parts, specificity, matchable=True):
         self.parts = parts                # [(compound, combinator-to-the-left)]
+        self.pseudo = None                # "before" or "after" for a ::before or ::after rule
         self.specificity = specificity
         self.matchable = matchable
         compound = parts[0][0] if parts else {}
@@ -503,10 +504,26 @@ def _compound(text: str):
     return compound, matchable
 
 
+_PSEUDO_ELEMENT = re.compile(r"::?(before|after)\s*$", re.I)
+
+
 def parse_selector(text: str) -> Selector | None:
     text = text.strip()
     if not text:
         return None
+    # ::before and ::after: the selector of the element they belong to, marked
+    # as being for them. Icon fonts (Tabler, Font Awesome) draw every icon so.
+    which = _PSEUDO_ELEMENT.search(text)
+    if which:
+        owner = text[:which.start()].strip()
+        if not owner or owner[-1] in " >+~":
+            owner = owner + "*"
+        selector = parse_selector(owner)
+        if selector is not None:
+            selector.pseudo = which.group(1).lower()
+            selector.specificity = (selector.specificity[0], selector.specificity[1],
+                                    selector.specificity[2] + 1)
+        return selector
     tokens = _selector_tokens(text)
     parts = []                           # left to right: [compound, combinator, ...]
     matchable = True
@@ -1177,14 +1194,17 @@ class Styler:
         self._compute(self.document.root, None, root_size)
         return self.styles
 
-    def _declared(self, element: Element) -> list:
-        """Every declaration for the element, weakest first, not yet expanded."""
+    def _declared(self, element: Element, pseudo: str | None = None) -> list:
+        """Every declaration for the element, weakest first, not yet expanded;
+        for its ::before or ::after when pseudo says which."""
         found = []   # (layer, specificity, order, name, value)
         # A sheet loaded more than once gives the same rules again, each in its
         # own place in the cascade; whether one matches is worked out once
         answers = {}
         for origin, layer_normal, layer_important in (("default", 0, 5), ("author", 1, 4)):
             for rule, base in self._candidates(self._index[origin], element):
+                if rule.selector.pseudo != pseudo:
+                    continue
                 answer = answers.get(id(rule))
                 if answer is None:
                     answer = answers[id(rule)] = matches(rule.selector, element)
@@ -1192,6 +1212,9 @@ class Styler:
                     for name, value, important in rule.declarations:
                         found.append((layer_important if important else layer_normal,
                                       rule.selector.specificity, base + rule.order, name, value))
+        if pseudo is not None:
+            found.sort(key=lambda item: (item[0], item[1], item[2]))
+            return [(name, value, layer in (0, 5)) for layer, _spec, _order, name, value in found]
         for name, value in presentational_hints(element):
             found.append((1, (0, 0, 0), -1, name, value))
         inline = element.attrs.get("style")
@@ -1202,9 +1225,11 @@ class Styler:
         # each with whether it is the default stylesheet's, which all: revert keeps
         return [(name, value, layer in (0, 5)) for layer, _spec, _order, name, value in found]
 
-    def _compute(self, element: Element, parent: dict | None, root_size: float) -> None:
+    def _compute(self, element: Element, parent: dict | None, root_size: float,
+                 ordered: list | None = None) -> None:
         parent = parent or {}
-        ordered = self._declared(element)
+        if ordered is None:
+            ordered = self._declared(element)
         # Custom properties first: inherited, then the element's own, which
         # any var() below may use. A page that sets none shares its parent's.
         custom = parent.get("--", {})
@@ -1276,9 +1301,43 @@ class Styler:
         style.setdefault("list-style-type", "disc")
         self._motion(style, font, root_size)
         self.styles[element] = style
+        if not getattr(element, "pseudo", None):
+            self._pseudo_elements(element, style, root_size)
         for child in element.children:
-            if isinstance(child, Element):
+            if isinstance(child, Element) and not getattr(child, "pseudo", None):
                 self._compute(child, style, root_size)
+
+    # elements that have no inside of their own for a ::before or ::after
+    _NO_PSEUDO = {"img", "input", "br", "hr", "textarea", "select", "iframe", "video", "audio",
+                  "canvas", "embed", "object", "meta", "link", "script", "style", "head", "title",
+                  "source", "track", "wbr", "area", "base", "col", "param", "svg"}
+
+    def _pseudo_elements(self, element: Element, style: dict, root_size: float) -> None:
+        """element's ::before and ::after, as boxes at the start and end of it,
+        where their rules give them content: icon fonts' icons, quotes,
+        separators, badges. Scripts never see them, as in a browser."""
+        element.children = [c for c in element.children if not getattr(c, "pseudo", None)]
+        if element.tag in self._NO_PSEUDO or style.get("display") == "none":
+            return
+        for which in ("before", "after"):
+            ordered = self._declared(element, which)
+            if not ordered or not any(name == "content" for name, _v, _d in ordered):
+                continue
+            box = Element("merlin-pseudo", {})
+            box.pseudo = which
+            box.parent = element
+            self._compute(box, style, root_size, ordered=ordered)
+            text = _content_text(self.styles[box].get("content"), element)
+            if text is None:
+                self.styles.pop(box, None)
+                continue
+            box.children = [Text(text)] if text else []
+            for child in box.children:
+                child.parent = box
+            if which == "before":
+                element.children.insert(0, box)
+            else:
+                element.children.append(box)
 
     def _motion(self, style: dict, font: float, root_size: float) -> None:
         """translate, rotate and scale folded into transform; and the element's
@@ -1374,6 +1433,8 @@ class Styler:
         return parent_size
 
     def _value(self, name: str, value: str, font: float, root_size: float, style: dict):
+        if name == "content":
+            return value                       # text, its case and escapes as written
         lowered = value.strip().lower()
         if "v" in lowered and _VIEWPORT_UNIT.search(lowered):
             self.viewport_units = True
@@ -1895,6 +1956,31 @@ def _individual_transforms(style: dict, font: float, root_size: float, viewport)
         except ValueError:
             pass
     return ops
+
+
+def _content_text(value, element) -> str | None:
+    """content, as the text of a ::before or ::after; None for none or normal,
+    which make no box. Strings with their CSS escapes ("\\eb20", an icon
+    font's character), attr(), and quotes; counters and images give nothing."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if value.lower() in ("", "none", "normal"):
+        return None
+    out = []
+    for token in re.findall(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[a-z-]+\([^)]*\)|[^\s]+', value, re.I):
+        if token[0] in "\"'":
+            body = token[1:-1]
+            body = re.sub(r"\\([0-9a-fA-F]{1,6})\s?", lambda m: chr(int(m.group(1), 16))
+                          if int(m.group(1), 16) <= 0x10FFFF else "\ufffd", body)
+            out.append(re.sub(r"\\(.)", r"\1", body))
+        elif token.lower().startswith("attr("):
+            out.append(element.attrs.get(token[5:-1].strip().lower(), ""))
+        elif token.lower() in ("open-quote",):
+            out.append("\u201c")
+        elif token.lower() in ("close-quote",):
+            out.append("\u201d")
+    return "".join(out)
 
 
 def keyframes_in(text: str) -> dict:

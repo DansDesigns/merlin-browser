@@ -446,6 +446,10 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg.ensure_dirs()
     settings = cfg.Settings()
+    # Secure DNS (over HTTPS), as Brave has it, before any connection is made
+    from . import securedns
+
+    securedns.install(bool(settings.get("secure_dns", True)))
 
     # --- must happen before QtWebEngine spins up -------------------------
     if args.tor:
@@ -515,6 +519,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
     app = QApplication([sys.argv[0]])
+    securedns.chromium_secure_dns(bool(settings.get("secure_dns", True)))
     mark("QApplication created")
     room_note = interface_room_check(app, settings, "set by Merlin" in interface_note)
     _keep_dialogs_on_screen(app)

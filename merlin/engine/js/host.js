@@ -8,6 +8,10 @@
 import { parseHTML } from "./linkedom.bundle.js";
 import vm from "node:vm";
 
+// Deno's own event classes, kept before the DOM's take their names: the
+// window is Deno's event target, and takes only these
+const DenoEvent = globalThis.Event;
+const denoDispatch = globalThis.EventTarget.prototype.dispatchEvent;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const stdout = Deno.stdout;
@@ -175,6 +179,8 @@ const INTERFACES = [
   "Range", "NodeFilter", "NodeList", "HTMLCollection", "NamedNodeMap", "DOMTokenList", "CSSStyleDeclaration",
   "MutationObserver", "MutationRecord", "TreeWalker", "InputEvent", "KeyboardEvent", "MouseEvent",
   "FocusEvent", "PointerEvent", "UIEvent", "WheelEvent", "TouchEvent", "AnimationEvent", "TransitionEvent",
+  "PopStateEvent", "HashChangeEvent", "SubmitEvent", "StorageEvent", "PageTransitionEvent", "BeforeUnloadEvent",
+  "ClipboardEvent", "DragEvent", "CompositionEvent", "ToggleEvent", "SecurityPolicyViolationEvent",
 ];
 
 function install(html) {
@@ -206,7 +212,19 @@ function install(html) {
     let found;
     try { found = made.window[name] ?? made[name]; } catch (_) { found = undefined; }
     // an event interface linkedom lacks is an Event, not an element
-    if (typeof found !== "function") found = name.endsWith("Event") ? class extends (made.Event || g.Event) {} : class extends Base {};
+    // an event class the DOM lacks is an Event carrying what it is made with
+    // (a PopStateEvent's state, a KeyboardEvent's key), as the real ones do
+    if (typeof found !== "function") found = name.endsWith("Event")
+      ? class extends (made.Event || g.Event) {
+          constructor(type, init = {}) {
+            super(type, init);
+            for (const [key, value] of Object.entries(init || {})) {
+              if (["bubbles", "cancelable", "composed"].includes(key)) continue;
+              try { Object.defineProperty(this, key, { value, configurable: true, enumerable: true }); } catch (_) {}
+            }
+          }
+        }
+      : class extends Base {};
     try { Object.defineProperty(found, "name", { value: name }); } catch (_) {}
     if (!(name in g) || typeof g[name] !== "function") g[name] = found;
   }
@@ -340,7 +358,11 @@ function install(html) {
         const h = Math.max(0, Math.min(rect.bottom, view.bottom) - Math.max(rect.top, view.top));
         const area = rect.width * rect.height;
         const ratio = area > 0 ? (w * h) / area : (w > 0 || h > 0 ? 1 : 0);
-        const visible = (rect.width > 0 || rect.height > 0) && w * h > 0 || (area === 0 && rect.bottom >= view.top && rect.top <= view.bottom && rect.height + rect.width > 0);
+        // in view if any of it is; a box with no size, as browsers have it, if
+        // where it is lies in view (an empty placeholder waiting to be filled
+        // when it is seen had been never in view)
+        const inside = rect.bottom >= view.top && rect.top <= view.bottom && rect.right >= view.left && rect.left <= view.right;
+        const visible = area > 0 ? w * h > 0 : inside && geometry.has(ids.get(target));
         // which threshold band the ratio is in: an entry when that changes
         const band = this.thresholds.filter((t) => ratio >= t && (t > 0 || visible)).length;
         if (last === null || last !== band) {
@@ -389,6 +411,47 @@ function install(html) {
   typed(g.HTMLButtonElement, function () {
     const t = (this.getAttribute("type") || "").toLowerCase(); return ["submit", "reset", "button"].includes(t) ? t : "submit"; });
   installHandlers(g, made);
+  // The window is Deno's own event target, which takes only Deno's events: an
+  // event made from the DOM's classes (PopStateEvent, or the load and scroll
+  // this host sends) failed on it, reading 'target', so no page ever heard a
+  // window's load, scroll or popstate. It is passed on as a native event with
+  // the same details, and a cancelled one is cancelled for the page too.
+  const NativeEvent = DenoEvent;
+  const nativeDispatch = denoDispatch;
+  // one load for the page, after its scripts, as browsers give it: Deno
+  // fires its own load on the window too, and pages heard two
+  g.addEventListener("load", (event) => { if (!state.pageLoad) event.stopImmediatePropagation(); }, { capture: true });
+  g.dispatchEvent = function (event) {
+    if (event instanceof NativeEvent) return nativeDispatch.call(g, event);
+    const native = new NativeEvent(event.type, { bubbles: !!event.bubbles, cancelable: event.cancelable !== false,
+                                                 composed: !!event.composed });
+    for (const key of Object.keys(event)) {
+      if (key in native) continue;
+      try { Object.defineProperty(native, key, { value: event[key], configurable: true, enumerable: true }); } catch (_) {}
+    }
+    for (const key of ["state", "detail", "key", "code", "clientX", "clientY", "button", "data", "newURL", "oldURL", "persisted"]) {
+      if (key in event && !(key in native)) { try { Object.defineProperty(native, key, { value: event[key], configurable: true }); } catch (_) {} }
+    }
+    const result = nativeDispatch.call(g, native);
+    if (native.defaultPrevented) { try { event.preventDefault(); } catch (_) {} }
+    return result;
+  };
+  // form.submit() and requestSubmit(), which the DOM had as nothing at all:
+  // search boxes that send their form from a script (Google's, Ponder's) did
+  // nothing on Enter. requestSubmit runs the page's submit handlers first.
+  // on the element class itself: the DOM does not make <form> an
+  // HTMLFormElement, and methods put there never reached a form
+  const formProto = (g.HTMLElement || made.HTMLElement).prototype;
+  {
+    formProto.submit = function () { if (this.tagName === "FORM") send({ type: "form", target: idOf(this) }); };
+    formProto.requestSubmit = function (submitter) {
+      if (this.tagName !== "FORM") return;
+      const event = new g.Event("submit", { bubbles: true, cancelable: true });
+      try { event.submitter = submitter || null; } catch (_) {}
+      this.dispatchEvent(event);
+      if (!event.defaultPrevented) send({ type: "form", target: idOf(this), submitter: submitter ? idOf(submitter) : null });
+    };
+  }
   // document.styleSheets: the page's stylesheets, a live list, as Google's
   // CSS loader reads its length. A rule inserted into a <style> sheet is added
   // to its text, so Merlin Engine styles the page with it.
@@ -478,6 +541,23 @@ function install(html) {
   }
   // Node's globals, which Deno has and no browser does, go: GitHub's code saw
   // process, took itself to be in Node, and failed reading process.env
+  // An error in a timer or an unhandled promise, through Node's timers (as
+  // scripts in node:vm use them), ended the whole process: reported instead,
+  // and the page goes on, as in a browser. Then Node's globals go.
+  try {
+    g.process?.on?.("uncaughtException", (error) => reportError(error));
+    g.process?.on?.("unhandledRejection", (reason) => reportError(reason));
+  } catch (_) {}
+  for (const name of ["setTimeout", "setInterval"]) {
+    const original = g[name];
+    if (typeof original !== "function" || original.__guarded) continue;
+    const guarded = function (callback, delay, ...rest) {
+      if (typeof callback !== "function") return original.call(this, callback, delay, ...rest);
+      return original.call(this, function () { try { return callback.apply(this, arguments); } catch (e) { reportError(e); } }, delay, ...rest);
+    };
+    guarded.__guarded = true;
+    g[name] = guarded;
+  }
   for (const name of ["process", "Buffer", "global", "setImmediate", "clearImmediate"]) {
     try { delete g[name]; } catch (_) {}
   }
@@ -867,7 +947,9 @@ async function runScripts() {
   fire(document_, "DOMContentLoaded");
   await new Promise(r => setTimeout(r, 0));
   __setReadyState("complete");
+  state.pageLoad = true;
   fire(globalThis, "load");
+  state.pageLoad = false;
   state.loaded = true;
 }
 
