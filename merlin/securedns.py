@@ -81,6 +81,12 @@ def resolve(host: str) -> list:
 
 
 def _getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    if isinstance(host, str) and host.lower().rstrip(".") in ("localhost", "localhost.localdomain"):
+        # IPv4 first for localhost: Windows gives ::1 first, and a server
+        # listening on 127.0.0.1 alone (as Python's do, Ponder's among them)
+        # was reached only after the IPv6 attempt failed, two seconds a request
+        found = _original_getaddrinfo(host, port, family, type, proto, flags)
+        return sorted(found, key=lambda entry: entry[0] != socket.AF_INET)
     if not _enabled or not isinstance(host, str) or _local(host):
         return _original_getaddrinfo(host, port, family, type, proto, flags)
     addresses = resolve(host)

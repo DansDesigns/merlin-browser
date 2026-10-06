@@ -1349,6 +1349,7 @@ class MerlinView(QWidget):
             address = self._url.resolved(QUrl(src)).toString()
             if self._blocked(address, "image"):
                 self._images[src] = False
+                self._report_image(src)
                 continue
             wanted.append(src)
         if not wanted:
@@ -1399,9 +1400,21 @@ class MerlinView(QWidget):
         if settings is not None and not settings.get("web_fonts", True):
             return
         readable = ("woff2", "woff", "truetype", "opentype", "ttf", "otf", "")
+
+        def preference(source):
+            # what reads everywhere first: Qt on Windows cannot read WOFF2, and
+            # taking a face's first source only (WOFF2, as Tabler's icon font
+            # gives it) had left every icon on Ponder a box there
+            url, kind = source
+            ending = url.lower().split("?")[0].split("#")[0]
+            if kind == "woff2" or ending.endswith(".woff2"):
+                return 3
+            if kind == "woff" or ending.endswith(".woff"):
+                return 0
+            return 1
         chosen, seen = [], set()
         for face in self._font_faces:
-            for url, kind in face["sources"]:
+            for url, kind in sorted(face["sources"], key=preference):
                 ending = url.lower().split("?")[0].split("#")[0]
                 if kind in readable or ending.endswith((".woff2", ".woff", ".ttf", ".otf")):
                     if url not in seen and not self._blocked(url, "font"):
@@ -1532,6 +1545,7 @@ class MerlinView(QWidget):
             if (picture is None or picture.isNull()) and ok and data:
                 picture = QImage.fromData(data)
         self._images[src] = picture if picture is not None and not picture.isNull() else False
+        self._report_image(src)
         if self._image_moves_layout(src):
             # at most one layout for images in a quarter-second, however many
             # arrive: each had laid the whole page out again
@@ -1539,6 +1553,49 @@ class MerlinView(QWidget):
                 self._image_relayout.start()
         else:
             self.update()                        # its box was already there: just draw it
+
+    def _report_image(self, src: str) -> None:
+        """How an image went, to the page's scripts: its load or its error, with
+        its size, as a browser has them. A page that tries an image and falls
+        back on error (Ponder, to its own image proxy) had been told every one
+        loaded."""
+        if self._script is None:
+            return
+        picture = self._images.get(src)
+        size = picture.size() if picture not in (None, False) and hasattr(picture, "size") else None
+        self._script.send({"type": "image", "src": src,
+                           "url": self._url.resolved(QUrl(src)).toString(),
+                           "ok": bool(picture), "width": size.width() if size else 0,
+                           "height": size.height() if size else 0})
+
+    def _want_image(self, src: str) -> None:
+        """A page's script waits on an image (one in the page, or new Image()):
+        told now if it is known, else fetched as the page's images are."""
+        if src in self._images:
+            self._report_image(src)
+            return
+        address = self._url.resolved(QUrl(src)).toString()
+        if self._blocked(address, "image"):
+            self._images[src] = False
+            self._report_image(src)
+            return
+        number = self._load_number
+        headers = dict(self._headers())
+        _subresource(headers, "image")
+        lenient = self._leniency(self._url.host())
+        same = _registrable(QUrl(address).host()) == _registrable(self._url.host())
+        opener = cookie_opener(self._cookies() if same else None, lenient)
+
+        def work():
+            ok, _final, data, _kind = fetch_bytes(address, headers, opener=opener)
+            decoded = QImage.fromData(data) if ok and data and b"<svg" not in data[:4096] else None
+            try:
+                self._image_fetched.emit(number, src, decoded if decoded is not None
+                                         else (data if ok else b""), ok)
+            except RuntimeError:
+                pass
+        self._images.setdefault("__pending__" + src, True)
+        threading.Thread(target=work, daemon=True).start()
 
     def _image_moves_layout(self, src: str) -> bool:
         """Whether an image arriving changes the layout: only if no size is given.
@@ -1829,6 +1886,10 @@ class MerlinView(QWidget):
             self._script_fetch(host, message)
         elif kind == "handled":
             self._script_answered(message.get("id"), bool(message.get("prevented")))
+        elif kind == "want_image":
+            src = str(message.get("src", ""))
+            if src and not self._images.get("__pending__" + src):
+                self._want_image(src)
         elif kind == "pick_file":
             # the page's own button asked for its file input's dialog
             element = self._by_script_id.get(str(message.get("target")))
@@ -2652,7 +2713,22 @@ class MerlinView(QWidget):
         sheet_texts = list(sheets)
 
         def write() -> None:
-            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as bundle:
+            # written under a passing name and named only once whole: a zip
+            # still being written (Hugging Face's, with over a thousand modules)
+            # had looked finished in Downloads, and was sent cut short
+            partial = path + ".part"
+            try:
+                write_to(partial)
+                os.replace(partial, path)
+            finally:
+                if os.path.exists(partial):
+                    try:
+                        os.remove(partial)
+                    except OSError:
+                        pass
+
+        def write_to(target: str) -> None:
+            with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as bundle:
                 bundle.writestr("page.html", markup)
                 for number, text in enumerate(sheet_texts):
                     bundle.writestr(f"sheets/{number:03d}.css", text or "")

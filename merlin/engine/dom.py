@@ -33,13 +33,14 @@ class Text(Node):
 
 
 class Element(Node):
-    __slots__ = ("tag", "attrs", "_class_cache", "pseudo")
+    __slots__ = ("tag", "attrs", "_class_cache", "pseudo", "comments")
 
     def __init__(self, tag: str, attrs: dict | None = None):
         super().__init__()
         self.tag = tag
         self.attrs = attrs or {}
         self.pseudo = None          # "before" or "after": a pseudo-element's box, made by the cascade
+        self.comments = None        # [(child index, text)]: kept for the page's scripts, not drawn
 
     @property
     def id(self) -> str:
@@ -157,8 +158,20 @@ def to_html(document) -> str:
         out.append(">")
         if node.tag in VOID:
             return
+        # the page's comments back in their places: Svelte, Vue and React mark
+        # where their components are with them, and hydrate from those marks.
+        # Left out, Hugging Face's app found nothing to start from.
+        notes = list(node.comments or [])
+        place = 0
         for child in node.children:
+            if isinstance(child, Element) and child.pseudo:
+                continue
+            while notes and notes[0][0] <= place:
+                out.append(f"<!--{notes.pop(0)[1]}-->")
             walk(child, node.tag in _RAW)
+            place += 1
+        for _place, text in notes:
+            out.append(f"<!--{text}-->")
         out.append(f"</{node.tag}>")
 
     walk(document.root, False)

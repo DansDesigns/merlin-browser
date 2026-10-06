@@ -2465,6 +2465,8 @@ def test_window_events_enter_dns_and_saving(app) -> None:
             time.sleep(0.005)
         timer.stop()
         gaps = [b - a for a, b in zip(ticks, ticks[1:])]
+        check("the debugging zip is named only once whole: no part left over",
+              os.path.exists(result["path"]) and not os.path.exists(result["path"] + ".part"))
         check("the debugging zip is written in the background, the window going on meanwhile",
               not result.get("error") and zipfile.ZipFile(result["path"]).namelist().count("scripts/index.json") == 1
               and "network.txt" in zipfile.ZipFile(result["path"]).namelist()
@@ -2694,6 +2696,15 @@ def test_loads_and_walkers(app) -> None:
     folder = tempfile.mkdtemp(prefix="merlin-loads-")
     open(os.path.join(folder, "index.html"), "w").write(page)
     open(os.path.join(folder, "route.css"), "w").write("p { margin: 0 }")
+    # a real picture: an image now fires load only if it truly loads
+    import struct as _struct
+    import zlib as _zlib
+
+    def _chunk(kind, data):
+        return _struct.pack(">I", len(data)) + kind + data + _struct.pack(">I", _zlib.crc32(kind + data) & 0xffffffff)
+    open(os.path.join(folder, "photo.png"), "wb").write(
+        b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", _struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+        + _chunk(b"IDAT", _zlib.compress(b"\x00\x80\x80\x80")) + _chunk(b"IEND", b""))
 
     class Quiet(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *a, **k):
@@ -2742,6 +2753,128 @@ def test_loads_and_walkers(app) -> None:
         check("an image preloaded with new Image() fires its load", text("img") == "image preloaded", text("img"))
         check("TreeWalker whole, with NodeFilter's constants; document.implementation; performance.timing",
               text("walk") == "timing true | inert BODY | next a,b,c | first a sibling c | filtered a,c", text("walk"))
+    finally:
+        view.close()
+        server.shutdown()
+
+
+def test_images_fonts_and_viewport(app) -> None:
+    """Images load or fail as they really go, with their size; fonts are
+    fetched in a form every platform reads; localhost is reached on IPv4 first;
+    the root element's client size is the viewport's; fields validate."""
+    import merlin.engine.view as engine_view
+    from merlin import securedns
+    from merlin.engine import MerlinView
+    from merlin.engine.script import LocalStorage
+
+    # fonts: WOFF before WOFF2 (Qt on Windows cannot read WOFF2)
+    view = MerlinView()
+    view._font_faces = [{"family": "tabler-icons", "sources": [
+        ("https://cdn.example/fonts/tabler-icons.woff2?v3", "woff2"),
+        ("https://cdn.example/fonts/tabler-icons.woff?", "woff"),
+        ("https://cdn.example/fonts/tabler-icons.ttf?v3", "truetype")]}]
+    asked = []
+    real_fetch = engine_view.fetch_bytes
+    engine_view.fetch_bytes = lambda url, *a, **k: (asked.append(url), (False, url, b"", ""))[1]
+    try:
+        view._load_fonts()
+        wait(app, 0.5)
+    finally:
+        engine_view.fetch_bytes = real_fetch
+    check("a web font is fetched as WOFF before WOFF2, which Qt on Windows cannot read (Ponder's icons)",
+          asked[:1] == ["https://cdn.example/fonts/tabler-icons.woff?"], str(asked))
+    view.close()
+    securedns.install(False)
+    first = socket.getaddrinfo("localhost", 80, 0, socket.SOCK_STREAM)[0][0]
+    check("localhost is reached on IPv4 first (two seconds a request on Windows otherwise)", first == socket.AF_INET)
+    deno = _deno_for_tests()
+    if not deno:
+        print("  skip  images and viewport: Deno is not here")
+        return
+    folder = tempfile.mkdtemp(prefix="merlin-images-")
+    import struct
+    import zlib
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff)
+    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 3, 2, 8, 2, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(b"".join(b"\x00" + b"\x80\x80\x80" * 3 for _ in range(2)))) + chunk(b"IEND", b""))
+    open(os.path.join(folder, "proxy.png"), "wb").write(png)
+    open(os.path.join(folder, "photo.png"), "wb").write(png)
+    open(os.path.join(folder, "hydrate.html"), "w").write(
+        "<!DOCTYPE html><html><head><title>Hydrate</title></head><body><div id=app><!--[--><p>server made</p><!--]--></div>"
+        "<p id=two>one<!---->two</p><p id=marks>waiting</p><script>"
+        "const app = document.getElementById('app'); const nodes = [...app.childNodes];"
+        "const first = nodes[0], last = nodes[nodes.length - 1];"
+        "document.getElementById('marks').textContent = 'first ' + (first.nodeType === 8 ? first.data : 'none')"
+        " + ' | last ' + (last.nodeType === 8 ? last.data : 'none') + ' | texts '"
+        " + [...document.getElementById('two').childNodes].filter((n) => n.nodeType === 3).length;</script></body></html>")
+    open(os.path.join(folder, "index.html"), "w").write(
+        "<!DOCTYPE html><html><head><title>Images</title></head><body><div id=tile></div><p id=out>waiting</p>"
+        "<p id=pre>waiting</p><p id=view></p><form><input id=e type=email required></form><script>"
+        "const img = document.createElement('img');"
+        "img.onerror = () => { img.onerror = null; img.onload = () => { document.getElementById('out').textContent ="
+        " 'proxy loaded ' + img.naturalWidth + 'x' + img.naturalHeight; }; img.src = '/proxy.png'; };"
+        "img.onload = () => { document.getElementById('out').textContent = 'direct loaded (wrong)'; };"
+        "img.src = '/missing.png'; document.getElementById('tile').appendChild(img);"
+        "const p = new Image(); p.onload = () => { document.getElementById('pre').textContent ="
+        " 'preloaded ' + p.naturalWidth + 'x' + p.naturalHeight; }; p.src = '/photo.png';"
+        "const e = document.getElementById('e'); const v = [document.documentElement.clientWidth > 300,"
+        " e.checkValidity(), e.validity.valueMissing]; e.value = 'a@b.co'; e.setCustomValidity('taken');"
+        " v.push(e.validity.customError, e.validationMessage); e.setCustomValidity(''); v.push(e.validity.valid);"
+        "document.getElementById('view').textContent = v.join(' ');</script></body></html>")
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    class Host:
+        settings = {}
+
+        def javascript_allowed(self, site):
+            return True
+
+        def deno_for_scripts(self):
+            return deno
+
+        def script_cache_dir(self):
+            return os.path.join(folder, "cache")
+
+        def local_storage(self):
+            return LocalStorage(None)
+
+    view = MerlinView()
+    view._host = Host()
+    view.resize(800, 500)
+    view.show()
+    try:
+        view.setUrl(QUrl(f"http://127.0.0.1:{server.server_address[1]}/index.html"))
+
+        def text(eid):
+            found = next((x for x in view._document.root.elements() if x.id == eid), None) if view._document else None
+            return " ".join(found.text().split()) if found is not None else ""
+        end = time.time() + 12
+        while time.time() < end and (text("out") in ("", "waiting") or text("pre") in ("", "waiting")):
+            app.processEvents()
+            time.sleep(0.02)
+        check("an image that fails fires error, and the page's fallback loads with its real size (Ponder's proxy)",
+              text("out") == "proxy loaded 3x2", text("out"))
+        check("an image preloaded with new Image() reports its real size", text("pre") == "preloaded 3x2", text("pre"))
+        check("the root element's client width is the viewport's (Square chose its phone layout on 0), and fields validate",
+              text("view") == "true false true true taken true", text("view"))
+        view.setUrl(QUrl(f"http://127.0.0.1:{server.server_address[1]}/hydrate.html"))
+        end = time.time() + 12
+        while time.time() < end and text("marks") in ("", "waiting"):
+            app.processEvents()
+            time.sleep(0.02)
+        check("the page's comment marks reach its scripts in place (Svelte hydrates Hugging Face from them),"
+              " and <!----> keeps two texts apart", text("marks") == "first [ | last ] | texts 2", text("marks"))
     finally:
         view.close()
         server.shutdown()
@@ -3021,6 +3154,8 @@ def main() -> int:
     test_escaped_selectors_grids_and_files(app)
     print("test_loads_and_walkers")
     test_loads_and_walkers(app)
+    print("test_images_fonts_and_viewport")
+    test_images_fonts_and_viewport(app)
     print("test_animations_and_3d")
     test_animations_and_3d(app)
     print("test_server_pages_and_http_fallback")

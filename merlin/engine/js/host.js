@@ -785,10 +785,55 @@ function install(html) {
     const top = fixed ? y : y - state.scrollY, left = fixed ? x : x - state.scrollX;
     return { x: left, y: top, top, left, right: left + width, bottom: top + height, width, height, toJSON() { return this; } };
   };
+  // The root element's client size is the viewport's, as browsers define it:
+  // Square reads documentElement.clientWidth to choose its layout, got its
+  // own box (0 before layout), and drew AlterniTech's site for a phone.
+  const pageSize = (index) => {
+    let most = index === 2 ? state.width : state.height;
+    for (const box of geometry.values()) if (!box[4]) most = Math.max(most, box[index - 2] + box[index]);
+    return Math.round(most);
+  };
   for (const [name, index] of [["offsetWidth", 2], ["offsetHeight", 3], ["clientWidth", 2], ["clientHeight", 3],
                                ["scrollWidth", 2], ["scrollHeight", 3]]) {
-    Object.defineProperty(proto, name, { configurable: true, get() { const box = geometry.get(ids.get(this)); return box ? Math.round(box[index]) : 0; } });
+    Object.defineProperty(proto, name, { configurable: true, get() {
+      if (this === document_.documentElement || (this === document_.scrollingElement && name.startsWith("client"))) {
+        if (name.startsWith("client")) return Math.round(index === 2 ? state.width : state.height);
+        if (name.startsWith("scroll")) return pageSize(index);
+      }
+      const box = geometry.get(ids.get(this)); return box ? Math.round(box[index]) : 0; } });
   }
+  // The form fields' validation, which the DOM had none of: Square's fields
+  // set a custom message on theirs, and failed
+  const fieldProto = (g.HTMLElement || made.HTMLElement).prototype;
+  const validityOf = (el) => {
+    const custom = el.__customValidity || "";
+    const value = el.value ?? "";
+    const missing = el.hasAttribute?.("required") && !value;
+    const tooLong = el.hasAttribute?.("maxlength") && String(value).length > Number(el.getAttribute("maxlength"));
+    const pattern = el.getAttribute?.("pattern");
+    let mismatch = false;
+    if (pattern && value) { try { mismatch = !new RegExp(`^(?:${pattern})$`).test(value); } catch (_) {} }
+    const type = (el.getAttribute?.("type") || "").toLowerCase();
+    const typeMismatch = !!value && ((type === "email" && !/^[^\s@]+@[^\s@]+$/.test(value)) ||
+                                     (type === "url" && !/^[a-z][a-z0-9+.-]*:/i.test(value)));
+    const state = { valueMissing: !!missing, typeMismatch, patternMismatch: mismatch, tooLong: !!tooLong,
+                    tooShort: false, rangeUnderflow: false, rangeOverflow: false, stepMismatch: false,
+                    badInput: false, customError: !!custom };
+    state.valid = !Object.values(state).some(Boolean);
+    return state;
+  };
+  fieldProto.setCustomValidity = function (message) { this.__customValidity = String(message ?? ""); };
+  fieldProto.checkValidity = function () {
+    const valid = validityOf(this).valid;
+    if (!valid) this.dispatchEvent(new g.Event("invalid", { cancelable: true }));
+    return valid;
+  };
+  fieldProto.reportValidity = function () { return this.checkValidity(); };
+  for (const [name, getter] of Object.entries({
+    validity() { return validityOf(this); },
+    validationMessage() { return this.__customValidity || (validityOf(this).valid ? "" : "Please fill in this field."); },
+    willValidate() { return ["INPUT", "SELECT", "TEXTAREA"].includes(this.tagName) && !this.hasAttribute("disabled"); },
+  })) { try { Object.defineProperty(fieldProto, name, { configurable: true, get: getter }); } catch (_) {} }
   Object.defineProperty(proto, "offsetTop", { configurable: true, get() { const box = geometry.get(ids.get(this)); return box ? Math.round(box[1]) : 0; } });
   Object.defineProperty(proto, "offsetLeft", { configurable: true, get() { const box = geometry.get(ids.get(this)); return box ? Math.round(box[0]) : 0; } });
   if (!proto.getClientRects) proto.getClientRects = function () { return []; };
@@ -1140,7 +1185,32 @@ function arrived(node) {
   if (tag === "LINK" && !node.getAttribute("href")) return;
   if (tag === "IMG" && !node.getAttribute("src")) return;
   loadsFired.add(node);
+  if (tag === "IMG") {
+    // an image waits for Merlin's answer: load or error, with its size
+    const src = node.getAttribute("src");
+    if (!imageWaiters.has(src)) imageWaiters.set(src, new Set());
+    imageWaiters.get(src).add(node);
+    send({ type: "want_image", src });
+    return;
+  }
   setTimeout(() => fire(node, "load"), 10);
+}
+const imageWaiters = new Map();     // an image's src -> the images waiting on it
+function imageAnswered(message) {
+  const waiting = imageWaiters.get(message.src) || new Set();
+  imageWaiters.delete(message.src);
+  for (const img of document_.querySelectorAll("img")) {
+    const src = img.getAttribute("src");
+    if (src === message.src || (src && new URL(src, state.url).href === message.url)) waiting.add(img);
+  }
+  for (const img of waiting) {
+    for (const [name, value] of [["naturalWidth", message.width], ["naturalHeight", message.height],
+                                 ["complete", true], ["width", message.width], ["height", message.height]]) {
+      if ((name === "width" || name === "height") && img.hasAttribute(name)) continue;
+      try { Object.defineProperty(img, name, { value, configurable: true, writable: true }); } catch (_) {}
+    }
+    fire(img, message.ok ? "load" : "error");
+  }
 }
 
 // scripts a page adds later run as they arrive, as in a browser
@@ -1208,6 +1278,7 @@ function dispatch(message) {
     for (const observer of observers) observer._check();
     return;
   }
+  if (message.type === "image") { imageAnswered(message); return; }
   if (message.type === "files") {
     const input = nodeOf(message.target);
     if (!input) return;

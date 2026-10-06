@@ -5,6 +5,35 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.12
+  A page's comments reach its scripts, each in its place. Svelte, Vue and React
+  mark where their components are with comments (<!--[-->, <!--]-->) and
+  hydrate from those marks; Merlin Engine's parser had dropped them, and Hugging
+  Face's app found nothing to start from, its page never brought to life. A
+  comment also keeps the text on each side of it apart, as Svelte's <!---->
+  between two texts means it to. They are not drawn.
+  An image a page's script waits on fires load or error as it really went, with
+  its natural size: a page that tries a picture directly and falls back on
+  error (Ponder, to its own image proxy, for thumbnails a site will not serve
+  to others) had been told every one loaded, and its image tiles stayed empty.
+  new Image() to preload is fetched as the page's images are.
+  Web fonts are fetched in the form that reads everywhere first: WOFF, then TTF
+  and OTF, then WOFF2. Qt on Windows cannot read WOFF2, and taking each font's
+  first source alone (WOFF2, as Tabler's icon font gives it) had left every
+  icon on Ponder a box.
+  localhost is reached on IPv4 first. Windows gives ::1 first, and a server
+  listening on 127.0.0.1 alone, as Python's do, Ponder's among them, was
+  reached only after that failed: two seconds a request.
+  The root element's client width and height are the viewport's, as browsers
+  give them. Square reads documentElement.clientWidth to choose its layout and
+  had drawn AlterniTech's site for a phone: its menu stacked, its buttons
+  cramped. Replayed from its zip, it now chooses the desktop layout.
+  Form fields' validation (setCustomValidity, checkValidity, reportValidity,
+  validity, validationMessage), which Square's fields use.
+  The debugging zip is written under a passing name and given its own only
+  once whole: Hugging Face's, with over a thousand modules, had looked finished
+  in Downloads while still being written, and was sent cut short.
+
 1.8.11
   A stylesheet or preload <link> a page's script adds, and an image given a
   src (new Image() too), fire their load, as in a browser. Webpack loads a

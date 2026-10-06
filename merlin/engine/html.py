@@ -148,10 +148,21 @@ class _Builder(HTMLParser):
         if data.strip():
             self._ensure_body()
         last = self.current.children[-1] if self.current.children else None
-        if isinstance(last, Text):
+        if isinstance(last, Text) and not getattr(self, "_comment_between", False):
             last.data += data
         else:
             self.current.append(Text(data))
+        self._comment_between = False
+
+    def handle_comment(self, data):
+        """A comment is kept, where it is, for the page's scripts (frameworks
+        hydrate from comment marks); it keeps the text on each side of it
+        apart, as Svelte's <!----> between two texts means it to."""
+        parent = self.current
+        if parent.comments is None:
+            parent.comments = []
+        parent.comments.append((len(parent.children), data))
+        self._comment_between = True
 
 
 def parse(markup: str, url: str = "") -> Document:
