@@ -401,6 +401,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
     def mark(label: str) -> None:
+        # in the log too, always: where a slow start goes is then plain
+        try:
+            from . import crashlog
+
+            crashlog.note(f"start-up: {label} at {time.perf_counter() - started:.2f} s")
+        except Exception:                                  # noqa: BLE001
+            pass
         if getattr(args, "timings", False):
             print(f"  {label:<32} {time.perf_counter() - started:6.2f} s",
                   flush=True)
@@ -516,6 +523,7 @@ def main(argv: list[str] | None = None) -> int:
         from . import single
 
         if single.hand_off(list(args.urls), args.profile):
+            mark("handed to the Merlin already running")
             return 0
 
     app = QApplication([sys.argv[0]])

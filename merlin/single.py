@@ -34,6 +34,9 @@ def server_name(profile: str = "default") -> str:
     return f"{APP_SLUG}-{profile}-{user}"
 
 
+REPLY_TIMEOUT = 2000                   # ms for a running Merlin to say it took the URLs
+
+
 def hand_off(urls: list[str], profile: str = "default") -> bool:
     """Give our URLs to a running instance. True if one took them."""
     socket = QLocalSocket()
@@ -43,8 +46,20 @@ def hand_off(urls: list[str], profile: str = "default") -> bool:
     payload = "\n".join(urls) if urls else "\n"
     socket.write(payload.encode("utf-8"))
     socket.waitForBytesWritten(WRITE_TIMEOUT)
+    # Taken only if the running Merlin says so. One still ending (its window
+    # gone, its event loop stopped) could still be connected to, and every
+    # launch had handed over to it and quit: Merlin seemed slow to open,
+    # opening only once that process was gone.
+    answered = socket.waitForReadyRead(REPLY_TIMEOUT) and b"ok" in bytes(socket.readAll())
     socket.disconnectFromServer()
-    return True
+    if not answered:
+        try:
+            from . import crashlog
+
+            crashlog.note("single instance: the Merlin found did not answer; starting a new one")
+        except Exception:                                  # noqa: BLE001
+            pass
+    return answered
 
 
 class InstanceServer(QObject):
@@ -74,4 +89,9 @@ class InstanceServer(QObject):
     def _read(self, socket) -> None:
         raw = bytes(socket.readAll()).decode("utf-8", "replace")
         urls = [line.strip() for line in raw.splitlines() if line.strip()]
+        try:
+            socket.write(b"ok\n")                  # here and taking them: the new launch may go
+            socket.flush()
+        except Exception:                                  # noqa: BLE001
+            pass
         self.urls_received.emit(urls)

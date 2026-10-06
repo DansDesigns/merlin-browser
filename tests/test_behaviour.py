@@ -1903,6 +1903,44 @@ def test_download_popup(app) -> None:
         window.close()
 
 
+def test_hand_over_needs_an_answer(app) -> None:
+    """A new launch hands its links to a running Merlin only if that Merlin
+    answers; one that does not (still ending, its window gone) is passed by,
+    and a new Merlin starts. Every launch had quit, handing over to it."""
+    import subprocess
+    import sys as _sys
+    import time as _time
+
+    from merlin import single
+
+    script = (
+        "import sys; sys.path.insert(0, %r)\n"
+        "from PyQt6.QtCore import QCoreApplication, QTimer\n"
+        "from PyQt6.QtNetwork import QLocalServer\n"
+        "app = QCoreApplication([])\n"
+        "if sys.argv[1] == 'live':\n"
+        "    from merlin.single import InstanceServer\n"
+        "    server = InstanceServer('test-handover'); server.listen()\n"
+        "else:\n"
+        "    from merlin.single import server_name\n"
+        "    QLocalServer.removeServer(server_name('test-handover'))\n"
+        "    server = QLocalServer(); server.listen(server_name('test-handover')); held = []\n"
+        "    server.newConnection.connect(lambda: held.append(server.nextPendingConnection()))\n"
+        "QTimer.singleShot(6000, app.quit)\n"
+        "print('ready', flush=True)\n"
+        "app.exec()\n") % os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for mode, wanted in (("live", True), ("dead", False)):
+        child = subprocess.Popen([_sys.executable, "-c", script, mode], stdout=subprocess.PIPE,
+                                 env=dict(os.environ, QT_QPA_PLATFORM="offscreen"))
+        child.stdout.readline()
+        started = _time.time()
+        taken = single.hand_off(["https://example.test/"], "test-handover")
+        child.kill()
+        child.wait()
+        check(f"a launch hands over to a {'live' if wanted else 'silent'} Merlin: {wanted}",
+              taken is wanted and _time.time() - started < 3, f"{taken} after {_time.time() - started:.1f}s")
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -1936,7 +1974,7 @@ def main() -> int:
                  test_script_sites_and_debug_save, test_source_and_save_page_as,
                  test_certificate_padlock, test_interface_too_large,
                  test_loading_bar_and_save_names, test_javascript_permission,
-                 test_download_popup):
+                 test_download_popup, test_hand_over_needs_an_answer):
         print(f"\n{test.__name__}")
         try:
             test(app)

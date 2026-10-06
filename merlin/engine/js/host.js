@@ -29,6 +29,15 @@ for (const level of ["log", "info", "warn", "error", "debug"]) {
     if (level === "debug") return;
     try {
       send({ type: "console", level, text: args.map(a => typeof a === "string" ? a : safeString(a)).join(" ") });
+      // an Error a page logs itself (its own error catcher) comes with where
+      // it was thrown, as an uncaught one does: Hugging Face's had none
+      if (level === "error" || level === "warn") {
+        const error = args.find((a) => a instanceof Error);
+        if (error && error.stack) {
+          send({ type: "console", level, text: String(error.stack).split("\n").slice(1, 4).join("\n") });
+          if (typeof showWhere === "function") showWhere(error).catch(() => {});
+        }
+      }
     } catch (_) { /* nothing to do */ }
   };
 }
@@ -427,6 +436,49 @@ function install(html) {
   typed(g.HTMLButtonElement, function () {
     const t = (this.getAttribute("type") || "").toLowerCase(); return ["submit", "reset", "button"].includes(t) ? t : "submit"; });
   installHandlers(g, made);
+  // Node.prototype's own getters (firstChild, childNodes...) are the DOM's
+  // generic ones, null for every node; the real ones are its subclasses'.
+  // Svelte takes firstChild's getter from Node.prototype and calls it on
+  // every node, as is right in a browser: Hugging Face's app got null, and
+  // stopped. Each now hands on to the node's own class.
+  {
+    const NodeClass = g.Node || made.Node;
+    const base = NodeClass && NodeClass.prototype;
+    const names = ["firstChild", "lastChild", "childNodes", "nextSibling", "previousSibling", "parentNode",
+                   "parentElement", "textContent", "nodeValue", "ownerDocument", "isConnected",
+                   "firstElementChild", "lastElementChild", "nextElementSibling", "previousElementSibling", "children"];
+    const own = (node, name) => {
+      let proto = Object.getPrototypeOf(node);
+      while (proto && proto !== base) {
+        const found = Object.getOwnPropertyDescriptor(proto, name);
+        if (found) return found;
+        proto = Object.getPrototypeOf(proto);
+      }
+      return null;
+    };
+    for (const name of names) {
+      if (!base) break;
+      const generic = Object.getOwnPropertyDescriptor(base, name);
+      // only the DOM's generic getters: a plain value (ownerDocument, which
+      // each node is given) or a name not there must be left to be assigned
+      if (!generic || typeof generic.get !== "function") continue;
+      try {
+        Object.defineProperty(base, name, {
+          configurable: true, enumerable: true,
+          get() {
+            const found = own(this, name);
+            if (found && found.get) return found.get.call(this);
+            return generic && generic.get ? generic.get.call(this) : (generic ? generic.value : undefined);
+          },
+          set(value) {
+            const found = own(this, name);
+            if (found && found.set) return found.set.call(this, value);
+            if (generic && generic.set) return generic.set.call(this, value);
+          },
+        });
+      } catch (_) {}
+    }
+  }
   // The window is Deno's own event target, which takes only Deno's events: an
   // event made from the DOM's classes (PopStateEvent, or the load and scroll
   // this host sends) failed on it, reading 'target', so no page ever heard a

@@ -2804,11 +2804,16 @@ def test_images_fonts_and_viewport(app) -> None:
     open(os.path.join(folder, "hydrate.html"), "w").write(
         "<!DOCTYPE html><html><head><title>Hydrate</title></head><body><div id=app><!--[--><p>server made</p><!--]--></div>"
         "<p id=two>one<!---->two</p><p id=marks>waiting</p><script>"
+        "const getFirst = Object.getOwnPropertyDescriptor(Node.prototype, 'firstChild').get;"
+        "const tpl = document.createElement('template'); tpl.innerHTML = '<!----><p>x</p>';"
+        "window.svelteWay = getFirst.call(tpl.content).nodeType + ' ' + getFirst.call(document.body).nodeType;"
+        "try { null.cloneNode(); } catch (e) { console.error(e); }"
         "const app = document.getElementById('app'); const nodes = [...app.childNodes];"
         "const first = nodes[0], last = nodes[nodes.length - 1];"
         "document.getElementById('marks').textContent = 'first ' + (first.nodeType === 8 ? first.data : 'none')"
         " + ' | last ' + (last.nodeType === 8 ? last.data : 'none') + ' | texts '"
-        " + [...document.getElementById('two').childNodes].filter((n) => n.nodeType === 3).length;</script></body></html>")
+        " + [...document.getElementById('two').childNodes].filter((n) => n.nodeType === 3).length"
+        " + ' | ' + window.svelteWay;</script></body></html>")
     open(os.path.join(folder, "index.html"), "w").write(
         "<!DOCTYPE html><html><head><title>Images</title></head><body><div id=tile></div><p id=out>waiting</p>"
         "<p id=pre>waiting</p><p id=view></p><form><input id=e type=email required></form><script>"
@@ -2874,7 +2879,12 @@ def test_images_fonts_and_viewport(app) -> None:
             app.processEvents()
             time.sleep(0.02)
         check("the page's comment marks reach its scripts in place (Svelte hydrates Hugging Face from them),"
-              " and <!----> keeps two texts apart", text("marks") == "first [ | last ] | texts 2", text("marks"))
+              " and <!----> keeps two texts apart", text("marks").startswith("first [ | last ] | texts 2"), text("marks"))
+        check("Node.prototype's firstChild getter, called on any node as Svelte calls it, gives the real child",
+              text("marks").endswith("| 8 1"), text("marks"))
+        check("an Error a page logs itself comes with where it was thrown",
+              any("null.cloneNode" in t or ">>>HERE>>>" in t or "hydrate.html" in t for level, t in view.console_lines
+                  if level == "error"), str([t[:80] for level, t in view.console_lines if level == "error"][:3]))
     finally:
         view.close()
         server.shutdown()
