@@ -1513,6 +1513,14 @@ class Styler:
                 return int(float(lowered))
             except ValueError:
                 return 0
+        if name == "display":
+            # the old prefixed forms, as browsers still read them: -webkit-box
+            # (with -webkit-line-clamp, to clamp text) had made no box at all
+            lowered = {"-webkit-box": "block", "-moz-box": "block", "-webkit-inline-box": "inline-block",
+                       "-webkit-flex": "flex", "-ms-flexbox": "flex", "-webkit-inline-flex": "inline-flex",
+                       "-ms-inline-flexbox": "inline-flex", "-ms-grid": "grid", "-ms-inline-grid": "inline-grid"
+                       }.get(lowered, lowered)
+            return lowered
         if name == "perspective":
             # a length, in pixels, for the children's 3D transforms; none is none
             if lowered == "none":

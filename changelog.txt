@@ -5,6 +5,29 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.14
+  box-sizing: border-box for widths. A width, min-width or max-width given for
+  the border box holds its padding and border, as heights now do too: a 200px
+  box of border-box had come out 250 wide. Nearly every site sets border-box on
+  everything, so anything given a width on them had been too wide by its
+  padding and border. Heights (height, min-height, max-height) likewise:
+  Google's 40px Sign in button had grown to 60.
+  Natural widths, as CSS has them. An absolutely placed box takes no part in
+  its container's size, and an auto-width block is as wide as what it holds:
+  measured, each had counted the whole room it was measured in. Square's menu
+  items each held a drop-down placed absolutely and an empty bordered
+  underline, measured 100,000 pixels wide, and stacked one a line; they now sit
+  in a row, as on any site whose menu items hold drop-downs.
+  ResizeObserver reports elements' real sizes, from Merlin Engine's layout,
+  and again whenever a layout changes them. It had always said 0 high: Square
+  sizes AlterniTech's logo from it, and drew it 0 pixels tall.
+  The old prefixed display values (-webkit-box, -webkit-inline-box,
+  -webkit-flex, -ms-flexbox, -ms-grid), which sites still use, -webkit-box with
+  -webkit-line-clamp for clamped text: they had made no box at all.
+  Not yet: Google's "+" in the search box is still drawn large, and the box sits
+  a little left of centre; an inline-block with a min-height still stands a
+  little tall on its line; GitHub's blank top while it loads.
+
 1.8.13
   Merlin opens when asked. A new launch hands its links to a Merlin already
   running only if that Merlin answers that it took them. One still ending (its

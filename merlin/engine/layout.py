@@ -395,6 +395,16 @@ class Layout:
         max_width = _px(style.get("max-width"), available, auto=None)
         min_width = _px(style.get("min-width"), available, auto=None)
         horizontal_extra = padding[1] + padding[3] + border[1] + border[3]
+        if style.get("box-sizing") == "border-box":
+            # widths given for the border box hold its padding and border: a
+            # 200px box of border-box had come out 250 wide with its padding,
+            # on nearly every site, which give everything border-box
+            if width_value is not None:
+                width_value = max(0.0, width_value - horizontal_extra)
+            if max_width is not None:
+                max_width = max(0.0, max_width - horizontal_extra / z)
+            if min_width is not None:
+                min_width = max(0.0, min_width - horizontal_extra / z)
         if width_value is None:
             m_left = margin[3] or 0.0
             m_right = margin[1] or 0.0
@@ -434,6 +444,13 @@ class Layout:
         min_height = self._length(style.get("min-height"), 0.0, vertical=True)
         max_height = self._length(style.get("max-height"), 0.0, vertical=True)
         fixed_height = self._length(style.get("height"), 0.0, vertical=True)
+        if style.get("box-sizing") == "border-box":
+            # heights given for the border box hold its padding and border, as
+            # widths do: Google's 40px Sign in button had grown to 60
+            vertical = padding[0] + padding[2] + border[0] + border[2]
+            min_height = None if min_height is None else max(0.0, min_height - vertical)
+            max_height = None if max_height is None else max(0.0, max_height - vertical)
+            fixed_height = None if fixed_height is None else max(0.0, fixed_height - vertical)
 
         layered = style.get("position") in ("relative", "absolute", "fixed", "sticky") \
             and not self._measuring
@@ -569,6 +586,18 @@ class Layout:
             # a button's content sits in its middle, as browsers draw buttons
             self._shift(background_index + 1, links_before, (inner_height - content_height) / 2)
         self._link = enclosing_link
+        if self._measuring and width_value is None and style.get("display") in ("block", "list-item", "flow-root"):
+            # Measured, a block of auto width is as wide as what it holds, as
+            # CSS sizes it, not as wide as the room it was measured in: an
+            # empty block with a border (Square's link underline) had drawn
+            # across 100,000 pixels, and its link measured as wide as that.
+            right = content_x
+            for item in self.out.items[background_index + 1:]:
+                if item is not None:
+                    right = max(right, _right_edge(item))
+            content_width = max(0.0, right - content_x)
+            if min_width is not None:
+                content_width = max(content_width, min_width * z)
         box_height = border[0] + padding[0] + inner_height + padding[2] + border[2]
         box_width = border[3] + padding[3] + content_width + padding[1] + border[1]
         box = QRectF(box_x, box_y, box_width, box_height)
@@ -626,8 +655,13 @@ class Layout:
             inside = QRectF(box.left() + border[3], box.top() + border[0],
                             box.width() - border[1] - border[3],
                             box.height() - border[0] - border[2])
-            for child, child_style, static_x, static_y in waiting:
-                self._place_absolute(child, child_style, inside, static_x + dx, static_y + dy)
+            # Out of flow, an absolute box takes no part in its container's
+            # size: measured, it is left out. Square's menu items each held a
+            # drop-down placed absolutely, and measured as wide as it, so they
+            # stacked one a line where they should sit in a row.
+            if not self._measuring:
+                for child, child_style, static_x, static_y in waiting:
+                    self._place_absolute(child, child_style, inside, static_x + dx, static_y + dy)
         if not self._measuring:
             self.out.boxes.append((box, element))
         if clip_index is not None:

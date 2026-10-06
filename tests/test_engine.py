@@ -2816,7 +2816,8 @@ def test_images_fonts_and_viewport(app) -> None:
         " + ' | ' + window.svelteWay;</script></body></html>")
     open(os.path.join(folder, "index.html"), "w").write(
         "<!DOCTYPE html><html><head><title>Images</title></head><body><div id=tile></div><p id=out>waiting</p>"
-        "<p id=pre>waiting</p><p id=view></p><form><input id=e type=email required></form><script>"
+        "<p id=pre>waiting</p><p id=view></p><div id=sized style='width:240px;height:60px'></div><p id=size>waiting</p>"
+        "<form><input id=e type=email required></form><script>"
         "const img = document.createElement('img');"
         "img.onerror = () => { img.onerror = null; img.onload = () => { document.getElementById('out').textContent ="
         " 'proxy loaded ' + img.naturalWidth + 'x' + img.naturalHeight; }; img.src = '/proxy.png'; };"
@@ -2827,6 +2828,9 @@ def test_images_fonts_and_viewport(app) -> None:
         "const e = document.getElementById('e'); const v = [document.documentElement.clientWidth > 300,"
         " e.checkValidity(), e.validity.valueMissing]; e.value = 'a@b.co'; e.setCustomValidity('taken');"
         " v.push(e.validity.customError, e.validationMessage); e.setCustomValidity(''); v.push(e.validity.valid);"
+        "new ResizeObserver((entries) => { document.getElementById('size').textContent = 'observed '"
+        " + Math.round(entries[0].contentRect.width) + 'x' + Math.round(entries[0].contentRect.height); })"
+        ".observe(document.getElementById('sized'));"
         "document.getElementById('view').textContent = v.join(' ');</script></body></html>")
 
     class Quiet(http.server.SimpleHTTPRequestHandler):
@@ -2873,6 +2877,12 @@ def test_images_fonts_and_viewport(app) -> None:
         check("an image preloaded with new Image() reports its real size", text("pre") == "preloaded 3x2", text("pre"))
         check("the root element's client width is the viewport's (Square chose its phone layout on 0), and fields validate",
               text("view") == "true false true true taken true", text("view"))
+        end = time.time() + 6
+        while time.time() < end and text("size") in ("", "waiting"):
+            app.processEvents()
+            time.sleep(0.02)
+        check("ResizeObserver reports an element's real size (Square sizes its logo so; it had said 0)",
+              text("size") == "observed 240x60", text("size"))
         view.setUrl(QUrl(f"http://127.0.0.1:{server.server_address[1]}/hydrate.html"))
         end = time.time() + 12
         while time.time() < end and text("marks") in ("", "waiting"):
@@ -2888,6 +2898,45 @@ def test_images_fonts_and_viewport(app) -> None:
     finally:
         view.close()
         server.shutdown()
+
+
+def test_box_sizing_and_measuring(app) -> None:
+    """border-box for widths and heights, as nearly every site sets it; the
+    old -webkit-box display; and a menu's items measured without their
+    absolute drop-downs and empty underlines, so they sit in a row."""
+    from merlin.engine.css import Styler
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+
+    page = ("<style>body{margin:0} .b{box-sizing:border-box;padding:20px;border:5px solid}"
+            "ul{margin:0;padding:0;width:600px} li{display:inline-block;position:relative;margin:0 16px}"
+            "li a{display:block;white-space:nowrap;position:relative}"
+            "li a:after{content:'';display:block;border-bottom:2px solid;height:0}"
+            ".drop{position:absolute;top:100%;left:0;width:300px}</style>"
+            "<div class=b id=w style='width:200px'>w</div><div class=b id=h style='height:100px;width:300px'>h</div>"
+            "<div class=b id=m style='min-height:100px;width:300px'>m</div><div class=b id=x style='max-width:250px'>x</div>"
+            "<div id=c style='width:200px;padding:20px;border:5px solid'>content-box</div>"
+            "<a id=pill style='display:block;width:120px;box-sizing:border-box;min-height:40px;line-height:18px;"
+            "padding:10px 20px'>Sign in</a><div><span id=clamp style='display:-webkit-box'>clamped</span></div>"
+            "<ul>" + "".join(f"<li id=i{n}><a>Item {n}</a><div class=drop>a long drop-down menu of links</div></li>"
+                             for n in range(4)) + "</ul>")
+    document = parse(page)
+    styles = Styler(document).compute()
+    out = Layout(document, styles, 1000, viewport_height=600).run()
+    box = {e.attrs.get("id"): r for r, e in out.boxes if e.attrs.get("id")}
+    check("border-box: a 200px wide box is 200 wide with its padding and border (250 before)",
+          round(box["w"].width()) == 200 and round(box["h"].width()) == 300 and round(box["h"].height()) == 100,
+          f"{box['w'].width():.0f}, {box['h'].width():.0f}x{box['h'].height():.0f}")
+    check("border-box: min-height and max-width hold padding and border too; content-box adds them",
+          round(box["m"].height()) == 100 and round(box["x"].width()) == 250 and round(box["c"].width()) == 250,
+          f"{box['m'].height():.0f} {box['x'].width():.0f} {box['c'].width():.0f}")
+    check("a 40px min-height button of border-box is 40 high (Google's Sign in had been 60)",
+          round(box["pill"].height()) == 40, f"{box['pill'].height():.0f}")
+    check("display: -webkit-box makes a box (for clamped text)", "clamp" in box and styles[
+        next(e for e in document.root.elements() if e.id == "clamp")].get("display") == "block")
+    check("menu items with absolute drop-downs and empty underlines sit in a row (Square's had stacked)",
+          len({round(box[f"i{n}"].y()) for n in range(4)}) == 1 and box["i0"].width() < 150,
+          f"tops {[round(box[f'i{n}'].y()) for n in range(4)]}, first {box['i0'].width():.0f} wide")
 
 
 def test_modern_colours() -> None:
@@ -3166,6 +3215,8 @@ def main() -> int:
     test_loads_and_walkers(app)
     print("test_images_fonts_and_viewport")
     test_images_fonts_and_viewport(app)
+    print("test_box_sizing_and_measuring")
+    test_box_sizing_and_measuring(app)
     print("test_animations_and_3d")
     test_animations_and_3d(app)
     print("test_server_pages_and_http_fallback")

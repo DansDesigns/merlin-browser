@@ -100,6 +100,7 @@ const state = { url: "about:blank", width: 1280, height: 800, scrollX: 0, scroll
                 userAgent: "Mozilla/5.0", language: "en-GB", storage: {}, loaded: false };
 const geometry = new Map();      // element id -> [x, y, width, height, fixed] in page terms
 const observers = new Set();     // the live IntersectionObservers
+const resizers = new Set();      // the live ResizeObservers
 const ids = new WeakMap();
 const byId = new Map();
 let lastId = 0;
@@ -401,11 +402,29 @@ function install(html) {
       if (entries.length) { try { this._cb(entries, this); } catch (e) { reportError(e); } }
     }
   };
+  // Worked out from Merlin Engine's layout: each target's size once laid out,
+  // and again whenever a layout changes it. It had always said 0 high: Square
+  // sizes AlterniTech's logo from it, and drew it 0 pixels tall.
   g.ResizeObserver = class {
-    constructor(callback) { this._cb = callback; }
-    observe(target) { queueMicrotask(() => { try { this._cb([{ target, contentRect: { x: 0, y: 0, width: state.width, height: 0, top: 0, left: 0, right: state.width, bottom: 0 },
-      borderBoxSize: [{ inlineSize: state.width, blockSize: 0 }], contentBoxSize: [{ inlineSize: state.width, blockSize: 0 }] }], this); } catch (e) { reportError(e); } }); }
-    unobserve() {} disconnect() {}
+    constructor(callback) { this._cb = callback; this._targets = new Map(); resizers.add(this); }
+    observe(target) { if (!this._targets.has(target)) { this._targets.set(target, null); queueMicrotask(() => this._check()); } }
+    unobserve(target) { this._targets.delete(target); }
+    disconnect() { this._targets.clear(); resizers.delete(this); }
+    _check() {
+      if (!geometry.size) return;
+      const entries = [];
+      for (const [target, last] of this._targets) {
+        const box = geometry.get(ids.get(target));
+        const width = box ? box[2] : 0, height = box ? box[3] : 0;
+        const key = width + "x" + height;
+        if (key === last) continue;
+        this._targets.set(target, key);
+        const size = [{ inlineSize: width, blockSize: height }];
+        entries.push({ target, contentRect: { x: 0, y: 0, top: 0, left: 0, width, height, right: width, bottom: height },
+                       contentBoxSize: size, borderBoxSize: size, devicePixelContentBoxSize: size });
+      }
+      if (entries.length) { try { this._cb(entries, this); } catch (e) { reportError(e); } }
+    }
   };
   g.PerformanceObserver = class { constructor() {} observe() {} disconnect() {} takeRecords() { return []; } static get supportedEntryTypes() { return []; } };
   g.alert = (text) => send({ type: "alert", text: String(text) });
@@ -1349,6 +1368,7 @@ function dispatch(message) {
     for (const [id, box] of Object.entries(message.boxes || {})) geometry.set(Number(id), box);
     if (message.height) state.height = message.height;
     for (const observer of observers) observer._check();
+    for (const observer of resizers) observer._check();
     return;
   }
   if (message.type === "resize") {
