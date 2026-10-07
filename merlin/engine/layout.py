@@ -351,7 +351,18 @@ class Layout:
             if (colour and colour[3] > 0) or gradients:
                 if colour and colour[3] > 0:
                     self.out.canvas = colour
-                self.out.canvas_gradients = list(gradients or [])
+                layers = []
+                for index, layer in enumerate(gradients or []):
+                    if layer and layer[0] == "url":
+                        # a picture over the whole page: with how it is sized,
+                        # placed and repeated, as the root element gives it
+                        layers.append(("url", layer[1],
+                                       _layer_of(element_style.get("background-size"), index),
+                                       _layer_of(element_style.get("background-position"), index),
+                                       _layer_of(element_style.get("background-repeat"), index)))
+                    else:
+                        layers.append(layer)
+                self.out.canvas_gradients = layers
                 self._canvas_owner = element
                 break
         height = self._block(root, root_style, 0.0, 0.0, self.width, root_level=True)

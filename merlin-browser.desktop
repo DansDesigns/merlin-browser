@@ -11,8 +11,10 @@ Categories=Network;WebBrowser;
 Keywords=browser;internet;web;www;merlin;
 StartupNotify=true
 StartupWMClass=merlin-browser
+# how to remove it, for an app manager that lists apps installed for a user
+X-Uninstall-Exec=merlin-browser --uninstall
 MimeType=text/html;text/xml;application/xhtml+xml;application/xml;x-scheme-handler/http;x-scheme-handler/https;x-scheme-handler/about;x-scheme-handler/unknown;video/mp4;video/x-matroska;video/quicktime;audio/mpeg;audio/flac;
-Actions=private;newwindow;codecs;
+Actions=private;newwindow;codecs;uninstall;
 
 [Desktop Action private]
 Name=New private window
@@ -25,3 +27,7 @@ Exec=merlin-browser
 [Desktop Action codecs]
 Name=Codec report
 Exec=merlin-browser --codecs
+
+[Desktop Action uninstall]
+Name=Uninstall Merlin...
+Exec=merlin-browser --uninstall

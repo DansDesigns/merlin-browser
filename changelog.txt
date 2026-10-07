@@ -5,6 +5,29 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.21
+  Merlin starts on Linux again. 1.8.16 drew background pictures, but a picture
+  on <html> or <body>, which covers the whole page, was handed to the gradient
+  code; it failed in the middle of painting, and Qt on Linux then ended the
+  process: 1.8.19 closed as it opened. Those pictures are now drawn as pictures,
+  with the root element's background-size, -position and -repeat; and whatever
+  goes wrong while a page is painted is written to the log and the painting
+  ends cleanly, never a crash.
+  Uninstalling on Linux: Merlin's menu has "Uninstall Merlin Browser", Merlin's
+  own entry offers "Uninstall Merlin..." on right-click, and merlin-browser
+  --uninstall opens the graphical uninstaller (or the script in a terminal). It
+  now removes everything Merlin put on the computer: the program, its menu
+  entries, the web apps made with it, caches and logs (~/.cache and
+  ~/.local/state, Merlin's and Qt's capitalised "Merlin" folders), and, if
+  asked, the profile in ~/.config and ~/.local/share. The desktop entry
+  declares X-Uninstall-Exec, for an app manager that lists apps installed for
+  one user (Alternix's could read it).
+  Merlin's own data no longer goes to Qt's folders: sites' local storage moves
+  to ~/.local/share/merlin/local-storage (what was stored is moved once), and
+  the JavaScript module cache to ~/.cache/merlin/js-modules.
+  Not yet: panels that scroll inside a page (overflow: auto). Ponder's results
+  are one, the page itself one window high: what is below its edge is cut off.
+
 1.8.20
   Merlin Engine connects as Chrome does. Sites that look for robots, Google
   first among them, tell a browser from a program by how it connects before a

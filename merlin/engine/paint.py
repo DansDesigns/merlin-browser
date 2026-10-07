@@ -469,6 +469,24 @@ def draw_background_picture(painter, rect: QRectF, picture, size: str, position:
     painter.restore()
 
 
+def fill_page_layers(painter, rect: QRectF, layers, images=None) -> None:
+    """The background of <html> or <body>, over the whole page: its gradients
+    and, since 1.8.16, its pictures. The pictures had been handed to the
+    gradient code, which failed on them in the middle of painting; on Linux Qt
+    then ended the process, and Merlin could not start."""
+    for layer in reversed(list(layers or [])):
+        try:
+            if layer and layer[0] == "url":
+                picture = (images or {}).get(layer[1])
+                if picture is not None and picture is not False \
+                        and not (hasattr(picture, "isNull") and picture.isNull()):
+                    draw_background_picture(painter, rect, picture, layer[2], layer[3], layer[4], 0.0)
+            elif layer and layer[0] in ("linear", "radial"):
+                fill_gradient(painter, rect, layer)
+        except Exception:                                  # noqa: BLE001
+            continue                                       # a layer that cannot be drawn is left out
+
+
 def _fitted(rect: QRectF, picture, fit) -> QRectF:
     """Where a picture is drawn in its box, by object-fit: stretched to it
     (fill), whole within it (contain), covering it and cropped (cover), at its
@@ -648,6 +666,8 @@ def _dithered(rect: QRectF, spec, ratio: float):
 
 
 def fill_gradient(painter, rect: QRectF, spec, radius: float = 0.0) -> None:
+    if not spec or spec[0] not in ("linear", "radial"):
+        return                                             # not a gradient: nothing to fill
     ratio = 1.0
     try:
         ratio = float(painter.device().devicePixelRatioF())

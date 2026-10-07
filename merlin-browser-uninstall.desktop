@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Uninstall Merlin Browser
+Comment=Remove Merlin Browser from this computer
+Exec=merlin-browser --uninstall
+Icon=merlin-browser
+Terminal=false
+Categories=Settings;System;
+Keywords=merlin;uninstall;remove;

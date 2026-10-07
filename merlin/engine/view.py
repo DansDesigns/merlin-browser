@@ -1716,6 +1716,7 @@ class MerlinView(QWidget):
             return
         cache = getattr(self._host, "script_cache_dir", lambda: "")() or os.path.join(
             QStandardPaths.writableLocation(QStandardPaths.StandardLocation.CacheLocation), "merlin-js")
+        # (with no window to ask, as in tests, Qt's cache folder is used)
         try:
             host = ScriptHost(deno, import_hosts(self._markup, self._url.toString()), cache, self,
                               mapping=import_map(self._markup, self._url.toString()))
@@ -2890,14 +2891,15 @@ class MerlinView(QWidget):
 
     def _paint_page(self, painter, top: float, height: float) -> None:
         """The page from top, for height, as it would be drawn scrolled there."""
-        from .paint import fill_gradient
+        from .paint import fill_page_layers
 
         width = self._page_width()
         area = QRectF(0, top, width, height)
         canvas = self._display.canvas or (255, 255, 255, 255)
         painter.fillRect(area, QColor(*canvas))
-        for gradient in reversed(self._display.canvas_gradients or []):
-            fill_gradient(painter, QRectF(0, 0, width, max(height, self._display.height)), gradient)
+        fill_page_layers(painter, QRectF(0, 0, width, max(height, self._display.height)),
+                         self._display.canvas_gradients,
+                         {k: v for k, v in self._images.items() if v is not False})
         paint(painter, self._display, area,
               {k: v for k, v in self._images.items() if v is not False})
 
@@ -3001,7 +3003,25 @@ class MerlinView(QWidget):
         super().resizeEvent(event)
 
     def paintEvent(self, event) -> None:                      # noqa: N802
+        # Whatever goes wrong while a page is painted is written to the log and
+        # the painting ends cleanly: an error out of a paint event, with its
+        # painter still open, is a crash on Linux. (1.8.19 could not start so.)
         painter = QPainter(self)
+        try:
+            self._paint_into(painter)
+        except Exception:                                  # noqa: BLE001
+            import traceback
+
+            try:
+                from .. import crashlog
+
+                crashlog.note("painting the page failed:\n" + traceback.format_exc())
+            except Exception:                              # noqa: BLE001
+                pass
+        finally:
+            painter.end()
+
+    def _paint_into(self, painter) -> None:
         canvas = self._display.canvas if self._display and self._display.canvas else (255, 255, 255, 255)
         painter.fillRect(self.rect(), QColor(*canvas))
         if self._display:
@@ -3009,12 +3029,12 @@ class MerlinView(QWidget):
             painter.translate(0, -self._scroll)
             visible = QRectF(0, self._scroll, self.width(), self.height())
             if self._display.canvas_gradients:
-                # a gradient on <html> or <body> spans the whole page
-                from .paint import fill_gradient
+                # gradients and pictures on <html> or <body> span the whole page
+                from .paint import fill_page_layers
 
                 page = QRectF(0, 0, self.width(), max(float(self.height()), self._display.height))
-                for gradient in reversed(self._display.canvas_gradients):
-                    fill_gradient(painter, page, gradient)
+                fill_page_layers(painter, page, self._display.canvas_gradients,
+                                 {k: v for k, v in self._images.items() if v is not False})
             if self._found_rect is not None:
                 painter.fillRect(self._found_rect.adjusted(-1, -1, 1, 1), QColor(255, 214, 0, 200))
             pictures = {k: v for k, v in self._images.items() if v is not False}
@@ -3024,7 +3044,6 @@ class MerlinView(QWidget):
             # animations are drawn at the time since this page was shown
             painting.NOW = time.monotonic() - self._animation_epoch
             paint(painter, self._display, visible, pictures)
-        painter.end()
 
     def wheelEvent(self, event) -> None:                      # noqa: N802
         self.scrollbar.setValue(self.scrollbar.value() - event.angleDelta().y())

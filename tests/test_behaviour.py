@@ -1943,6 +1943,50 @@ def test_hand_over_needs_an_answer(app) -> None:
               taken is wanted and _time.time() - started < 3, f"{taken} after {_time.time() - started:.1f}s")
 
 
+def test_linux_uninstaller(app) -> None:
+    """The uninstaller install.sh writes removes everything Merlin put on the
+    computer (its program, menu entries, web-app shortcuts, caches, logs, and the
+    profile if asked), and nothing else; and the launcher offers --uninstall."""
+    import subprocess
+    import tempfile as _tempfile
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    text = open(os.path.join(root, "install.sh"), encoding="utf-8").read()
+    maker = text[text.index('cat > "$LIB/uninstall.sh" <<UNINST'):text.index('chmod +x "$LIB/uninstall.sh"')]
+    check("the launcher install.sh writes offers --uninstall", '"--uninstall"' in text and "uninstall-gui.py" in text)
+    entries = open(os.path.join(root, "merlin-browser.desktop"), encoding="utf-8").read()
+    check("Merlin's menu entry says how to remove it, and offers it",
+          "X-Uninstall-Exec=merlin-browser --uninstall" in entries and "[Desktop Action uninstall]" in entries
+          and os.path.exists(os.path.join(root, "merlin-browser-uninstall.desktop")))
+    for keep in ("1", "0"):
+        home = _tempfile.mkdtemp(prefix="merlin-home-")
+        made = [".config/merlin", ".config/Merlin", ".local/share/merlin/engine", ".local/share/Merlin",
+                ".local/state/Merlin/Merlin Browser", ".local/state/merlin", ".cache/merlin", ".cache/Merlin",
+                ".local/lib/merlin-browser/merlin", ".local/share/applications", ".local/bin", "Documents"]
+        for folder in made:
+            os.makedirs(os.path.join(home, folder), exist_ok=True)
+        for name in (".local/share/applications/merlin-browser.desktop",
+                     ".local/share/applications/merlin-app-Ponder.desktop",
+                     ".local/share/applications/other.desktop", ".local/bin/merlin-browser", "Documents/mine.txt"):
+            open(os.path.join(home, name), "w").close()
+        lib = os.path.join(home, ".local/lib/merlin-browser")
+        env = dict(os.environ, HOME=home, LIB=lib, BIN=os.path.join(home, ".local/bin"),
+                   APPS=os.path.join(home, ".local/share/applications"),
+                   ICONS=os.path.join(home, ".local/share/icons/hicolor/scalable/apps"), MERLIN_KEEP_PROFILE=keep)
+        for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"):
+            env.pop(name, None)
+        subprocess.run(["bash", "-c", maker], env=env, check=True)
+        subprocess.run(["bash", os.path.join(lib, "uninstall.sh")], env=env, check=True, capture_output=True)
+        left = sorted(os.path.relpath(os.path.join(b, f), home) for b, _d, fs in os.walk(home) for f in fs) + sorted(
+            os.path.relpath(os.path.join(b, d), home) for b, ds, _f in os.walk(home) for d in ds
+            if d.lower() in ("merlin", "merlin-browser"))
+        wanted = (["Documents/mine.txt", ".local/share/applications/other.desktop"] if keep == "0" else
+                  ["Documents/mine.txt", ".local/share/applications/other.desktop", ".config/Merlin", ".config/merlin",
+                   ".local/share/Merlin", ".local/share/merlin"])
+        check(f"uninstalled {'keeping' if keep == '1' else 'deleting'} the profile: all of Merlin goes, and nothing else",
+              sorted(left) == sorted(wanted), str(left))
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -1976,7 +2020,7 @@ def main() -> int:
                  test_script_sites_and_debug_save, test_source_and_save_page_as,
                  test_certificate_padlock, test_interface_too_large,
                  test_loading_bar_and_save_names, test_javascript_permission,
-                 test_download_popup, test_hand_over_needs_an_answer):
+                 test_download_popup, test_hand_over_needs_an_answer, test_linux_uninstaller):
         print(f"\n{test.__name__}")
         try:
             test(app)

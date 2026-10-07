@@ -1998,10 +1998,9 @@ class BrowserWindow(QMainWindow):
         return ""
 
     def script_cache_dir(self) -> str:
-        from PyQt6.QtCore import QStandardPaths as _Paths
-
-        base = _Paths.writableLocation(_Paths.StandardLocation.CacheLocation) or os.path.expanduser("~")
-        return os.path.join(base, "merlin-js-modules")
+        # in Merlin's own cache folder, beside the rest: under Qt's own it went
+        # to a second, capitalised "Merlin" folder
+        return os.path.join(cfg.CACHE_DIR, "js-modules")
 
     def local_storage(self):
         """Sites' localStorage: kept between sessions, except in private windows."""
@@ -2010,9 +2009,21 @@ class BrowserWindow(QMainWindow):
         from .engine.script import LocalStorage
 
         if getattr(self, "_local_storage", None) is None:
-            folder = None if self.private else os.path.join(
-                _Paths.writableLocation(_Paths.StandardLocation.AppLocalDataLocation)
-                or os.path.expanduser("~"), "merlin-local-storage")
+            folder = None
+            if not self.private:
+                # in Merlin's own data folder; what sites had stored under Qt's
+                # (a capitalised "Merlin" folder) is moved here once
+                folder = os.path.join(cfg.DATA_DIR, "local-storage")
+                old = os.path.join(_Paths.writableLocation(_Paths.StandardLocation.AppLocalDataLocation)
+                                   or os.path.expanduser("~"), "merlin-local-storage")
+                if os.path.isdir(old) and not os.path.exists(folder):
+                    try:
+                        import shutil
+
+                        os.makedirs(os.path.dirname(folder), exist_ok=True)
+                        shutil.move(old, folder)
+                    except OSError:
+                        folder = old                       # left where it was, still used
             self._local_storage = LocalStorage(folder)
         return self._local_storage
 

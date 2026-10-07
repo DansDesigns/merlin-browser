@@ -3321,6 +3321,43 @@ def test_chrome_connections(app) -> None:
           data[:1] == b"\x16" and grease and b"\x02h2" in data, f"{len(data)} bytes")
 
 
+def test_page_background_pictures_and_safe_painting(app) -> None:
+    """A picture on <body>, under a gradient, is drawn over the whole page (it
+    had been handed to the gradient code, and 1.8.19 could not start on Linux);
+    and a failure while painting is logged, never a crash."""
+    from PyQt6.QtGui import QColor, QImage
+
+    import merlin.engine.view as engine_view
+    from merlin.engine import MerlinView
+
+    view = MerlinView()
+    view.resize(400, 300)
+    view.show()
+    view.setHtml("<html><body style=\"margin:0;background:linear-gradient(rgba(0,0,0,.5),rgba(0,0,0,.5)),"
+                 " url(p.png) center / cover no-repeat\"><p>x</p></body></html>", QUrl("about:blank"))
+    wait(app, 1.0)
+    check("a picture on <body> is a page-background layer with its size, position and repeat",
+          [layer[0] for layer in view._display.canvas_gradients] == ["linear", "url"]
+          and view._display.canvas_gradients[1][2:] == ("cover", "center", "no-repeat"),
+          str(view._display.canvas_gradients))
+    picture = QImage(20, 20, QImage.Format.Format_RGB32)
+    picture.fill(QColor(255, 0, 0))
+    view._images["p.png"] = picture
+    colour = view.grab().toImage().pixelColor(200, 250)
+    check("and is drawn, dimmed by the gradient over it", abs(colour.red() - 128) < 6 and colour.green() < 6,
+          str((colour.red(), colour.green(), colour.blue())))
+    real = engine_view.MerlinView._paint_into
+    engine_view.MerlinView._paint_into = lambda self, painter: 1 / 0
+    try:
+        view.grab()
+        check("a failure while painting a page is caught, not a crash", True)
+    except Exception as exc:                                # noqa: BLE001
+        check("a failure while painting a page is caught, not a crash", False, str(exc))
+    finally:
+        engine_view.MerlinView._paint_into = real
+        view.close()
+
+
 def test_modern_colours() -> None:
     """CSS Color 4 and 5, as GitHub uses them: unread, faint lines came out solid."""
     from merlin.engine.css import parse_colour
@@ -3609,6 +3646,8 @@ def main() -> int:
     test_button_groups_measured(app)
     print("test_clicks_land_where_browsers_land")
     test_clicks_land_where_browsers_land(app)
+    print("test_page_background_pictures_and_safe_painting")
+    test_page_background_pictures_and_safe_painting(app)
     print("test_chrome_connections")
     test_chrome_connections(app)
     print("test_animations_and_3d")

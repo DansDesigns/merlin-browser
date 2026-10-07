@@ -1,5 +1,5 @@
 # Merlin Browser
-![version](https://img.shields.io/badge/version-1.8.20-6f8ff0)
+![version](https://img.shields.io/badge/version-1.8.21-6f8ff0)
 
 ### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6 Requires a reinstall as there has been a fundamental change to the folder structure. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
 
@@ -203,8 +203,15 @@ sudo dnf install python3-qt6 python3-qt6-webengine         # Fedora
 sudo pacman -S python-pyqt6 python-pyqt6-webengine         # Arch
 ```
 
-Uninstall with `~/.local/lib/merlin-browser/uninstall-gui.py` for the graphical
-one, or `uninstall.sh` beside it for the text one.
+Uninstall from the menu ("Uninstall Merlin Browser", or right-click Merlin and
+choose "Uninstall Merlin..."), or run `merlin-browser --uninstall`. It removes
+the program, its menu entries, web-app shortcuts, caches and logs, and asks
+whether to delete your bookmarks, history, logins and settings too. The
+desktop entry carries `X-Uninstall-Exec=`, for an app manager that lists apps
+installed for one user.
+
+To update when Merlin will not start, run `./install.sh` from the new release
+folder: it replaces the program and keeps your profile.
 
 ### Windows
 

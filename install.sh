@@ -335,6 +335,19 @@ fi
 
 cat > "$LIB/merlin-browser" <<LAUNCH
 #!/usr/bin/env bash
+# merlin-browser --uninstall: the graphical uninstaller where Tk is there (it
+# needs only the system's Python), else the script in a terminal
+if [[ "\${1:-}" == "--uninstall" ]]; then
+  if command -v python3 >/dev/null 2>&1 && python3 -c 'import tkinter' 2>/dev/null \\
+      && [[ -f "$LIB/uninstall-gui.py" ]]; then
+    exec python3 "$LIB/uninstall-gui.py"
+  fi
+  if [[ -t 0 ]]; then exec "$LIB/uninstall.sh"; fi
+  for term in x-terminal-emulator qterminal konsole gnome-terminal xfce4-terminal lxterminal xterm; do
+    if command -v "\$term" >/dev/null 2>&1; then exec "\$term" -e "$LIB/uninstall.sh"; fi
+  done
+  exec "$LIB/uninstall.sh"
+fi
 exec "$VENV/bin/python" "$LIB/merlin-run.py" "\$@"
 LAUNCH
 chmod +x "$LIB/merlin-browser"
@@ -364,9 +377,10 @@ echo
 step 5 "Desktop entries"
 # One entry only: the title bar is a toggle in the menu, so a second launcher
 # for it was another thing to keep in step for no gain.
-for entry in merlin-browser.desktop; do
+for entry in merlin-browser.desktop merlin-browser-uninstall.desktop; do
   [[ -f "$SRC/$entry" ]] || continue
-  sed "s|^Exec=merlin-browser|Exec=$BIN/merlin-browser|" "$SRC/$entry" > "$APPS/$entry"
+  sed -e "s|^Exec=merlin-browser|Exec=$BIN/merlin-browser|" \
+      -e "s|^X-Uninstall-Exec=merlin-browser|X-Uninstall-Exec=$BIN/merlin-browser|" "$SRC/$entry" > "$APPS/$entry"
 done
 command -v update-desktop-database >/dev/null && update-desktop-database "$APPS" 2>/dev/null || true
 command -v gtk-update-icon-cache >/dev/null && \
@@ -407,26 +421,38 @@ fi
 # -------------------------------------------------------------- uninstaller
 cat > "$LIB/uninstall.sh" <<UNINST
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
+# Everything Merlin puts on this computer. Linux keeps settings, data, caches
+# and logs apart (~/.config, ~/.local/share, ~/.cache, ~/.local/state); the
+# capitalised Merlin folders are Qt's own, named after Merlin.
+CONFIG="\${XDG_CONFIG_HOME:-\$HOME/.config}"
+DATA="\${XDG_DATA_HOME:-\$HOME/.local/share}"
+CACHE="\${XDG_CACHE_HOME:-\$HOME/.cache}"
+STATE="\${XDG_STATE_HOME:-\$HOME/.local/state}"
 echo "Removing Merlin Browser..."
 rm -f "$BIN/merlin-browser"
-rm -f "$APPS/merlin-browser.desktop" "$APPS/merlin-browser-frameless.desktop"
+rm -f "$APPS/merlin-browser.desktop" "$APPS/merlin-browser-frameless.desktop" "$APPS/merlin-browser-uninstall.desktop"
 rm -f "$ICONS/merlin-browser.svg"
-rm -f "$HOME/.local/share/icons/hicolor/256x256/apps/merlin-browser.png"
+rm -f "\$HOME/.local/share/icons/hicolor/256x256/apps/merlin-browser.png"
+# the web apps made with Merlin ("Install as app"): their menu entries
+rm -f "\$DATA/applications/"merlin-app-*.desktop
+# caches and logs: always
+rm -rf "\$CACHE/merlin" "\$CACHE/Merlin" "\$STATE/merlin" "\$STATE/Merlin"
 # MERLIN_KEEP_PROFILE lets a front end answer this without a terminal:
 # 1 keeps the profile, 0 deletes it, unset asks.
 reply="n"
 if [[ -n "\${MERLIN_KEEP_PROFILE:-}" ]]; then
   [[ "\$MERLIN_KEEP_PROFILE" == "0" ]] && reply="y"
 else
-  read -r -p "Delete bookmarks, history and settings too? [y/N] " reply
+  read -r -p "Delete bookmarks, history, logins and settings too? [y/N] " reply
 fi
 if [[ "\${reply,,}" == "y" ]]; then
-  rm -rf "\$HOME/.config/merlin" "\$HOME/.local/share/merlin" "\$HOME/.cache/merlin"
+  rm -rf "\$CONFIG/merlin" "\$CONFIG/Merlin" "\$DATA/merlin" "\$DATA/Merlin"
   echo "Profile deleted."
 else
-  echo "Profile kept in \$HOME/.config/merlin"
+  echo "Profile kept in \$CONFIG/merlin and \$DATA/merlin"
 fi
+command -v update-desktop-database >/dev/null && update-desktop-database "$APPS" 2>/dev/null || true
 rm -rf "$LIB"
 echo "Done."
 UNINST
