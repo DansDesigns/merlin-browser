@@ -26,6 +26,7 @@ from . import html as html_parser
 from .css import Styler, media_matches
 from .layout import Layout
 from .paint import paint
+from .frames import FramesMixin, refused_page, refuses_framing
 
 # What a page load says about itself when Merlin's own user agent is not to
 # hand. "MerlinEngine/0.1" was refused outright by sites' bot protection, with
@@ -308,7 +309,7 @@ def _decode(body: bytes, content_type: str) -> str:
 
 def fetch_page(url: str, headers: dict | None = None, data: bytes | None = None,
                content_type: str = "", opener=None, download_dir: str = "",
-               progress=None) -> tuple:
+               progress=None, answer_headers: dict | None = None) -> tuple:
     """(ok, final url, page, downloaded path or "") for any address a tab opens.
 
     FTP, SMB and local folders go through remote.py. A web response that is
@@ -341,6 +342,8 @@ def fetch_page(url: str, headers: dict | None = None, data: bytes | None = None,
     try:
         with _open(request, 20, opener) as response:
             final = response.geturl()
+            if answer_headers is not None:
+                answer_headers.update({k: v for k, v in response.headers.items()})
             kind = response.headers.get("Content-Type", "")
             disposition = response.headers.get("Content-Disposition", "") or ""
             name = _download_name(disposition, final)
@@ -370,6 +373,8 @@ def fetch_page(url: str, headers: dict | None = None, data: bytes | None = None,
         # only an answer with no page in it gets Merlin Engine's own.
         try:
             kind = error.headers.get("Content-Type", "") if error.headers else ""
+            if answer_headers is not None and error.headers:
+                answer_headers.update({k: v for k, v in error.headers.items()})
             if "html" in kind or "text/plain" in kind:
                 body = _decode(_body(error, 8 * 1024 * 1024), kind)
                 if body.strip():
@@ -562,6 +567,16 @@ def _scripts_user_agent(fallback: str) -> str:
     return (chromelike.user_agent() if chromelike.usable() else "") or fallback
 
 
+def _scripts_brands() -> list:
+    """navigator.userAgentData's brands: those the connections send."""
+    from . import chromelike
+
+    try:
+        return chromelike.brands() if chromelike.usable() else []
+    except Exception:                                      # noqa: BLE001
+        return []
+
+
 def connection_failure(text: str) -> bool:
     """Whether a page failed to connect at all, which trying again can mend.
 
@@ -700,7 +715,7 @@ class _Page(QObject):
         self._view.refresh_hiding()
 
 
-class MerlinView(QWidget):
+class MerlinView(QWidget, FramesMixin):
     titleChanged = pyqtSignal(str)
     urlChanged = pyqtSignal(QUrl)
     iconChanged = pyqtSignal(QIcon)
@@ -728,6 +743,7 @@ class MerlinView(QWidget):
         settings apply here as they do to Chromium's tabs."""
         super().__init__(parent)
         self._host = host
+        self._init_frames()            # its <iframe>s' pages, and whether it is one (frames.py)
         self._images: dict = {}        # src -> QImage, or False: blocked or failed
         self._find = ("", -1)          # what was searched for, and where it was
         self._widgets: dict = {}       # form control element -> its Qt widget
@@ -882,7 +898,8 @@ class MerlinView(QWidget):
         interceptor = self._interceptor()
         if interceptor is None or not url.startswith(("http://", "https://")):
             return False
-        return interceptor.check(url, self._url.host(), kind)
+        # in a frame, the site is the tab's, as for everything else it pulls in
+        return interceptor.check(url, self.frame_top()._url.host(), kind)
 
     def refresh_hiding(self) -> None:
         """Styles again, for when the site's shields were switched."""
@@ -909,6 +926,20 @@ class MerlinView(QWidget):
         self._show(markup)
         self.urlChanged.emit(self.url())
         self.loadFinished.emit(True)
+
+    def _load_markup(self, markup: str, base: QUrl) -> None:
+        """A page given as markup (a frame's srcdoc, or about:blank), its
+        scripts run as a fetched page's are."""
+        self._stop_script()
+        self._load_number += 1
+        self._url = QUrl(base) if base.isValid() else QUrl("about:blank")
+        self.loadStarted.emit()
+        self._finish_when_laid_out = (True, None)
+        self._show(markup)
+        if markup:
+            self._start_script()
+        if not self._layout_running:
+            self._finish_load()
 
     def back(self) -> None:
         if self._history.canGoBack():
@@ -944,7 +975,11 @@ class MerlinView(QWidget):
             pass
 
     def _cookies(self):
-        """This window's cookie jar: private windows keep theirs apart."""
+        """This window's cookie jar: private windows keep theirs apart; a frame
+        of another site than the tab's has its own (frames.py)."""
+        return self._frame_cookies(self._window_cookies())
+
+    def _window_cookies(self):
         owner = self._host if self._host is not None else MerlinView
         jar = getattr(owner, "_merlin_cookie_jar", None)
         if jar is None and not getattr(owner, "_merlin_cookie_jar_tried", False):
@@ -994,7 +1029,7 @@ class MerlinView(QWidget):
             return
         # a site sent to Chromium before, because it needs JavaScript, goes there
         route = getattr(self._host, "route_to_chromium", None)
-        if route is not None and route(url):
+        if route is not None and not self.is_frame() and route(url):
             return
         same_page = (self._document is not None and url.hasFragment() and body is None
                      and url.adjusted(QUrl.UrlFormattingOption.RemoveFragment)
@@ -1014,6 +1049,10 @@ class MerlinView(QWidget):
         self._url = url
         self._pending_fragment = url.fragment()
         headers = self._headers()
+        framed = self.is_frame()
+        if framed:
+            headers = self._frame_headers(headers, url)
+        ancestors = self._ancestor_origins() if framed else []
         if body is not None and self._url.isValid():
             headers["Origin"] = self._url.adjusted(
                 QUrl.UrlFormattingOption.RemovePath | QUrl.UrlFormattingOption.RemoveQuery
@@ -1031,6 +1070,8 @@ class MerlinView(QWidget):
 
         download_dir = QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.DownloadLocation) or os.path.expanduser("~")
+        if framed:
+            download_dir = ""               # a frame never saves a file by itself
 
         def progress(percent: int) -> None:
             try:
@@ -1047,11 +1088,14 @@ class MerlinView(QWidget):
             # whatever goes wrong here becomes an error page, never a page
             # left loading for ever
             prepared = None
+            answered: dict = {}
             try:
                 for attempt in range(1, RETRIES + 2):
+                    answered.clear()
                     ok, final, text, saved = fetch_page(
                         target, headers=headers, data=body, content_type=content_type,
-                        opener=opener, download_dir=download_dir, progress=progress)
+                        opener=opener, download_dir=download_dir, progress=progress,
+                        answer_headers=answered)
                     # a connection that failed is tried again, twice, before the
                     # page says it could not be opened: a site that answers on
                     # the second try had shown "could not open" first
@@ -1079,6 +1123,9 @@ class MerlinView(QWidget):
                         except RuntimeError:
                             return
                 progress(25)                      # the page is here
+                if ok and framed and refuses_framing(answered, final or target, ancestors):
+                    # the site says it is not to be shown inside another's page
+                    text, saved = refused_page(final or target), ""
                 if ok:
                     # the page as it came, for the debugging zip: with the
                     # scripts kept beside it, it can be run again from the start
@@ -1330,6 +1377,7 @@ class MerlinView(QWidget):
         if self._element_count > BIG_PAGE:
             self._display = None          # the old page goes; the new one is being laid out
             self._panel_scroll = {}       # and its panels' positions with it
+        self._clear_frames()              # its frames go with it
         self._find = ("", -1)
         self._found_rect = None
         self._markup = prepared.get("markup", markup) if prepared else markup
@@ -1754,6 +1802,8 @@ class MerlinView(QWidget):
         host.ended.connect(lambda h=host: self._script_ended(h))
         storage = getattr(self._host, "local_storage", None)
         storage = storage() if storage is not None else LocalStorage(None)
+        if self.is_frame() and self._cross_site_frame():
+            storage = LocalStorage(None)        # another site's frame: this tab only
         self._storage = storage
         headers = self._headers()
         # The page as Merlin Engine's parser built it (html, head and body
@@ -1771,9 +1821,11 @@ class MerlinView(QWidget):
         host.send({"type": "load", "html": whole, "geometry": self._geometry_now(), "state": {
             "url": self._url.toString(), "width": self._page_width(), "height": float(self.height()),
             "userAgent": _scripts_user_agent(headers.get("User-Agent", "")), "language": "en-GB",
+            "brands": _scripts_brands(), **self._frame_script_state(),
             "cookie": cookie_string(self._cookies(), self._url.toString()),
             "storage": storage.load(self._origin()),
             "scheme": "dark" if getattr(self._host, "dark", False) else "light"}})
+        self._scripts_started_for_frames()
 
     def _origin(self) -> str:
         return f"{self._url.scheme()}://{self._url.authority()}"
@@ -2067,6 +2119,10 @@ class MerlinView(QWidget):
             self.console_lines.append((message.get("level", "log"), message.get("text", "")))
         elif kind == "ready":
             self.script_status = "running"
+        elif kind in ("post", "port_message", "navigate_window"):
+            self._window_message(message)              # to another window (frames.py)
+        elif kind == "loaded":
+            self._scripts_ready_for_messages()
 
     def _script_fetch(self, host, message: dict) -> None:
         """A request from the page's script: made here, as the page's."""
@@ -2161,6 +2217,7 @@ class MerlinView(QWidget):
         applied = number == self._load_number and prepared is not None and self._script is not None
         if number == self._load_number and prepared is not None and self._script is not None:
             old = {e.attrs.get("data-mjs"): w for e, w in self._widgets.items() if e.attrs.get("data-mjs")}
+            old_frames = dict(self._frames)
             self._document = prepared["document"]
             self._sheets = prepared.get("sheets", self._sheets)
             self._styles = prepared["styles"]
@@ -2186,6 +2243,7 @@ class MerlinView(QWidget):
                 widget.hide()
                 widget.deleteLater()
             self._widgets = kept
+            self._rekey_frames(old_frames)
             self._element_count = sum(1 for _ in self._document.root.elements())
             title = prepared.get("title") or ""
             if title and title != self._title:
@@ -2202,6 +2260,9 @@ class MerlinView(QWidget):
             self._script_dom(markup, title)
 
     def _page_width(self) -> float:
+        if self.is_frame():
+            bar = self.scrollbar.sizeHint().width() if not self.scrollbar.isHidden() else 0
+            return max(1.0, float(self.width() - bar))
         return max(100.0, float(self.width() - self.scrollbar.sizeHint().width()))
 
     def _layout(self) -> None:
@@ -2337,6 +2398,12 @@ class MerlinView(QWidget):
         self.scrollbar.setValue(int(min(self._scroll, spare)))
         self.scrollbar.blockSignals(False)
         self._scroll = float(self.scrollbar.value())
+        if self.is_frame():
+            # a frame's scroll bar only when its page is longer than it is
+            wanted = spare > 0 and self._frame_scrolling
+            if wanted != self.scrollbar.isVisible():
+                self.scrollbar.setVisible(wanted)
+                self._relayout.start()            # the page's width changed with it
 
     def _scrolled(self, value: int) -> None:
         if self._script is not None and not self._script_scroll.isActive():
@@ -2363,7 +2430,7 @@ class MerlinView(QWidget):
         """Make a widget for each form field laid out, and put each in its place."""
         if self._display is None:
             return
-        found, buttons = {}, []
+        found, buttons, frames = {}, [], {}
         self._control_sticky = {}
         self._control_panels = {}
         for source, fixed in ((self._display, False), (self._display.fixed, True)):
@@ -2399,6 +2466,12 @@ class MerlinView(QWidget):
                         self._control_panels[item[2]] = list(panels)
                 elif item and item[0] == "button":
                     buttons.append((item[1], item[2], fixed, list(panels)))
+                elif item and item[0] == "frame":
+                    frames[item[2]] = (item[1], fixed)
+                    if around:
+                        self._control_sticky[item[2]] = around[-1]
+                    if panels:
+                        self._control_panels[item[2]] = list(panels)
         for element in [e for e in self._widgets if e not in found]:
             widget = self._widgets.pop(element)
             widget.hide()
@@ -2413,6 +2486,7 @@ class MerlinView(QWidget):
             self._style_control(widget, font, colour)
         self._places = {e: (r, f) for e, (r, f, _font, _colour) in found.items()}
         self._buttons = buttons
+        self._sync_frames(frames)          # frames.py: made, loaded, given their places
         self._place_controls()
         if not self._focused_once and self._widgets:
             self._focused_once = True
@@ -2426,10 +2500,10 @@ class MerlinView(QWidget):
 
     def _place_controls(self) -> None:
         bottom = self.height()
-        right = self.width() - self.scrollbar.sizeHint().width()
-        for element, widget in self._widgets.items():
+        right = self.width() - (self.scrollbar.sizeHint().width() if self.scrollbar.isVisible() else 0)
+        for element, widget in list(self._widgets.items()) + list(self._frames.items()):
             rect, fixed = self._places.get(element, (None, False))
-            if rect is None:
+            if rect is None or (element in self._frames and (rect.width() < 1 or rect.height() < 1)):
                 widget.hide()
                 continue
             top = rect.top() - (0.0 if fixed else self._scroll)
@@ -2446,6 +2520,16 @@ class MerlinView(QWidget):
                 if not window_area.contains(spot.center()):
                     inside_panel = False
             top -= moved
+            if element in self._frames:
+                # a frame is exactly its box: its page is laid out to that width
+                height = rect.height()
+                widget.setGeometry(round(rect.left()), round(top), max(1, round(rect.width())),
+                                   max(1, round(height)))
+                hidden = self._styles is not None and (self._styles.get(element) or {}).get(
+                    "visibility") in ("hidden", "collapse")
+                widget.setVisible(top + height > 0 and top < bottom and rect.left() < right
+                                  and inside_panel and not hidden)
+                continue
             height = max(rect.height(), 8.0)
             widget.setGeometry(round(rect.left()), round(top), max(8, round(rect.width())),
                                round(height))
@@ -2875,6 +2959,22 @@ class MerlinView(QWidget):
         arrived = getattr(self, "_arrived_markup", "")
         shot_bytes = bytes(shot)
         sheet_texts = list(sheets)
+        # each frame's page, scripts' state, console and network: Google's
+        # check is drawn in a frame, and what went wrong is often in there
+        frames = []
+
+        def gather(view, path_name: str) -> None:
+            for number, child in enumerate(view._frames.values()):
+                name = f"{path_name}{number}"
+                frames.append((name, {
+                    "url": child._url.toString(), "visible": child.isVisible(),
+                    "box": [child.x(), child.y(), child.width(), child.height()],
+                    "scripts": getattr(child, "script_status", ""),
+                    "console": "\n".join(f"[{level}] {text}" for level, text in child.console_lines),
+                    "network": "\n".join(child.network_lines), "page": child._markup or "",
+                    "original": getattr(child, "_arrived_markup", "")}))
+                gather(child, name + "-")
+        gather(self, "frame-")
 
         def write() -> None:
             # written under a passing name and named only once whole: a zip
@@ -2903,6 +3003,12 @@ class MerlinView(QWidget):
                 _bundle_scripts(bundle, bodies, cache, hosts)
                 if arrived:
                     bundle.writestr("original.html", arrived)
+                for name, frame in frames:
+                    bundle.writestr(f"frames/{name}/page.html", frame.pop("page"))
+                    bundle.writestr(f"frames/{name}/original.html", frame.pop("original"))
+                    bundle.writestr(f"frames/{name}/console.txt", frame.pop("console"))
+                    bundle.writestr(f"frames/{name}/network.txt", frame.pop("network"))
+                    bundle.writestr(f"frames/{name}/frame.json", json.dumps(frame, indent=2))
 
         if done is None:
             write()
@@ -3109,8 +3215,12 @@ class MerlinView(QWidget):
             painter.end()
 
     def _paint_into(self, painter) -> None:
-        canvas = self._display.canvas if self._display and self._display.canvas else (255, 255, 255, 255)
-        painter.fillRect(self.rect(), QColor(*canvas))
+        canvas = self._display.canvas if self._display and self._display.canvas else (
+            None if self.is_frame() else (255, 255, 255, 255))
+        # a frame whose page sets no background shows its parent through, as
+        # in a browser (reCAPTCHA's box sits on the page's own colour)
+        if canvas is not None:
+            painter.fillRect(self.rect(), QColor(*canvas))
         if self._display:
             painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
             painter.translate(0, -self._scroll)
@@ -3297,12 +3407,15 @@ class MerlinView(QWidget):
 
     def wheelEvent(self, event) -> None:                      # noqa: N802
         self._glide.stop()
+        before = self.scrollbar.value()
         left = self._scroll_panels(event.position(), float(-event.angleDelta().y()))
         if left != float(-event.angleDelta().y()):
             if left:
                 self.scrollbar.setValue(self.scrollbar.value() + round(left))
             return
         self.scrollbar.setValue(self.scrollbar.value() - event.angleDelta().y())
+        if self.is_frame() and self.scrollbar.value() == before:
+            event.ignore()                     # at its end: the page around it scrolls
 
     def keyPressEvent(self, event) -> None:                   # noqa: N802
         steps = {Qt.Key.Key_Down: 40, Qt.Key.Key_Up: -40,

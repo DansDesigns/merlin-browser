@@ -1126,6 +1126,7 @@ hr { border-top: 1px solid #888888; margin-top: 0.5em; margin-bottom: 0.5em }
 th { text-align: center }
 td, th { padding: 1px }
 img { display: inline }
+iframe { display: inline-block; border: 2px inset #767676 }
 input, select, textarea, button { display: inline-block; font-size: 13.33px;
   font-family: sans-serif; color: #000000 }
 input, textarea, select { border: 1px solid #8f8f9d; padding: 2px 3px; background-color: #ffffff }
@@ -1858,6 +1859,8 @@ def presentational_hints(element: Element) -> list:
         length = _html_length(attrs["height"])
         if length:
             found.append(("height", length))
+    if tag in ("iframe", "frame") and attrs.get("frameborder", "").strip().lower() in ("0", "no"):
+        found.append(("border-style", "none"))
     if attrs.get("bgcolor") and tag in ("body", "table", "tr", "td", "th"):
         found.append(("background-color", attrs["bgcolor"]))
     if tag == "font":

@@ -413,7 +413,7 @@ class Layout:
                     z = 0
                 fixed.link_z.extend([z] * len(self.out.links))
                 for piece_item in self.out.items:
-                    if piece_item is not None and piece_item[0] == "control":
+                    if piece_item is not None and piece_item[0] in ("control", "frame"):
                         fixed.control_z[piece_item[2]] = z
             self.out = saved
             self.out.fixed = fixed
@@ -502,6 +502,9 @@ class Layout:
         if block_image and style.get("box-sizing") == "border-box" and width_value is None:
             image_w, _image_h = self._image_size(element, style, available)
             width_value = image_w + horizontal_extra
+        if element.tag == "iframe" and width_value is None:
+            # a frame's own size, unless given: 300 by 150, as in every browser
+            width_value = 300.0 * z + (horizontal_extra if style.get("box-sizing") == "border-box" else 0.0)
         if style.get("box-sizing") == "border-box":
             # widths given for the border box hold its padding and border: a
             # 200px box of border-box had come out 250 wide with its padding,
@@ -567,6 +570,9 @@ class Layout:
                 fixed_height = image_h
                 if style.get("box-sizing") == "border-box":
                     fixed_height += padding[0] + padding[2] + border[0] + border[2]
+        if element.tag == "iframe" and fixed_height is None:
+            fixed_height = 150.0 * self.zoom + (
+                padding[0] + padding[2] + border[0] + border[2] if style.get("box-sizing") == "border-box" else 0.0)
         if style.get("box-sizing") == "border-box":
             # heights given for the border box hold its padding and border, as
             # widths do: Google's 40px Sign in button had grown to 60
@@ -682,6 +688,10 @@ class Layout:
         elif element.tag == "svg":
             inner_height, first_baseline = self._svg_block(element, style, content_x,
                                                            content_y, content_width)
+        elif element.tag == "iframe":
+            # what is inside an <iframe> is another page, shown in a frame of
+            # its own (view.py); the text written inside it is not shown
+            inner_height, first_baseline = 0.0, None
         # a form field is a field whatever its display: Google's search box is a
         # textarea with display: flex, laid out as a flex box with no field in it
         elif style.get("display") in ("grid", "inline-grid") and element.tag not in FIELD_TAGS:
@@ -731,6 +741,10 @@ class Layout:
             # where the box ends, padding and border too, painted or not: a
             # button with no background had measured without its right padding
             self.out.items.append(("extent", box.right()))
+        if element.tag == "iframe" and not self._measuring:
+            # the frame's place: its page is drawn there, by a view of its own
+            self.out.items.append(("frame", QRectF(box_x + border[3] + padding[3], box_y + border[0] + padding[0],
+                                                   content_width, inner_height), element))
         if element.tag == "img" and not self._measuring:
             content_box = QRectF(box_x + border[3] + padding[3], box_y + border[0] + padding[0],
                                  content_width, inner_height)
@@ -1128,6 +1142,15 @@ class Layout:
             # Measured by contents, it had none: Ponder's logo, height: 26px
             # in a flex row, came out 0 wide and was not seen
             return self._image_size(element, style, 100000.0)[0]
+        if element.tag == "iframe":
+            # a frame's width is its own (300 unless given), not its contents'
+            given = _px(style.get("width"), 0.0, auto=None)
+            if given is not None and not _is_percentage(style.get("width")):
+                if style.get("box-sizing") == "border-box":
+                    _m, padding, border = self._edges(style, 0.0)
+                    return max(0.0, given * self.zoom - padding[1] - padding[3] - border[1] - border[3])
+                return given * self.zoom
+            return 300.0 * self.zoom
         return _Measure(self).extent(element, style, 1.0 if narrowest else 100000.0)
 
     def _item_box(self, element: Element, style: dict, x: float, y: float,
@@ -1667,7 +1690,7 @@ class Layout:
             if kind == "group":
                 return ("group", [moved(sub) for sub in item[1]])
             if kind in ("rect", "image", "rrect", "rborder", "svg", "control", "button",
-                        "gradient", "clip_push"):
+                        "gradient", "clip_push", "frame"):
                 return (kind, item[1].translated(dx, dy)) + tuple(item[2:])
             if kind == "text":
                 return (kind, item[1] + dx, item[2] + dy) + item[3:]
@@ -2790,7 +2813,7 @@ def _bottom_edge(item) -> float:
         return 0.0
     if item[0] == "group":
         return max((_bottom_edge(sub) for sub in item[1]), default=0.0)
-    if item[0] in ("rect", "image", "rrect", "rborder", "svg", "gradient"):
+    if item[0] in ("rect", "image", "rrect", "rborder", "svg", "gradient", "frame"):
         return item[1].bottom()
     if item[0] == "text":
         return item[2] + QFontMetricsF(item[4]).descent()
@@ -2802,7 +2825,7 @@ def _right_edge(item) -> float:
         return 0.0
     if item[0] == "group":
         return max((_right_edge(sub) for sub in item[1]), default=0.0)
-    if item[0] in ("rect", "image", "rrect", "rborder", "svg", "gradient", "bgimage"):
+    if item[0] in ("rect", "image", "rrect", "rborder", "svg", "gradient", "bgimage", "frame"):
         return item[1].right()
     if item[0] == "extent":
         return item[1]

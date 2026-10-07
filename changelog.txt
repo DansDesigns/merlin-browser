@@ -5,6 +5,37 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.24
+  Frames (<iframe>) in Merlin Engine. A frame's page is fetched, laid out and
+  drawn in its box, 300 by 150 unless given a size, and runs its scripts in a
+  Deno process of its own, as Chrome runs each site's frames apart. Until now a
+  frame was nothing at all: Google's "unusual traffic" check, which is drawn
+  in one, never appeared, nor did embedded videos, maps or payment forms.
+  Windows talk as in a browser: postMessage between a page, its frames and the
+  top, with the sender's origin and a source to reply to; a message meant for
+  another origin is not delivered; MessagePorts are carried across (reCAPTCHA
+  talks to its frames over them); the iframe's load event fires. A frame's
+  page is asked for as Chrome asks (Sec-Fetch-Dest: iframe, the parent's
+  origin as referrer), and a site that says it is not to be shown in another
+  site's page (X-Frame-Options, CSP frame-ancestors) is not shown, as Chrome
+  refuses it. A frame of another site than the tab's has cookies and storage
+  of its own for that page only, as Brave's are: it cannot follow you from
+  site to site. The content blocker applies to frames, a frame never saves a
+  download by itself, a frame scrolls on its own and hands the wheel to the
+  page at its end, and a page's frames end with it. The debugging zip holds
+  each frame's page, console and network log.
+  Not yet: a page reaching into a frame of its own site (contentDocument), and
+  what a page draws over a frame is drawn under it.
+  Merlin Engine's connections say which computer they come from: curl_cffi's
+  Chrome had said it was a Mac, on Windows and Linux alike. The user agent and
+  sec-ch-ua-platform now name Windows or Linux as Chrome does there, and the
+  page's scripts are told the same, with navigator.userAgentData's brands now
+  the ones the sec-ch-ua header sends (they had differed). Pictures, frames
+  and other requests that are not a page opened by the user no longer carry
+  Sec-Fetch-User and Upgrade-Insecure-Requests, which curl had added to every
+  request and Chrome sends only for those: sites that look for robots look
+  for exactly these mismatches.
+
 1.8.23
   Ponder is built into Merlin and is its search engine. Its code is in
   merlin/ponder and runs as it does on its own, as its own process, with its

@@ -15,20 +15,23 @@ const denoDispatch = globalThis.EventTarget.prototype.dispatchEvent;
 // navigator.userAgentData, as Chrome gives it, from the user agent the
 // connections send: a Chrome user agent with none (as Merlin Engine's had) is
 // a contradiction sites that look for robots look for. Other browsers: none.
-function chromeHints(agent) {
+function chromeHints(agent, sent) {
   const version = /Chrome\/(\d+)/.exec(String(agent || ""));
   if (!version) return undefined;
   const major = version[1];
   const platform = /Windows/.test(agent) ? "Windows" : /Mac OS X|Macintosh/.test(agent) ? "macOS"
     : /Android/.test(agent) ? "Android" : /Linux/.test(agent) ? "Linux" : "";
   const mobile = /Mobile|Android/.test(agent);
-  const brands = [{ brand: "Chromium", version: major }, { brand: "Google Chrome", version: major },
-                  { brand: "Not_A Brand", version: "24" }];
+  // the brands the connections' sec-ch-ua header sends, in its order: a
+  // header saying one set and navigator another is a robot's mark
+  const brands = Array.isArray(sent) && sent.length ? sent.map((b) => ({ brand: String(b.brand), version: String(b.version) }))
+    : [{ brand: "Chromium", version: major }, { brand: "Google Chrome", version: major },
+       { brand: "Not_A Brand", version: "24" }];
   const full = (/Chrome\/([\d.]+)/.exec(agent) || [, major + ".0.0.0"])[1];
   const hints = {
     architecture: /arm|aarch64/i.test(agent) ? "arm" : "x86", bitness: "64", model: "", wow64: false,
     platformVersion: platform === "Windows" ? "15.0.0" : platform === "macOS" ? "15.5.0" : "6.8.0",
-    uaFullVersion: full, fullVersionList: brands.map((b) => ({ brand: b.brand, version: b.brand === "Not_A Brand" ? "24.0.0.0" : full })),
+    uaFullVersion: full, fullVersionList: brands.map((b) => ({ brand: b.brand, version: b.version === major ? full : b.version + ".0.0.0" })),
     formFactors: [mobile ? "Mobile" : "Desktop"],
   };
   return {
@@ -349,7 +352,7 @@ function install(html) {
       : "Linux x86_64", vendor: "Google Inc.",
     language: state.language, languages: [state.language, state.language.split("-")[0]], onLine: true,
     cookieEnabled: true, hardwareConcurrency: 4, maxTouchPoints: 0, doNotTrack: null, webdriver: false,
-    userAgentData: chromeHints(state.userAgent), clipboard: { writeText: async () => {}, readText: async () => "" },
+    userAgentData: chromeHints(state.userAgent, state.brands), clipboard: { writeText: async () => {}, readText: async () => "" },
     sendBeacon(url, data) { merlinFetch(url, { method: "POST", body: data ?? null }).catch(() => {}); return true; },
     permissions: { query: async () => ({ state: "prompt", addEventListener() {} }) },
     mediaDevices: undefined, serviceWorker: undefined, geolocation: undefined,
@@ -559,9 +562,10 @@ function install(html) {
   g.postMessage = function (data, targetOrigin) {
     const origin = (() => { try { return new URL(state.url).origin; } catch (_) { return "null"; } })();
     setTimeout(() => {
-      try { g.dispatchEvent(new MessageEvent("message", { data, origin, source: g })); } catch (e) { reportError(e); }
+      try { g.dispatchEvent(messageEvent(data, origin, g, [])); } catch (e) { reportError(e); }
     }, 0);
   };
+  installFrames(g, made);
   // form.submit() and requestSubmit(), which the DOM had as nothing at all:
   // search boxes that send their form from a script (Google's, Ponder's) did
   // nothing on Enter. requestSubmit runs the page's submit handlers first.
@@ -1307,6 +1311,7 @@ async function runScripts() {
   fire(globalThis, "load");
   state.pageLoad = false;
   state.loaded = true;
+  send({ type: "loaded" });          // messages for this window, held till now, can come
 }
 
 // A stylesheet or preload <link>, or an image, a page adds: its load
@@ -1367,6 +1372,170 @@ function watchForScripts() {
   }).observe(document_, { childList: true, subtree: true });
 }
 
+
+// ------------------------------------------------------------------ frames
+// Each frame's page runs in a Deno process of its own, as Chrome runs each
+// site's frames apart. Other windows (the parent, the top, a frame's
+// contentWindow) are stand-ins here: their postMessage goes through Merlin to
+// that window's process, and a message from one arrives as a MessageEvent
+// whose source is the same stand-in, so a reply finds its way back. A
+// MessagePort sent across (reCAPTCHA talks to its frames over MessageChannels)
+// is joined to its far end through Merlin the same way.
+const windowProxies = new Map();      // a window's token -> its stand-in here
+const elementProxies = new WeakMap(); // an <iframe> -> its contentWindow
+function proxyFor(route, token) {
+  const proxy = {
+    postMessage(data, targetOrigin, transfer) {
+      if (targetOrigin && typeof targetOrigin === "object") { transfer = targetOrigin.transfer; targetOrigin = targetOrigin.targetOrigin; }
+      let encoded;
+      try { encoded = encodeValue(data); }
+      catch (e) { throw new DOMException(String(e && e.message || e), "DataCloneError"); }
+      send({ type: "post", ...route(), data: encoded, targetOrigin: targetOrigin ?? "/", ports: exportPorts(transfer) });
+    },
+    get closed() { return false; }, close() {}, focus() {}, blur() {},
+    get window() { return proxy; }, get self() { return proxy; }, get frames() { return proxy; }, length: 0,
+    get parent() { return frameTop(); }, get top() { return frameTop(); }, opener: null,
+    location: {
+      get href() { throw new DOMException("Blocked a frame from accessing a cross-origin frame.", "SecurityError"); },
+      set href(v) { send({ type: "navigate_window", ...route(), url: String(v) }); },
+      assign(v) { send({ type: "navigate_window", ...route(), url: String(v) }); },
+      replace(v) { send({ type: "navigate_window", ...route(), url: String(v) }); },
+      toString() { return ""; },
+    },
+    addEventListener() {}, removeEventListener() {},
+  };
+  if (token) windowProxies.set(token, proxy);
+  return proxy;
+}
+function windowFor(token) {
+  if (!token) return null;
+  if (token === state.token) return globalThis;
+  return windowProxies.get(token) || proxyFor(() => ({ token }), token);
+}
+function frameTop() {
+  return state.frame ? windowFor(state.frame.top) : globalThis;
+}
+function frameWindow(iframe) {
+  let proxy = elementProxies.get(iframe);
+  if (!proxy) { proxy = proxyFor(() => ({ target: idOf(iframe) })); elementProxies.set(iframe, proxy); }
+  return proxy;
+}
+function installFrames(g, made) {
+  if (state.frame) {
+    // a frame: its parent and top are other windows
+    const parent = windowFor(state.frame.parent), top = windowFor(state.frame.top);
+    for (const [name, value] of [["parent", parent], ["top", top]]) {
+      try { Object.defineProperty(g, name, { get: () => value, configurable: true }); } catch (_) { g[name] = value; }
+    }
+    try { Object.defineProperty(g, "frameElement", { get: () => null, configurable: true }); } catch (_) {}
+  }
+  const probe = document_.createElement("iframe");
+  const Base = (g.HTMLElement || made.HTMLElement).prototype;
+  const own = Object.getPrototypeOf(probe);
+  const target = own && own !== Base ? own : Base;
+  const isFrame = (el) => el && (el.tagName === "IFRAME" || el.tagName === "FRAME");
+  try {
+    Object.defineProperty(target, "contentWindow", { configurable: true,
+      get() { return isFrame(this) ? frameWindow(this) : undefined; } });
+    // another site's document is not this page's to read
+    Object.defineProperty(target, "contentDocument", { configurable: true,
+      get() { return isFrame(this) ? null : undefined; } });
+  } catch (_) {}
+}
+
+// a message's data, as structured cloning carries it: JSON with what JSON
+// lacks (undefined, binary data, dates, maps, sets, NaN) marked
+function encodeValue(value, seen = new Set()) {
+  if (value === undefined) return { $u: 1 };
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : { $n: String(value) };
+  if (typeof value === "bigint") return { $bi: String(value) };
+  if (typeof value === "function" || typeof value === "symbol") throw new Error(`${String(value).slice(0, 40)} could not be cloned.`);
+  if (seen.has(value)) return null;
+  seen.add(value);
+  try {
+    if (value instanceof ArrayBuffer) return { $ab: toBase64(new Uint8Array(value)) };
+    if (ArrayBuffer.isView(value)) return { $ta: value.constructor.name, $b: toBase64(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)) };
+    if (value instanceof Date) return { $d: value.getTime() };
+    if (value instanceof Map) return { $m: [...value].map(([k, v]) => [encodeValue(k, seen), encodeValue(v, seen)]) };
+    if (value instanceof Set) return { $s: [...value].map((v) => encodeValue(v, seen)) };
+    if (value instanceof RegExp) return { $r: [value.source, value.flags] };
+    if (value instanceof MessagePort) return null;
+    if (Array.isArray(value)) return value.map((v) => encodeValue(v, seen));
+    if (value instanceof Error) return { $e: [value.name, value.message] };
+    const out = {};
+    for (const key of Object.keys(value)) {
+      const v = value[key];
+      if (typeof v === "function") continue;
+      out[key] = encodeValue(v, seen);
+    }
+    return { $o: out };
+  } finally { seen.delete(value); }
+}
+function decodeValue(value) {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(decodeValue);
+  if ("$o" in value) { const out = {}; for (const [k, v] of Object.entries(value.$o)) out[k] = decodeValue(v); return out; }
+  if ("$u" in value) return undefined;
+  if ("$n" in value) return Number(value.$n);
+  if ("$bi" in value) return BigInt(value.$bi);
+  if ("$ab" in value) return fromBase64(value.$ab).buffer;
+  if ("$ta" in value) {
+    const bytes = fromBase64(value.$b);
+    const Kind = globalThis[value.$ta] || Uint8Array;
+    return new Kind(bytes.buffer, 0, bytes.byteLength / (Kind.BYTES_PER_ELEMENT || 1));
+  }
+  if ("$d" in value) return new Date(value.$d);
+  if ("$m" in value) return new Map(value.$m.map(([k, v]) => [decodeValue(k), decodeValue(v)]));
+  if ("$s" in value) return new Set(value.$s.map(decodeValue));
+  if ("$r" in value) return new RegExp(value.$r[0], value.$r[1]);
+  if ("$e" in value) { const e = new Error(value.$e[1]); e.name = value.$e[0]; return e; }
+  return value;
+}
+
+// ports sent to another window: this end is kept here as an anchor, whose
+// messages go to Merlin, and what comes from the far end is posted on it
+const anchors = new Map();          // a port's id -> the anchor port here
+const anchorIds = new WeakMap();
+let portSerial = 0;
+function anchor(port, id) {
+  anchors.set(id, port); anchorIds.set(port, id);
+  port.onmessage = (event) => {
+    let data;
+    try { data = encodeValue(event.data); } catch (e) { reportError(e); return; }
+    send({ type: "port_message", port: id, data, ports: exportPorts(event.ports) });
+  };
+}
+function exportPorts(list) {
+  const ids = [];
+  for (const port of (list && typeof list[Symbol.iterator] === "function") ? list : []) {
+    if (!(port instanceof MessagePort)) continue;
+    let id = anchorIds.get(port);
+    if (!id) { id = `${state.token}:${++portSerial}`; anchor(port, id); }
+    ids.push(id);
+  }
+  return ids;
+}
+function importPorts(ids) {
+  return (ids || []).map((id) => {
+    const channel = new MessageChannel();
+    anchor(channel.port2, id);
+    return channel.port1;
+  });
+}
+// Deno's MessageEvent takes only a MessagePort as its source: a window is
+// given to it afterwards, as a browser's event has it
+function messageEvent(data, origin, source, ports) {
+  const event = new MessageEvent("message", { data, origin, ports: ports || [] });
+  try { Object.defineProperty(event, "source", { value: source ?? null, configurable: true }); } catch (_) {}
+  return event;
+}
+function receiveMessage(message) {
+  const ports = importPorts(message.ports);
+  globalThis.dispatchEvent(messageEvent(decodeValue(message.data), message.origin || "null",
+                                        windowFor(message.source), ports));
+}
+
 // ------------------------------------------------------------------ back to Merlin
 const VOID = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"]);
 function escapeText(t) { return t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
@@ -1417,6 +1586,19 @@ function dispatch(message) {
     return;
   }
   if (message.type === "image") { imageAnswered(message); return; }
+  if (message.type === "message") { receiveMessage(message); return; }
+  if (message.type === "port_message") {
+    const port = anchors.get(message.port);
+    if (port) port.postMessage(decodeValue(message.data), importPorts(message.ports));
+    return;
+  }
+  if (message.type === "frame_token") {
+    // which window an <iframe> holds: messages from it come with its token
+    const iframe = nodeOf(message.target);
+    if (iframe) windowProxies.set(message.token, frameWindow(iframe));
+    return;
+  }
+  if (message.type === "frame_loaded") { const iframe = nodeOf(message.target); if (iframe) fire(iframe, "load"); return; }
   if (message.type === "files") {
     const input = nodeOf(message.target);
     if (!input) return;

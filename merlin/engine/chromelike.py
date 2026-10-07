@@ -138,6 +138,7 @@ class ChromeOpener:
         body = request.data
         url = request.full_url
         headers = {k: v for k, v in request.header_items() if k.lower() not in _OWN}
+        identity = identity_headers()            # this computer's system, not a Mac's
         session = _borrow()
         broken = False
         try:
@@ -146,6 +147,8 @@ class ChromeOpener:
                 if self.jar is not None:
                     self.jar.add_cookie_header(ask)
                 sent = {k: v for k, v in ask.header_items() if k.lower() not in _OWN}
+                sent.update(identity)
+                sent.update(_not_a_navigation(sent))
                 host = urllib.parse.urlsplit(url).hostname or ""
                 try:
                     answer = session.request(method, url, data=body, headers=sent, timeout=timeout,
@@ -179,17 +182,57 @@ class ChromeOpener:
             _give_back(session, broken)
 
 
-_AGENT: list = []
+def _not_a_navigation(sent: dict) -> dict:
+    """Headers curl_cffi adds as for a page the user opened, taken off a
+    request that is not one: Chrome sends Sec-Fetch-User only for a page the
+    user asked for, and Upgrade-Insecure-Requests only for a navigation. An
+    image or a frame's page sent with them is something Chrome never sends,
+    which sites that look for robots look for. (None takes off a header curl
+    would otherwise add.)"""
+    found = {k.lower(): v for k, v in sent.items()}
+    removed = {}
+    dest = found.get("sec-fetch-dest", "document").lower()
+    mode = found.get("sec-fetch-mode", "navigate").lower()
+    if dest != "document" and "sec-fetch-user" not in found:
+        removed["Sec-Fetch-User"] = None
+    if mode != "navigate" and "upgrade-insecure-requests" not in found:
+        removed["Upgrade-Insecure-Requests"] = None
+    return removed
 
 
-def user_agent() -> str:
-    """The user agent these connections send, for the page's scripts to be told
-    the same: a header saying one browser and navigator.userAgent another is a
-    robot's mark. Learnt once, by asking a listener here what was sent."""
-    if _AGENT:
-        return _AGENT[0]
-    if not usable():
-        return ""
+# Chrome's own words for the system it runs on, as its user agent gives them
+# (frozen by Chrome: every Linux is "X11; Linux x86_64", every Windows 10 or
+# 11 "Windows NT 10.0; Win64; x64"), and as its sec-ch-ua-platform does.
+PLATFORMS = {
+    "windows": ("Windows NT 10.0; Win64; x64", "Windows"),
+    "linux": ("X11; Linux x86_64", "Linux"),
+    "mac": ("Macintosh; Intel Mac OS X 10_15_7", "macOS"),
+}
+
+
+def this_platform() -> tuple:
+    """(user agent's system part, sec-ch-ua-platform's name) for this computer.
+
+    curl_cffi's Chrome is a Mac's: sent as it is, a Windows or Linux computer
+    said it was a Mac, which nothing else about it agreed with (its fonts, its
+    screen, what Chromium's own tabs said)."""
+    import sys
+
+    if sys.platform.startswith("win"):
+        return PLATFORMS["windows"]
+    if sys.platform == "darwin":
+        return PLATFORMS["mac"]
+    return PLATFORMS["linux"]
+
+
+_LEARNT: dict = {}
+
+
+def _learn() -> dict:
+    """What curl_cffi's Chrome sends (its user agent and brands), learnt once
+    by asking a listener here what arrived."""
+    if _LEARNT or not usable():
+        return _LEARNT
     import socket
     import threading
 
@@ -219,10 +262,41 @@ def user_agent() -> str:
     worker.join(3)
     listener.close()
     for line in (got[0] if got else "").split("\r\n"):
-        if line.lower().startswith("user-agent:"):
-            _AGENT.append(line.split(":", 1)[1].strip())
-            break
-    return _AGENT[0] if _AGENT else ""
+        name, _, value = line.partition(":")
+        if name.lower() in ("user-agent", "sec-ch-ua"):
+            _LEARNT[name.lower()] = value.strip()
+    return _LEARNT
+
+
+def user_agent() -> str:
+    """The user agent these connections send, this computer's system in it:
+    curl_cffi's Chrome version (which its handshake is) with this computer's
+    system, as Chrome itself would say it. The page's scripts are told the
+    same: a header saying one browser and navigator.userAgent another is a
+    robot's mark."""
+    import re
+
+    agent = _learn().get("user-agent", "")
+    if not agent:
+        return ""
+    system, _name = this_platform()
+    return re.sub(r"\([^)]*\)", f"({system})", agent, count=1)
+
+
+def brands() -> list:
+    """The brands sec-ch-ua sends, in its order, for navigator.userAgentData."""
+    import re
+
+    return [{"brand": name, "version": version}
+            for name, version in re.findall(r'"([^"]*)";v="([^"]*)"', _learn().get("sec-ch-ua", ""))]
+
+
+def identity_headers() -> dict:
+    """The headers saying which browser on which system, as this computer's."""
+    agent = user_agent()
+    if not agent:
+        return {}
+    return {"User-Agent": agent, "sec-ch-ua-platform": f'"{this_platform()[1]}"'}
 
 
 _BUNDLES: dict = {}

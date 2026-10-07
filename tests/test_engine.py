@@ -3264,6 +3264,8 @@ def test_chrome_connections(app) -> None:
                 self._send(200, ("cookie " + self.headers.get("Cookie", "none")).encode())
             elif self.path == "/done":
                 self._send(200, b"after")
+            elif self.path == "/echo":
+                self._send(200, "\n".join(f"{k.lower()}: {v}" for k, v in self.headers.items()).encode())
             else:
                 self._send(404, b"our own 404")
 
@@ -3299,6 +3301,23 @@ def test_chrome_connections(app) -> None:
         from merlin.engine.view import _scripts_user_agent
         check("the page's scripts are told the user agent the connections send (one browser, not two)",
               agent.startswith("Mozilla/5.0") and "Chrome/" in agent and _scripts_user_agent("x") == agent, agent)
+        system, name = chromelike.this_platform()
+        sent = opener.open(base + "/echo", timeout=10).read().decode()
+        check("the connections say this computer's system, in the user agent and sec-ch-ua-platform "
+              "(curl_cffi's Chrome had said it was a Mac)",
+              f"({system})" in agent and f"user-agent: {agent}" in sent
+              and f'sec-ch-ua-platform: "{name}"' in sent, sent)
+        from merlin.engine.view import _scripts_brands
+
+        brands = _scripts_brands()
+        check("navigator.userAgentData's brands are the ones sec-ch-ua sends",
+              brands and all(f'"{b["brand"]}";v="{b["version"]}"' in sent for b in brands), str(brands))
+        image = urllib.request.Request(base + "/echo", headers={"Sec-Fetch-Dest": "image", "Sec-Fetch-Mode": "no-cors"})
+        sent = opener.open(image, timeout=10).read().decode()
+        check("a picture is asked for as Chrome asks: no Sec-Fetch-User, no Upgrade-Insecure-Requests "
+              "(curl had added them to everything)",
+              "sec-fetch-dest: image" in sent and "sec-fetch-user" not in sent
+              and "upgrade-insecure-requests" not in sent, sent)
     finally:
         server.shutdown()
     # the handshake, as a site sees it first
@@ -3769,6 +3788,187 @@ def test_view(app) -> None:
         view.close()
 
 
+def test_frames(app) -> None:
+    """<iframe>: another page in a box of the page, with scripts of its own,
+    messages and ports between windows, as Chrome asks for and refuses frames,
+    and another site's frame keeping its cookies to this tab."""
+    from merlin.engine import MerlinView
+    from merlin.engine.css import Styler
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+
+    def frames_in(markup):
+        document = parse("<style>body{margin:0}</style>" + markup)
+        out = Layout(document, Styler(document).compute(), 800, viewport_height=600).run()
+        return [(round(i[1].width()), round(i[1].height())) for i in out.items if i and i[0] == "frame"]
+    check("an iframe is 300 by 150 unless given a size, as in browsers; its own text is not shown",
+          frames_in("<iframe src=x>fallback</iframe>") == [(300, 150)])
+    check("width and height attributes size it; frameborder=0 takes its border off",
+          frames_in("<iframe src=x width=304 height=78 frameborder=0></iframe>") == [(304, 78)])
+    check("in a flex row it keeps its width (it had measured 0 wide)",
+          frames_in("<div style='display:flex'><iframe style='border:0'></iframe><iframe style='border:0;width:100px'></iframe></div>")
+          == [(300, 150), (100, 150)])
+
+    deno = _deno_for_tests()
+    if not deno:
+        check("Deno is here for the frames' scripts", False, "set MERLIN_DENO")
+        return
+    seen = {}
+    folder = tempfile.mkdtemp(prefix="merlin-frames-")
+
+    class Pages(http.server.BaseHTTPRequestHandler):
+        pages = {}
+
+        def do_GET(self):  # noqa: N802
+            name = self.path.split("?")[0].lstrip("/")
+            seen[name] = {k.lower(): v for k, v in self.headers.items()}
+            body, extra = self.pages.get(name, ("missing", {}))
+            data = body.encode()
+            self.send_response(200 if name in self.pages else 404)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            for key, value in extra.items():
+                self.send_header(key, value)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *a):
+            pass
+
+    parent_server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Pages)
+    child_server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Pages)
+    for server in (parent_server, child_server):
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    top = f"http://127.0.0.1:{parent_server.server_address[1]}"
+    other = f"http://localhost:{child_server.server_address[1]}"      # another site
+    Pages.pages = {
+        "parent.html": (
+            "<!DOCTYPE html><html><head><title>P</title></head><body style='margin:0;background:#ffffff'>"
+            "<p id=got>waiting</p><p id=port>waiting</p><p id=loads>0</p>"
+            f"<iframe id=f src='{other}/child.html' width=320 height=90 frameborder=0></iframe>"
+            f"<iframe id=deny src='{other}/deny.html' width=200 height=60></iframe>"
+            "<script>let loads = 0; const frame = document.getElementById('f');"
+            "frame.addEventListener('load', () => { document.getElementById('loads').textContent = String(++loads); });"
+            "window.addEventListener('message', (e) => {"
+            " if (!e.data || !e.data.hello) return;"
+            " const list = e.data.list;"
+            " document.getElementById('got').textContent = 'from ' + e.origin + ': ' + e.data.hello"
+            "  + ' | source is the frame: ' + (e.source === frame.contentWindow)"
+            "  + ' | kept: ' + (list[1] === undefined) + ' ' + (list[2] instanceof Uint8Array) + ' ' + list[2][1];"
+            " const channel = new MessageChannel();"
+            " channel.port1.onmessage = (m) => { document.getElementById('port').textContent = 'port: ' + m.data; };"
+            " e.source.postMessage('take this port', '*', [channel.port2]);"
+            " frame.contentWindow.postMessage('not for you', 'https://elsewhere.test');"
+            "});</script></body></html>", {}),
+        "child.html": (
+            "<!DOCTYPE html><html><body style='margin:0;background:#f9f9f9'><p id=c>child</p>"
+            "<script>const c = document.getElementById('c');"
+            "c.textContent = 'top is another window: ' + (window.top !== window);"
+            "window.addEventListener('message', (e) => {"
+            " if (e.data === 'not for you') { c.textContent = 'wrong: a message meant for another origin came'; return; }"
+            " if (e.ports && e.ports[0]) { e.ports[0].postMessage('hello from ' + location.host); c.textContent = 'got a port from ' + e.origin; }"
+            "});"
+            "window.parent.postMessage({hello: 'world', list: [1, undefined, new Uint8Array([7, 8])]}, '*');"
+            "document.cookie = 'framed=1';"
+            "</script></body></html>", {"Set-Cookie": "served=1; Path=/"}),
+        "deny.html": ("<p id=secret>shown inside another site</p>", {"X-Frame-Options": "DENY"}),
+    }
+
+    class Host:
+        settings = {}
+
+        def javascript_allowed(self, site):
+            return True
+
+        def deno_for_scripts(self):
+            return deno
+
+        def script_cache_dir(self):
+            return os.path.join(folder, "deno-cache")
+
+    def until(test, seconds):
+        end = time.time() + seconds
+        while time.time() < end and not test():
+            app.processEvents()
+            time.sleep(0.02)
+        return test()
+
+    def text_of(view, eid):
+        if view is None or view._document is None:
+            return ""
+        found = next((x for x in view._document.root.elements() if x.id == eid), None)
+        return " ".join(found.text().split()) if found is not None else ""
+
+    def frame_of(view, eid):
+        return next((v for e, v in view._frames.items() if e.attrs.get("id") == eid), None)
+
+    view = MerlinView()
+    view._host = Host()
+    view.resize(900, 600)
+    view.show()
+    try:
+        view.setUrl(QUrl(top + "/parent.html"))
+        until(lambda: "world" in text_of(view, "got") and "port:" in text_of(view, "port"), 25)
+        child = frame_of(view, "f")
+        check("the page's iframe is a view of its own, placed over its box",
+              child is not None and child.isVisible() and child.width() == 320 and child.height() == 90,
+              str(child.geometry() if child is not None else None))
+        check("its page was asked for as Chrome asks for a frame's: Sec-Fetch-Dest iframe, the parent's origin as referrer",
+              seen.get("child.html", {}).get("sec-fetch-dest") == "iframe"
+              and seen.get("child.html", {}).get("referer") == top + "/"
+              and seen.get("child.html", {}).get("sec-fetch-site") == "cross-site"
+              and "sec-fetch-user" not in seen.get("child.html", {}), str(seen.get("child.html")))
+        check("the frame's scripts run, its top another window",
+              "top is another window: true" in text_of(child, "c") or "got a port" in text_of(child, "c"),
+              text_of(child, "c"))
+        check("the frame's message reaches the parent, with its origin, the frame's contentWindow as source, "
+              "and its data as sent (undefined, bytes)",
+              text_of(view, "got") == f"from {other}: world | source is the frame: true | kept: true true 8",
+              text_of(view, "got"))
+        check("a MessagePort sent to the frame works across: the frame's reply over it arrives",
+              text_of(view, "port") == "port: hello from " + other.split("//")[1], text_of(view, "port"))
+        check("the frame got the port from the parent's origin, and no message meant for another origin",
+              text_of(child, "c") == "got a port from " + top, text_of(child, "c"))
+        check("the iframe's load event fired in the parent", text_of(view, "loads") != "0", text_of(view, "loads"))
+        until(lambda: frame_of(view, "deny") is not None and frame_of(view, "deny")._document is not None, 10)
+        denied = frame_of(view, "deny")
+        check("a page that says X-Frame-Options: DENY is not shown in the frame",
+              denied is not None and "refused to connect" in denied._document.root.text()
+              and "shown inside" not in denied._document.root.text())
+        # what the frame's page draws is seen in the parent, where the frame is
+        app.processEvents()
+        picture = view.grab().toImage()
+        spot = child.geometry().center()
+        check("the frame's page is drawn in its place", picture.pixelColor(spot.x(), spot.y()).name() == "#f9f9f9",
+              picture.pixelColor(spot.x(), spot.y()).name())
+        # another site's frame: its cookies are its own, for this tab only
+        window_jar = view._window_cookies()
+        framed_jar = child._cookies()
+        names = lambda jar: sorted(c.name for c in jar) if jar is not None else []
+        check("another site's frame keeps its cookies apart from the window's (as Brave does)",
+              framed_jar is not window_jar and "served" in names(framed_jar) and "served" not in names(window_jar),
+              f"frame {names(framed_jar)}, window {names(window_jar)}")
+        # scripts change the page: the frame stays, not loaded again
+        asked = len([1 for _ in range(1)])
+        before = seen.get("child.html")
+        view._script.send({"type": "click", "target": int(next(e for e in view._document.root.elements()
+                                                                if e.id == "got").attrs["data-mjs"]), "id": 0})
+        until(lambda: False, 0.5)
+        check("the frame stays the same as the page changes", frame_of(view, "f") is child and seen.get("child.html") is before)
+        # a new page: its frames go, and their scripts with them
+        process = child._script.process if child._script is not None else None
+        view.setHtml("<p>plain</p>")
+        until(lambda: not view._frames, 3)
+        check("a new page ends the old page's frames and their scripts",
+              not view._frames and (process is None or process.poll() is not None or until(lambda: process.poll() is not None, 3)))
+        del asked
+    finally:
+        view.shutdown()
+        view.deleteLater()
+        parent_server.shutdown()
+        child_server.shutdown()
+
+
 def main() -> int:
     app = QApplication(sys.argv[:1])
     for test in (test_no_chromium, test_without_html_parser, test_parsing, test_cascade, test_layout,
@@ -3846,6 +4046,8 @@ def main() -> int:
     test_server_pages_and_http_fallback(app)
     print("test_forms")
     test_forms(app)
+    print("test_frames")
+    test_frames(app)
     print("test_view")
     test_view(app)
     if FAILED:
