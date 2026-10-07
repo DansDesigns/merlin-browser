@@ -12,6 +12,35 @@ import vm from "node:vm";
 // window is Deno's event target, and takes only these
 const DenoEvent = globalThis.Event;
 const denoDispatch = globalThis.EventTarget.prototype.dispatchEvent;
+// navigator.userAgentData, as Chrome gives it, from the user agent the
+// connections send: a Chrome user agent with none (as Merlin Engine's had) is
+// a contradiction sites that look for robots look for. Other browsers: none.
+function chromeHints(agent) {
+  const version = /Chrome\/(\d+)/.exec(String(agent || ""));
+  if (!version) return undefined;
+  const major = version[1];
+  const platform = /Windows/.test(agent) ? "Windows" : /Mac OS X|Macintosh/.test(agent) ? "macOS"
+    : /Android/.test(agent) ? "Android" : /Linux/.test(agent) ? "Linux" : "";
+  const mobile = /Mobile|Android/.test(agent);
+  const brands = [{ brand: "Chromium", version: major }, { brand: "Google Chrome", version: major },
+                  { brand: "Not_A Brand", version: "24" }];
+  const full = (/Chrome\/([\d.]+)/.exec(agent) || [, major + ".0.0.0"])[1];
+  const hints = {
+    architecture: /arm|aarch64/i.test(agent) ? "arm" : "x86", bitness: "64", model: "", wow64: false,
+    platformVersion: platform === "Windows" ? "15.0.0" : platform === "macOS" ? "15.5.0" : "6.8.0",
+    uaFullVersion: full, fullVersionList: brands.map((b) => ({ brand: b.brand, version: b.brand === "Not_A Brand" ? "24.0.0.0" : full })),
+    formFactors: [mobile ? "Mobile" : "Desktop"],
+  };
+  return {
+    brands, mobile, platform,
+    getHighEntropyValues(asked) {
+      const out = { brands, mobile, platform };
+      for (const name of asked || []) if (name in hints) out[name] = hints[name];
+      return Promise.resolve(out);
+    },
+    toJSON() { return { brands, mobile, platform }; },
+  };
+}
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const stdout = Deno.stdout;
@@ -315,10 +344,11 @@ function install(html) {
   };
   g.navigator = {
     userAgent: state.userAgent, appVersion: state.userAgent.replace(/^Mozilla\//, ""), appName: "Netscape",
-    platform: state.userAgent.includes("Windows") ? "Win32" : "Linux x86_64", vendor: "Google Inc.",
+    platform: state.userAgent.includes("Windows") ? "Win32" : state.userAgent.includes("Macintosh") ? "MacIntel"
+      : "Linux x86_64", vendor: "Google Inc.",
     language: state.language, languages: [state.language, state.language.split("-")[0]], onLine: true,
     cookieEnabled: true, hardwareConcurrency: 4, maxTouchPoints: 0, doNotTrack: null, webdriver: false,
-    userAgentData: undefined, clipboard: { writeText: async () => {}, readText: async () => "" },
+    userAgentData: chromeHints(state.userAgent), clipboard: { writeText: async () => {}, readText: async () => "" },
     sendBeacon(url, data) { merlinFetch(url, { method: "POST", body: data ?? null }).catch(() => {}); return true; },
     permissions: { query: async () => ({ state: "prompt", addEventListener() {} }) },
     mediaDevices: undefined, serviceWorker: undefined, geolocation: undefined,

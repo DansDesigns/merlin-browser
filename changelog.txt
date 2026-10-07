@@ -5,6 +5,41 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.20
+  Merlin Engine connects as Chrome does. Sites that look for robots, Google
+  first among them, tell a browser from a program by how it connects before a
+  page is asked for: the TLS handshake and HTTP/2. Merlin Engine's connections
+  had been Python's (OpenSSL, HTTP/1.1: 31 ciphers, 11 extensions, no GREASE,
+  no protocols offered), a program's at a glance, so Google answered every
+  search with its "unusual traffic" page. Made with curl_cffi
+  (libcurl-impersonate, BoringSSL, C only, scanned: no Rust), they are Chrome's:
+  its ciphers and extensions, GREASE, HTTP/2 offered first, and Chrome's own
+  headers in Chrome's order. Pages, stylesheets, images, fonts and scripts'
+  fetches all go so. Cookies stay in Merlin's jar, redirects are followed one
+  step at a time so the cookies each sets are kept, failures come back as
+  before (retries, error pages, certificate problems and allowances), and
+  secure DNS goes through curl's own DNS over HTTPS. The page's scripts are
+  told the user agent the connections send: one browser, not two.
+  They trust the authorities Python trusts: the system's own store (Windows'
+  certificate store there) and SSL_CERT_FILE, exported for curl, so an
+  authority added to the system is trusted as before. A certificate's problem
+  is told in Python's words, a clock behind still offered a dates-only
+  allowance.
+  Settings > Merlin Engine > "Connect as Chrome does", on by default. The
+  installers add curl_cffi; without it, or behind a proxy, Python's own
+  connections are used as before.
+  Connections are kept and shared, as Chrome keeps them: a page's stylesheets,
+  scripts and images reuse the site's connection, whichever thread fetches
+  them. curl_cffi keeps a connection a thread, and Merlin's image threads each
+  live for one picture: twenty images had been twenty handshakes, now one.
+  navigator.userAgentData, as Chrome gives it (brands, platform, mobile,
+  getHighEntropyValues), from that same user agent. A Chrome user agent with
+  none, as Merlin Engine's had been, is a contradiction robot checks look for.
+  The robot-check hand-over to Chromium stays as a setting, for any site that
+  still asks; with Chrome's connections Google should seldom ask at all.
+  Tests: certificates made for them carry key identifiers, as real ones do:
+  Python 3.13 checks chains strictly and had refused them.
+
 1.8.19
   Clicks land where a browser lands them. Never on a pseudo-element (it is its
   owner's), nothing under pointer-events: none, and no fixed box with a negative

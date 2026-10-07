@@ -1257,6 +1257,12 @@ class SettingsDialog(QDialog):
             lambda: getattr(self.window_ref, "reopen_in_other_engine", lambda: None)())
         layout.addWidget(compare)
         layout.addWidget(self._check(
+            "Connect as Chrome does", "chrome_connections",
+            "Make Merlin Engine's connections as Chrome makes them (its TLS handshake and HTTP/2), "
+            "so sites that look for robots, Google among them, see a browser. Needs curl_cffi, "
+            "which the installer adds; without it, or behind a proxy, Python's own are used. "
+            "Takes effect next start."))
+        layout.addWidget(self._check(
             "Open robot checks with Chromium", "robot_checks_chromium",
             "When a site checks for robots (Google's \"unusual traffic\" page, Cloudflare's \"Just a "
             "moment...\"), open it with Chromium in that tab's place. Merlin Engine cannot pass these "

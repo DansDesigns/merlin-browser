@@ -457,6 +457,13 @@ def main(argv: list[str] | None = None) -> int:
     from . import securedns
 
     securedns.install(bool(settings.get("secure_dns", True)))
+    # Merlin Engine's connections made as Chrome makes them, where curl_cffi is
+    try:
+        from .engine import chromelike
+
+        chromelike.enabled = bool(settings.get("chrome_connections", True))
+    except Exception:                                      # noqa: BLE001
+        pass
 
     # --- must happen before QtWebEngine spins up -------------------------
     if args.tor:

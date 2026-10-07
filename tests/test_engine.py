@@ -12,6 +12,7 @@ from __future__ import annotations
 import http.server
 import os
 import sys
+import urllib.request
 import socket
 import tempfile
 import shutil
@@ -1406,6 +1407,13 @@ def _test_certificates(folder: str, start_in_hours: float = 2.0, name: str = "lo
           .not_valid_before(now - datetime.timedelta(days=1))
           .not_valid_after(now + datetime.timedelta(days=60))
           .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+          # key identifiers and usage, as every real authority's certificate has
+          # them: Python 3.13 checks strictly and refuses a chain without them
+          .add_extension(x509.KeyUsage(digital_signature=True, content_commitment=False, key_encipherment=False,
+                                       data_encipherment=False, key_agreement=False, key_cert_sign=True,
+                                       crl_sign=True, encipher_only=False, decipher_only=False), critical=True)
+          .add_extension(x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), critical=False)
+          .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False)
           .sign(ca_key, hashes.SHA256()))
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     names = [x509.DNSName(name)] + ([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]
@@ -1416,6 +1424,8 @@ def _test_certificates(folder: str, start_in_hours: float = 2.0, name: str = "lo
             .not_valid_before(now + datetime.timedelta(hours=start_in_hours))
             .not_valid_after(now + datetime.timedelta(days=30))
             .add_extension(x509.SubjectAlternativeName(names), critical=False)
+            .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False)
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
             .sign(ca_key, hashes.SHA256()))
     paths = {k: os.path.join(folder, f"{k}.pem") for k in ("ca", "cert", "key")}
     open(paths["ca"], "wb").write(ca.public_bytes(serialization.Encoding.PEM))
@@ -3208,6 +3218,109 @@ def test_clicks_land_where_browsers_land(app) -> None:
         server.shutdown()
 
 
+def test_chrome_connections(app) -> None:
+    """Merlin Engine's connections made as Chrome's (curl_cffi): Chrome's
+    handshake (GREASE, HTTP/2 offered), cookies kept through redirects, gzip
+    unpacked once, urllib's errors as before, and scripts told the user agent
+    the connections send."""
+    import gzip as _gzip
+    import http.cookiejar
+    import socket as _socket
+    import struct
+    import urllib.error
+
+    from merlin.engine import chromelike
+    from merlin.engine.view import connection_failure
+
+    if not chromelike.AVAILABLE:
+        print("  skip  Chrome's connections: curl_cffi is not installed")
+        return
+
+    class Server(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def _send(self, code, body=b"", headers=()):
+            self.send_response(code)
+            for name, value in headers:
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path == "/gz":
+                self._send(200, _gzip.compress(b"once"), [("Content-Encoding", "gzip")])
+            elif self.path == "/login":
+                self._send(302, b"", [("Location", "/home"), ("Set-Cookie", "session=abc; Path=/")])
+            elif self.path == "/home":
+                self._send(200, ("cookie " + self.headers.get("Cookie", "none")).encode())
+            elif self.path == "/done":
+                self._send(200, b"after")
+            else:
+                self._send(404, b"our own 404")
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self._send(303, b"", [("Location", "/done")])
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Server)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        jar = http.cookiejar.CookieJar()
+        opener = chromelike.ChromeOpener(jar)
+        check("a cookie set in a redirect is kept and sent on (logins, Google)",
+              opener.open(base + "/login", timeout=10).read() == b"cookie session=abc")
+        check("a gzip body is unpacked once", opener.open(base + "/gz", timeout=10).read() == b"once")
+        posted = opener.open(urllib.request.Request(base + "/f", data=b"q=1", method="POST"), timeout=10)
+        check("a POST answered 303 is followed with a GET", posted.read() == b"after")
+        try:
+            opener.open(base + "/missing", timeout=10)
+            check("a 404 comes back as urllib's HTTPError, with the server's page", False)
+        except urllib.error.HTTPError as error:
+            check("a 404 comes back as urllib's HTTPError, with the server's page",
+                  error.code == 404 and error.read() == b"our own 404")
+        try:
+            opener.open("http://127.0.0.1:1/", timeout=5)
+        except urllib.error.URLError as error:
+            check("a refused connection is one Merlin's retry knows", connection_failure(str(error)), str(error)[:80])
+        agent = chromelike.user_agent()
+        from merlin.engine.view import _scripts_user_agent
+        check("the page's scripts are told the user agent the connections send (one browser, not two)",
+              agent.startswith("Mozilla/5.0") and "Chrome/" in agent and _scripts_user_agent("x") == agent, agent)
+    finally:
+        server.shutdown()
+    # the handshake, as a site sees it first
+    listener = _socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    hello = []
+
+    def take():
+        connection, _ = listener.accept()
+        connection.settimeout(3)
+        try:
+            hello.append(connection.recv(16384))
+        finally:
+            connection.close()
+    taker = threading.Thread(target=take, daemon=True)
+    taker.start()
+    try:
+        chromelike.ChromeOpener(lenient="any").open(f"https://localhost:{listener.getsockname()[1]}/", timeout=3)
+    except Exception:                                       # noqa: BLE001
+        pass
+    taker.join(3)
+    listener.close()
+    data = hello[0] if hello else b""
+    grease = any((struct.unpack(">H", data[i:i + 2])[0] & 0x0f0f) == 0x0a0a and data[i] == data[i + 1]
+                 for i in range(5, len(data) - 1))
+    check("the TLS handshake is Chrome's: GREASE in it, HTTP/2 offered (Python's had neither)",
+          data[:1] == b"\x16" and grease and b"\x02h2" in data, f"{len(data)} bytes")
+
+
 def test_modern_colours() -> None:
     """CSS Color 4 and 5, as GitHub uses them: unread, faint lines came out solid."""
     from merlin.engine.css import parse_colour
@@ -3496,6 +3609,8 @@ def main() -> int:
     test_button_groups_measured(app)
     print("test_clicks_land_where_browsers_land")
     test_clicks_land_where_browsers_land(app)
+    print("test_chrome_connections")
+    test_chrome_connections(app)
     print("test_animations_and_3d")
     test_animations_and_3d(app)
     print("test_server_pages_and_http_fallback")

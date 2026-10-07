@@ -183,6 +183,10 @@ def page_fetch(url: str, method: str, headers: dict, body, opener=None, timeout:
     sent["Accept-Encoding"] = "gzip, deflate"          # what Merlin can unpack
     request = urllib.request.Request(url, data=data, method=method or "GET", headers=sent)
     try:
+        from . import chromelike
+
+        if opener is None and chromelike.usable():
+            opener = chromelike.ChromeOpener()              # as Chrome connects
         response = (opener.open(request, timeout=timeout) if opener is not None
                     else urllib.request.urlopen(request, timeout=timeout))
     except urllib.error.HTTPError as error:

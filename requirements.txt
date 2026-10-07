@@ -30,3 +30,10 @@ PyQt6-WebEngine>=6.6
 # Optional, for the external-player fallback. Neither involves Rust:
 #   mpv     (C)       sudo apt install mpv
 #   yt-dlp  (Python)  pip install --user yt-dlp
+
+# ---------------------------------------------------------------------------
+# Optional, recommended: Merlin Engine connects as Chrome does (its TLS
+#   handshake and HTTP/2), so sites that look for robots see a browser.
+#   C (libcurl-impersonate, BoringSSL); scanned: no Rust. Without it Merlin
+#   Engine uses Python's own connections.
+curl_cffi

@@ -95,9 +95,15 @@ def page_headers(user_agent: str = "") -> dict:
 
 
 def _open(request, timeout: int, opener=None):
-    """Open a request, through a cookie-keeping opener when there is one."""
-    return opener.open(request, timeout=timeout) if opener is not None \
-        else urllib.request.urlopen(request, timeout=timeout)
+    """Open a request, through a cookie-keeping opener when there is one; as
+    Chrome connects when it can (see chromelike), else as urllib does."""
+    if opener is not None:
+        return opener.open(request, timeout=timeout)
+    from . import chromelike
+
+    if chromelike.usable():
+        return chromelike.ChromeOpener().open(request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout)
 
 
 _LENIENT: dict = {}
@@ -128,6 +134,12 @@ def lenient_context(level: str):
 def cookie_opener(jar, lenient: str = ""):
     """An opener keeping cookies in jar, and lenient with an allowed site's
     certificate; None when neither is wanted."""
+    from . import chromelike
+
+    if chromelike.usable():
+        # connections made as Chrome makes them: sites that look for robots
+        # tell Python's from a browser's by the handshake alone
+        return chromelike.ChromeOpener(jar, lenient)
     handlers = []
     if jar is not None:
         handlers.append(urllib.request.HTTPCookieProcessor(jar))
@@ -535,6 +547,13 @@ def without_noscript(markup: str) -> str:
     """markup with its <noscript> blocks taken out: for a page whose scripts
     run, as their content is then nothing at all, styles and refreshes too."""
     return re.sub(r"<noscript\b[^>]*>.*?</noscript\s*>", "", markup or "", flags=re.I | re.S)
+
+
+def _scripts_user_agent(fallback: str) -> str:
+    """The user agent scripts are told: the one the connections send."""
+    from . import chromelike
+
+    return (chromelike.user_agent() if chromelike.usable() else "") or fallback
 
 
 def connection_failure(text: str) -> bool:
@@ -1731,7 +1750,7 @@ class MerlinView(QWidget):
         whole = to_html(self._document)
         host.send({"type": "load", "html": whole, "geometry": self._geometry_now(), "state": {
             "url": self._url.toString(), "width": self._page_width(), "height": float(self.height()),
-            "userAgent": headers.get("User-Agent", ""), "language": "en-GB",
+            "userAgent": _scripts_user_agent(headers.get("User-Agent", "")), "language": "en-GB",
             "cookie": cookie_string(self._cookies(), self._url.toString()),
             "storage": storage.load(self._origin()),
             "scheme": "dark" if getattr(self._host, "dark", False) else "light"}})

@@ -293,6 +293,14 @@ else
       | sed 's/^/      /' || true
 fi
 
+# curl_cffi: Merlin Engine connects as Chrome does (sites that look for robots,
+# Google among them, tell Python's connections from a browser's). C only, no
+# Rust. Without it Merlin uses Python's own connections, as before.
+say "      Adding curl_cffi, so Merlin Engine connects as Chrome does..."
+"$VPY" -m pip install curl_cffi >/dev/null 2>&1 \
+  && say "      curl_cffi installed." \
+  || say "      curl_cffi could not be installed; Merlin Engine uses Python's connections."
+
 # python-vlc is only useful if libvlc is on the system already
 if command -v vlc >/dev/null 2>&1 || [[ -e /usr/lib/x86_64-linux-gnu/libvlc.so.5 ]]; then
   if ask "      libVLC found. Add the python-vlc bindings to the venv (optional)?"; then

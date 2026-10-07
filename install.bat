@@ -283,6 +283,11 @@ exit /b 1
 
 :depsdone
 
+rem curl_cffi: Merlin Engine connects as Chrome does (C only, no Rust); optional
+echo        Adding curl_cffi, so Merlin Engine connects as Chrome does...
+"%VPY%" -m pip install curl_cffi >nul 2>&1
+if errorlevel 1 (echo        curl_cffi could not be installed; Python's own connections are used.) else (echo        curl_cffi installed.)
+
 rem ----------------------------------------------------------------- 4. copy
 call :step 4 "Copying files to %TARGET%"
 if exist "%APPDIR%" rmdir /s /q "%APPDIR%"
