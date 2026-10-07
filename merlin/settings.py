@@ -48,6 +48,9 @@ HISTORY_DB = os.path.join(DATA_DIR, "history.sqlite")
 MAX_START_TILES = 5
 
 SEARCH_ENGINES = {
+    # built in: Ponder's own server, started by Merlin (see ponderhost.py);
+    # its port is Ponder's setting, so the address is filled in when used
+    "Ponder": "http://localhost:7000/?q={}",
     "DuckDuckGo": "https://duckduckgo.com/?q={}",
     "Google": "https://www.google.com/search?q={}",
     "Bing": "https://www.bing.com/search?q={}",
@@ -64,7 +67,7 @@ SEARCH_ENGINES = {
 
 # Short prefixes: typing "wiki merlin" searches Wikipedia for merlin.
 SEARCH_KEYWORDS = {
-    "ddg": "DuckDuckGo", "g": "Google", "b": "Bing", "br": "Brave",
+    "po": "Ponder", "ddg": "DuckDuckGo", "g": "Google", "b": "Bing", "br": "Brave",
     "sp": "Startpage", "ec": "Ecosia", "qw": "Qwant", "mj": "Mojeek",
     "yh": "Yahoo", "wiki": "Wikipedia", "yt": "YouTube",
 }
@@ -120,7 +123,7 @@ DEFAULTS = {
     # --- browsing ---
     "home_page": f"{APP_SCHEME}://start",
     "new_tab_page": f"{APP_SCHEME}://start",
-    "search_engine": "DuckDuckGo",
+    "search_engine": "Ponder",         # built in (1.8.23); the others stay to choose
     "custom_search_url": "",           # must contain {} where the query goes
     "search_keywords_enabled": True,
     "speech_model_path": "",           # a Vosk model folder of your own
@@ -152,6 +155,7 @@ DEFAULTS = {
     "invert_swipe": False,
     "merlin_engine": True,             # pages drawn by Merlin Engine; Chromium as a fallback
     "engine_switched": False,          # existing settings moved to Merlin Engine, once
+    "ponder_default": False,           # Ponder became the search engine, once
     "tiles_convert": False,            # the Wikipedia tile became Convert Files, once
     "offer_save_passwords": True,      # after a login in a Merlin Engine tab
     "ui_scale": 1.0,                   # interface size, 1.0 = 100%: applied at start
@@ -211,6 +215,11 @@ class Settings(QObject):
                             and str(t.get("title", "")).lower() == "wikipedia" else t
                             for t in tiles]
                     self._data["tiles_convert"] = True
+                # 1.8.23: Ponder, built in, is the search engine; once, so
+                # another chosen afterwards stays chosen
+                if not stored.get("ponder_default"):
+                    self._data["search_engine"] = "Ponder"
+                    self._data["ponder_default"] = True
                 if not stored.get("engine_switched"):
                     self._data["merlin_engine"] = True
                     self._data["engine_switched"] = True
@@ -251,6 +260,12 @@ class Settings(QObject):
             if "{}" in custom:
                 return custom
             return SEARCH_ENGINES["DuckDuckGo"]
+        if name == "Ponder":
+            from . import ponderhost
+
+            if ponderhost.failed():                        # Settings says why
+                return SEARCH_ENGINES["DuckDuckGo"]
+            return f"http://localhost:{ponderhost.port()}/?q={{}}"
         return SEARCH_ENGINES.get(name) or SEARCH_ENGINES["DuckDuckGo"]
 
     def search_url(self, term: str) -> str:
@@ -262,6 +277,10 @@ class Settings(QObject):
             candidate = SEARCH_KEYWORDS.get(prefix.lower())
             if candidate and rest.strip():
                 engine, term = candidate, rest.strip()
+        if (engine or self.get("search_engine")) == "Ponder":
+            from . import ponderhost
+
+            ponderhost.ensure()                            # at once; the page waits for it
         return self.template_for(engine).format(quote_plus(term))
 
     # ------------------------------------------------------- start tiles

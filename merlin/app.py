@@ -720,6 +720,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.private:
         window.new_private_window()
 
+    # Ponder, the built-in search engine: started in the background once the
+    # window is up, so it is ready by the first search
+    if settings.get("search_engine") == "Ponder":
+        from . import ponderhost
+
+        QTimer.singleShot(2500, ponderhost.ensure)
+
     # refresh filter lists shortly after start-up, never blocking the UI
     QTimer.singleShot(4000, filter_loader.refresh_if_stale)
     QTimer.singleShot(
@@ -848,6 +855,12 @@ def _shut_down(app, profile) -> None:
     from .browser import BrowserWindow
 
     crashlog.note("shutdown: event loop ending")
+    try:
+        from . import ponderhost
+
+        ponderhost.stop()                                  # the one Merlin started
+    except Exception:                                      # noqa: BLE001
+        pass
     stopped = media.stop_helpers()
     if stopped:
         crashlog.note(f"shutdown: stopped {stopped} yt-dlp/Deno process(es)")

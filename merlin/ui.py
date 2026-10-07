@@ -293,8 +293,7 @@ def start_page_html(settings: cfg.Settings, blocked_total: int = 0,
             f'title="Add a shortcut">+</a>'
         )
 
-    engine = settings.get("search_engine")
-    template = cfg.SEARCH_ENGINES.get(engine, cfg.SEARCH_ENGINES["DuckDuckGo"])
+    template = settings.template_for()
     action = template.split("{}")[0]
     param = "q"
     if "query=" in template:
@@ -829,8 +828,22 @@ class SettingsDialog(QDialog):
                 "The custom URL needs {} where the search text goes. "
                 "Falling back to DuckDuckGo until it does.")
             return
-        self.search_preview.setText(
-            "Searching for 'merlin' goes to:\n" + self.settings.search_url("merlin"))
+        text = "Searching for 'merlin' goes to:\n" + self.settings.search_url("merlin")
+        if name == "Ponder":
+            from PyQt6.QtCore import QTimer
+
+            from . import ponderhost
+
+            text += "\n" + ponderhost.describe()
+            if ponderhost.phase() in ("checking", "installing", "starting"):
+                QTimer.singleShot(1000, self._search_preview_later)   # until it settles
+        self.search_preview.setText(text)
+
+    def _search_preview_later(self) -> None:
+        try:
+            self._update_search_preview()
+        except RuntimeError:                               # the dialog has closed
+            pass
 
     # ---------------------------------------------------------- appearance
     def _appearance_tab(self) -> QWidget:

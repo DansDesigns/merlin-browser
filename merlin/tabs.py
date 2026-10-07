@@ -1010,39 +1010,16 @@ class TabContainer(QWidget):
             self._overlay.hide()
         self._round_page()
 
-    def _keep_overlay_above(self) -> None:
-        """Nudge the overlay back on top.
-
-        There is no signal for "this window was raised", and anything that
-        raises the browser window puts the overlay behind it. Checking once a
-        second is cheap, and only while this window is the active one, so it
-        never fights another application for the front.
-        """
-        overlay = self._overlay
-        if overlay is None or not overlay.isVisible():
-            return
-        window = self.window()
-        if window is not None and window.isActiveWindow():
-            overlay.raise_()
-
     def _corner_overlay(self):
-        """A translucent top-level that paints the corners with antialiasing.
-
-        Created on demand, and only once. If the platform will not give us a
-        translucent click-through window, None comes back and the region mask
-        is used instead.
-        """
+        """The layer that paints the corners with antialiasing, over the page
+        and inside this window (see corners.py). Created on demand, once."""
         if not self._smooth_corners:
             return None
         if self._overlay is None:
             try:
                 from .corners import CornerOverlay
 
-                self._overlay = CornerOverlay(self.window())
-                self._overlay_watch = QTimer(self)
-                self._overlay_watch.setInterval(1000)
-                self._overlay_watch.timeout.connect(self._keep_overlay_above)
-                self._overlay_watch.start()
+                self._overlay = CornerOverlay(self)
             except Exception:                            # noqa: BLE001
                 self._overlay = None
                 self._smooth_corners = False
@@ -1117,9 +1094,12 @@ class TabContainer(QWidget):
             left, right = self._strip_inset()
             overlay.configure(radius, THEME[self.v_strip.palette_name]["panel"],
                               left, right)
-            # fixed geometry, so widening the strip never resizes this window
-            origin = self.stack.mapToGlobal(self.stack.rect().topLeft())
+            # fixed geometry, so widening the strip never resizes the layer;
+            # the strip, which floats over the page, stays above it
+            origin = self.stack.mapTo(self, self.stack.rect().topLeft())
             overlay.follow(QRect(origin, self.stack.size()))
+            if self.v_strip.isVisible() and self._orientation in ("left", "right"):
+                self.v_strip.raise_()
             return
 
         path = QPainterPath()

@@ -1123,6 +1123,11 @@ class Layout:
             # an <svg>'s size is its own, from its attributes, not from what
             # is inside it; measured by contents it came out 0 wide
             return self._svg_size(element, style, 100000.0)[0]
+        if element.tag == "img":
+            # so is an image's: from its picture and the size it is given.
+            # Measured by contents, it had none: Ponder's logo, height: 26px
+            # in a flex row, came out 0 wide and was not seen
+            return self._image_size(element, style, 100000.0)[0]
         return _Measure(self).extent(element, style, 1.0 if narrowest else 100000.0)
 
     def _item_box(self, element: Element, style: dict, x: float, y: float,

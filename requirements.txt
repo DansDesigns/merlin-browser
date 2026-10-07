@@ -37,3 +37,9 @@ PyQt6-WebEngine>=6.6
 #   C (libcurl-impersonate, BoringSSL); scanned: no Rust. Without it Merlin
 #   Engine uses Python's own connections.
 curl_cffi
+
+# ---------------------------------------------------------------------------
+# Ponder, the built-in search engine (its own process, started by Merlin):
+#   FastAPI and friends, chosen so none of them is Rust; the reasons are in
+#   that file. The installers add these; Merlin adds them itself if missing.
+-r merlin/ponder/requirements.txt

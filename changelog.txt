@@ -5,6 +5,34 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.23
+  Ponder is built into Merlin and is its search engine. Its code is in
+  merlin/ponder and runs as it does on its own, as its own process, with its
+  own settings and index (~/.config/ponder), so a Ponder installed separately
+  and this one are the same Ponder. Merlin starts it in the background soon
+  after opening; a search made sooner waits for it. A Ponder already running
+  on its port is used as it is and left running when Merlin closes; the one
+  Merlin starts ends with Merlin, also if Merlin is killed. If Ponder cannot
+  start, searches go to DuckDuckGo and Settings > Search says why. Every other
+  engine is still there to choose ("po" searches Ponder once); settings from
+  an older Merlin move to Ponder once, and a choice made after that stands.
+  Its parts (FastAPI and the rest) are installed by both installers, and by
+  Merlin itself, once, after an update from an older version. None of them is
+  Rust: pydantic 1 rather than 2, uvicorn without its extras, and pypdf for
+  reading PDFs into Ponder's index where pdfminer.six needs cryptography.
+  Backgrounds added in Ponder's settings are kept through updates and
+  reinstalls.
+  Smooth rounded corners (Linux): the layer that paints them is now part of
+  the window, not a window of its own. As its own window it drew a dark line
+  over the Settings dialog and along the page's edge (with the side bar open
+  too), and Alternix's running apps listed Merlin once for it as well as for
+  the window. Turning smoothing off had been the only way round it.
+  Ponder's results page shows its logo: an image of a set height and width
+  auto, in a flex row, was measured 0 wide.
+  Google's "unusual traffic" check runs its scripts without errors now, but
+  the check itself is drawn in a frame (an iframe), and Merlin Engine does not
+  draw frames yet. That is the next piece of work.
+
 1.8.22
   Panels that scroll inside a page (overflow: auto, overflow: scroll). Merlin
   Engine had scrolled only whole pages: a page laid out as an app, one window

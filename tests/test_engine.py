@@ -21,6 +21,7 @@ import urllib.error
 import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ["MERLIN_NO_PONDER"] = "1"           # Ponder's server is not started here
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
@@ -2998,6 +2999,13 @@ def test_images_as_blocks_and_fitting(app) -> None:
           str(drawn("<img src=p.png style='display:block;width:100px;height:100px;object-fit:cover'>")))
     check("object-position places it: left top",
           drawn("<img src=p.png style='display:block;width:100px;height:100px;object-fit:cover;object-position:left top'>")[4:] == (0, 0))
+    # Ponder's results page: its logo, height 26px and width auto, in a flex
+    # row beside the search box, had been measured 0 wide and was not shown
+    found = drawn("<div style='display:flex;align-items:center;gap:8px'>"
+                  "<img src=p.png style='height:26px;width:auto;flex-shrink:0'>"
+                  "<input style='flex:1'></div>")
+    check("a flex item image of height only is as wide as its proportions give (Ponder's logo)",
+          found is not None and found[:2] == (52, 26), str(found))
     document = parse("<style>body{margin:0} .tiles{display:flex;gap:8px} .tiles a{box-sizing:border-box;padding:10px 16px;"
                      "white-space:nowrap}</style><div class=tiles><a id=t>Convert Files</a></div>")
     styles = Styler(document).compute()

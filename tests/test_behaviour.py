@@ -25,6 +25,9 @@ os.environ.setdefault(
     "QTWEBENGINE_CHROMIUM_FLAGS",
     "--no-sandbox --disable-gpu --disable-dev-shm-usage")
 os.environ["HOME"] = tempfile.mkdtemp(prefix="merlin-tests-")
+# Ponder (the built-in search engine) is a server Merlin starts: not here,
+# except where a test asks for it (test_ponder_built_in)
+os.environ["MERLIN_NO_PONDER"] = "1"
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -1994,6 +1997,159 @@ def test_linux_uninstaller(app) -> None:
               sorted(left) == sorted(wanted), str(left))
 
 
+def test_corner_layer(app) -> None:
+    """Smooth corners: a layer inside the window, not a window of its own.
+
+    It had been a frameless tool window kept over the browser. On Linux it drew
+    a dark line over the Settings dialog and along the page's edge, and window
+    lists that count every window (Alternix's running apps) showed Merlin twice.
+    """
+    from merlin.corners import CornerOverlay
+
+    for engine in (True, False):
+        window, settings, _ = make_window(app, f"t-corners-{engine}", smooth_corners=True,
+                                          page_corner_radius=16, merlin_engine=engine)
+        window.new_tab("data:text/html,<body style='background:#ffffff;margin:0'>white</body>")
+        wait(app, 1.5)
+        window.tabs._round_page()
+        wait(app, 0.3)
+        overlay = window.tabs._overlay
+        name = "Merlin Engine" if engine else "Chromium"
+        check(f"{name}: the corner layer exists and is a child of the window, not a window",
+              isinstance(overlay, CornerOverlay) and not overlay.isWindow()
+              and overlay.window() is window and overlay.isVisible())
+        # (other tests' windows may still be open: only this window's own count)
+        extra = [w for w in app.topLevelWidgets() if w.isVisible() and w is not window
+                 and not isinstance(w, BrowserWindow)]
+        check(f"{name}: nothing but the window itself is shown, so window lists count Merlin once",
+              overlay not in app.topLevelWidgets() and not extra, str([type(w).__name__ for w in extra]))
+        check(f"{name}: the layer lets clicks through",
+              overlay.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents))
+        # its corners painted over the page, in the chrome's colour, inside it
+        image = window.grab().toImage()
+        stack = window.tabs.stack
+        origin = stack.mapTo(window, stack.rect().topLeft())
+        left, _right = window.tabs._strip_inset()
+        corner = image.pixelColor(origin.x() + left + 1, origin.y() + stack.height() - 2).name()
+        middle = image.pixelColor(origin.x() + stack.width() // 2, origin.y() + stack.height() // 2).name()
+        check(f"{name}: the page's corner is covered, its middle is the page",
+              corner != "#ffffff" and middle == "#ffffff", f"corner {corner}, middle {middle}")
+        # the Settings dialog, over the page, shows nothing of the layer
+        settings.set("smooth_corners", False, save=False)
+        wait(app, 0.2)
+        check(f"{name}: smoothing off hides the layer", not overlay.isVisible())
+        window.close()
+        wait(app, 0.3)
+
+
+def test_ponder_built_in(app) -> None:
+    """Ponder, built in: the default search engine, the others still there."""
+    import http.server
+    import json as _json
+    import threading as _threading
+
+    from merlin import ponderhost
+
+    check("Ponder's code is inside Merlin's package",
+          os.path.isfile(os.path.join(ponderhost.ponder_dir(), "serve.py"))
+          and os.path.isfile(os.path.join(ponderhost.ponder_dir(), "main.py"))
+          and os.path.isfile(os.path.join(ponderhost.ponder_dir(), "static", "logo.png")))
+    check("Ponder is the default search engine, the others kept",
+          cfg.DEFAULTS["search_engine"] == "Ponder"
+          and all(n in cfg.SEARCH_ENGINES for n in ("DuckDuckGo", "Google", "Bing", "Brave", "Custom"))
+          and cfg.SEARCH_KEYWORDS.get("po") == "Ponder")
+
+    # settings saved by an older Merlin are moved to Ponder once; a choice
+    # made afterwards stands
+    os.makedirs(os.path.dirname(cfg.SETTINGS_FILE), exist_ok=True)
+    with open(cfg.SETTINGS_FILE, "w", encoding="utf-8") as handle:
+        _json.dump({"search_engine": "Google"}, handle)
+    moved = cfg.Settings()
+    check("an older Merlin's settings move to Ponder", moved.get("search_engine") == "Ponder")
+    moved.set("search_engine", "Bing")
+    check("and a choice made after that stands", cfg.Settings().get("search_engine") == "Bing")
+
+    # a Ponder already running (started separately) is used, and left running
+    class Fake(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = _json.dumps({"doc_count": 3}).encode() if self.path.startswith("/api/status") \
+                else b"<title>Ponder</title>"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json" if self.path.startswith("/api/")
+                             else "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Fake)
+    _threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+    folder = os.path.join(os.path.expanduser("~"), ".config", "ponder")
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, "config.json"), "w", encoding="utf-8") as handle:
+        _json.dump({"port": port}, handle)
+    saved_switch = os.environ.pop("MERLIN_NO_PONDER", None)
+    ponderhost._state.update(phase="idle", process=None, ours=False, port=0, failed_at=0.0)
+    try:
+        settings = cfg.Settings()
+        settings.set("search_engine", "Ponder", save=False)
+        url = settings.search_url("ufo sightings")
+        check("a search goes to Ponder on its own port", url == f"http://localhost:{port}/?q=ufo+sightings", url)
+        ready = ponderhost.wait_ready(10)
+        check("a Ponder already running is used, not a second one started",
+              ready and not ponderhost._state["ours"] and ponderhost._state["process"] is None,
+              ponderhost.describe())
+        check("its address is known as Ponder's", ponderhost.is_ponder_url(url)
+              and not ponderhost.is_ponder_url("http://localhost:1/?q=x"))
+        from merlin.engine import view as engine_view
+
+        ok, _final, text, _saved = engine_view.fetch_page(url)
+        check("Merlin Engine opens the search", ok and "Ponder" in text, str(text)[:80])
+        ponderhost.stop()
+        check("and leaves it running when Merlin closes", ponderhost.answers(port))
+        # one that cannot start: searches go to DuckDuckGo, and Settings says why
+        ponderhost._state.update(phase="failed", reason="testing", failed_at=time.monotonic())
+        check("if Ponder cannot start, searches go to DuckDuckGo",
+              settings.search_url("ufo").startswith("https://duckduckgo.com/"))
+        check("and Settings says why", "testing" in ponderhost.describe())
+    finally:
+        server.shutdown()
+        ponderhost._state.update(phase="idle", process=None, ours=False, port=0, failed_at=0.0)
+        if saved_switch is not None:
+            os.environ["MERLIN_NO_PONDER"] = saved_switch
+
+    # its parts are installed for it, and none of them is Rust
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    wanted = open(os.path.join(ponderhost.ponder_dir(), "requirements.txt"), encoding="utf-8").read()
+    lines = [l.split("#")[0].strip().lower() for l in wanted.splitlines() if l.split("#")[0].strip()]
+    check("Ponder's parts avoid Rust: pydantic 1, plain uvicorn, pypdf",
+          any(l.startswith("pydantic") and "<2" in l for l in lines)
+          and not any("pdfminer" in l or "[standard]" in l or "cryptography" in l for l in lines),
+          str(lines))
+    sh = open(os.path.join(here, "install.sh"), encoding="utf-8").read()
+    bat = open(os.path.join(here, "install.bat"), encoding="utf-8").read()
+    check("both installers install Ponder's parts",
+          "merlin/ponder/requirements.txt" in sh and "merlin\\ponder\\requirements.txt" in bat)
+    # backgrounds added in Ponder's settings survive an update
+    from merlin import updater
+
+    old = tempfile.mkdtemp()
+    new = tempfile.mkdtemp()
+    os.makedirs(os.path.join(old, "ponder", "static"))
+    os.makedirs(os.path.join(new, "ponder", "static"))
+    for folder, name, data in ((old, "mine.jpg", b"mine"), (old, "logo.png", b"old"), (new, "logo.png", b"new")):
+        with open(os.path.join(folder, "ponder", "static", name), "wb") as handle:
+            handle.write(data)
+    updater._keep_ponder_pictures(old, new)
+    kept = open(os.path.join(new, "ponder", "static", "mine.jpg"), "rb").read()
+    logo = open(os.path.join(new, "ponder", "static", "logo.png"), "rb").read()
+    check("an update keeps backgrounds added in Ponder, and Ponder's own pictures are the new ones",
+          kept == b"mine" and logo == b"new")
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -2027,7 +2183,8 @@ def main() -> int:
                  test_script_sites_and_debug_save, test_source_and_save_page_as,
                  test_certificate_padlock, test_interface_too_large,
                  test_loading_bar_and_save_names, test_javascript_permission,
-                 test_download_popup, test_hand_over_needs_an_answer, test_linux_uninstaller):
+                 test_download_popup, test_hand_over_needs_an_answer, test_linux_uninstaller,
+                 test_corner_layer, test_ponder_built_in):
         print(f"\n{test.__name__}")
         try:
             test(app)

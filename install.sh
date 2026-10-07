@@ -301,6 +301,14 @@ say "      Adding curl_cffi, so Merlin Engine connects as Chrome does..."
   && say "      curl_cffi installed." \
   || say "      curl_cffi could not be installed; Merlin Engine uses Python's connections."
 
+# Ponder, Merlin's built-in search engine, runs on FastAPI and friends (none of
+# them Rust; see merlin/ponder/requirements.txt). If this fails, Merlin installs
+# them itself the first time it searches.
+say "      Adding Ponder's parts (Merlin's built-in search engine)..."
+"$VPY" -m pip install -r "$SRC/merlin/ponder/requirements.txt" >/dev/null 2>&1 \
+  && say "      Ponder's parts installed." \
+  || say "      Ponder's parts could not be installed now; Merlin tries again when it first searches."
+
 # python-vlc is only useful if libvlc is on the system already
 if command -v vlc >/dev/null 2>&1 || [[ -e /usr/lib/x86_64-linux-gnu/libvlc.so.5 ]]; then
   if ask "      libVLC found. Add the python-vlc bindings to the venv (optional)?"; then
@@ -314,8 +322,18 @@ fi
 echo
 step 4 "Copying files to $LIB"
 status "Copying the merlin package"
+# backgrounds added in Ponder's settings live among its pictures: kept
+PONDER_KEEP=""
+if [[ -d "$LIB/merlin/ponder/static" ]]; then
+  PONDER_KEEP="$(mktemp -d)"
+  cp -r "$LIB/merlin/ponder/static/." "$PONDER_KEEP/" 2>/dev/null || true
+fi
 rm -rf "$LIB/merlin"
 cp -r "$SRC/merlin" "$LIB/merlin"
+if [[ -n "$PONDER_KEEP" ]]; then
+  cp -rn "$PONDER_KEEP/." "$LIB/merlin/ponder/static/" 2>/dev/null || true
+  rm -rf "$PONDER_KEEP"
+fi
 say "$(find "$LIB/merlin" -type f | wc -l) files copied"
 if [[ -f "$SRC/README.md" ]]; then
   cp "$SRC/README.md" "$LIB/README.md"

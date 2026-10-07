@@ -268,6 +268,7 @@ class Updater(QObject):
                     if os.path.isdir(keep) and not os.path.isdir(live):
                         os.rename(keep, live)
                     raise
+                _keep_ponder_pictures(keep, live)
                 shutil.rmtree(keep, ignore_errors=True)
             for single in ("merlin-run.py", "version.txt"):
                 source_file = os.path.join(staged, single)
@@ -319,3 +320,22 @@ def writable_app_dir() -> str:
                 and os.access(place, os.W_OK)):
             return place
     return ""
+
+
+def _keep_ponder_pictures(old_package: str, new_package: str) -> None:
+    """Backgrounds added in Ponder's settings (saved among its own pictures,
+    in merlin/ponder/static) carried over to the new files, not lost."""
+    import shutil
+
+    old_static = os.path.join(old_package, "ponder", "static")
+    new_static = os.path.join(new_package, "ponder", "static")
+    if not (os.path.isdir(old_static) and os.path.isdir(new_static)):
+        return
+    for name in os.listdir(old_static):
+        source = os.path.join(old_static, name)
+        target = os.path.join(new_static, name)
+        if os.path.isfile(source) and not os.path.exists(target):
+            try:
+                shutil.copyfile(source, target)
+            except OSError:
+                pass

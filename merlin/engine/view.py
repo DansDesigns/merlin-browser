@@ -317,6 +317,12 @@ def fetch_page(url: str, headers: dict | None = None, data: bytes | None = None,
     """
     from . import remote
 
+    try:
+        from .. import ponderhost
+
+        ponderhost.wait_if_starting(url)                   # a search made as Merlin opened
+    except Exception:                                      # noqa: BLE001
+        pass
     scheme = urllib.parse.urlsplit(url).scheme.lower()
     if scheme in ("ftp", "ftps", "smb", "file") and not url.startswith("view-source:"):
         return remote.open_remote(url, download_dir, progress)

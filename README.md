@@ -1,5 +1,5 @@
 # Merlin Browser
-![version](https://img.shields.io/badge/version-1.8.22-6f8ff0)
+![version](https://img.shields.io/badge/version-1.8.23-6f8ff0)
 
 ### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6 Requires a reinstall as there has been a fundamental change to the folder structure. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
 
@@ -46,7 +46,8 @@ Chromium through Qt WebEngine.
 - Adjustable page corner rounding, drawn antialiased by an overlay
 - A clock in the status bar, and a theme that can follow the time of day
 - Optional frameless window, toggled from the menu or with Ctrl+Shift+D
-- Twelve search engines with keyword prefixes, plus a custom engine slot
+- Ponder built in as the default search engine (web, wiki, images, video, maps and your own files), started and stopped by Merlin
+- Eleven other search engines with keyword prefixes, plus a custom engine slot
 - Right-click selected text to search for it
 - Speak to search from the new tab page, recognised on your own machine
 

@@ -288,8 +288,19 @@ echo        Adding curl_cffi, so Merlin Engine connects as Chrome does...
 "%VPY%" -m pip install curl_cffi >nul 2>&1
 if errorlevel 1 (echo        curl_cffi could not be installed; Python's own connections are used.) else (echo        curl_cffi installed.)
 
+rem Ponder, Merlin's built-in search engine: FastAPI and friends, none of them
+rem Rust (see merlin\ponder\requirements.txt). If this fails, Merlin installs
+rem them itself the first time it searches.
+echo        Adding Ponder's parts (Merlin's built-in search engine)...
+"%VPY%" -m pip install -r "%SRC%\merlin\ponder\requirements.txt" >nul 2>&1
+if errorlevel 1 (echo        Ponder's parts could not be installed now; Merlin tries again when it first searches.) else (echo        Ponder's parts installed.)
+
 rem ----------------------------------------------------------------- 4. copy
 call :step 4 "Copying files to %TARGET%"
+rem backgrounds added in Ponder's settings live among its pictures: kept
+set "PONDERKEEP=%TEMP%\merlin-ponder-static"
+if exist "%PONDERKEEP%" rmdir /s /q "%PONDERKEEP%"
+if exist "%APPDIR%\merlin\ponder\static" robocopy "%APPDIR%\merlin\ponder\static" "%PONDERKEEP%" /e /njh /njs /nfl /ndl >nul
 if exist "%APPDIR%" rmdir /s /q "%APPDIR%"
 mkdir "%APPDIR%" 2>nul
 echo        $ xcopy "%SRC%\merlin" "%APPDIR%\merlin"
@@ -300,6 +311,11 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
+if exist "%PONDERKEEP%" (
+  robocopy "%PONDERKEEP%" "%APPDIR%\merlin\ponder\static" /e /xc /xn /xo /njh /njs /nfl /ndl >nul
+  rmdir /s /q "%PONDERKEEP%"
+)
+rem robocopy's code says what it copied; the copy below sets it afresh
 copy /y "%SRC%\merlin-run.py" "%APPDIR%\merlin-run.py" >nul
 rem version.txt is the only place the version is written, so the installed
 rem copy needs it: without it the browser reports 0.0.0
