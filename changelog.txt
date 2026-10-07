@@ -5,6 +5,33 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.22
+  Panels that scroll inside a page (overflow: auto, overflow: scroll). Merlin
+  Engine had scrolled only whole pages: a page laid out as an app, one window
+  high with its content in a panel that scrolls (Ponder's results, mail, chat,
+  dashboards, documentation sidebars), was cut off at the window's edge. Such a
+  panel is now its own height, its contents drawn moved by its scroll and seen
+  through it; the wheel scrolls the innermost panel under the pointer, and the
+  page once that panel is at its end; clicks, links, buttons and form fields in
+  it are where they are shown, and hidden outside it. Its scripts read and set
+  its scrollTop (and scrollTo, scrollBy), hear its scroll events, and get its
+  clientHeight and scrollHeight; getBoundingClientRect takes its scroll off.
+  A panel keeps its place as the page changes, keyed by its id.
+  A panel stretched in a flex row of a set height is that height, its contents
+  scrolling in it: Ponder's results list had grown to its contents' 1,264
+  pixels, past its 691-pixel panel.
+  Touch scrolling, in Merlin Engine's tabs: a finger drags the page or the
+  panel under it, a flick glides on and slows to a stop, a tap clicks. A gesture
+  keeps to what it first moved: a flick to the end of a list does not then move
+  the page. Two fingers are left to the back and forward swipe. Touch had
+  become a mouse drag, which scrolls nothing, since Merlin Engine took over from
+  Chromium, which does its own.
+  About says which engine draws this tab and which new tabs get, how Merlin
+  Engine connects, then Chromium's codecs; it had said only "Chromium engine,
+  licensed codecs off", whichever engine was in use.
+  A robot check met in Merlin Engine stays there: its hand-over to Chromium,
+  and the setting for it, are gone.
+
 1.8.21
   Merlin starts on Linux again. 1.8.16 drew background pictures, but a picture
   on <html> or <body>, which covers the whole page, was handed to the gradient

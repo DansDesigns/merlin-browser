@@ -129,6 +129,7 @@ const state = { url: "about:blank", width: 1280, height: 800, scrollX: 0, scroll
                 userAgent: "Mozilla/5.0", language: "en-GB", storage: {}, loaded: false };
 const geometry = new Map();      // element id -> [x, y, width, height, fixed] in page terms
 const observers = new Set();     // the live IntersectionObservers
+const panels = new Map();        // a scrolling panel's id -> [top, shown height, whole height]
 const resizers = new Set();      // the live ResizeObservers
 const ids = new WeakMap();
 const byId = new Map();
@@ -909,8 +910,36 @@ function install(html) {
         if (name.startsWith("client")) return Math.round(index === 2 ? state.width : state.height);
         if (name.startsWith("scroll")) return pageSize(index);
       }
+      // a scrolling panel: what it shows, and all it holds
+      const panel = panels.get(ids.get(this));
+      if (panel && (name === "clientHeight" || name === "scrollHeight"))
+        return Math.round(name === "clientHeight" ? panel[1] : panel[2]);
       const box = geometry.get(ids.get(this)); return box ? Math.round(box[index]) : 0; } });
   }
+  // A panel that scrolls inside the page: its position read and set, as
+  // scrollTop and scrollTo; the page's own for the root and body.
+  const isRoot = (el) => el === document_.documentElement || el === document_.body || el === document_.scrollingElement;
+  const panelTo = (el, top) => {
+    const id = ids.get(el);
+    if (isRoot(el)) { g.scrollTo(state.scrollX, top); return; }
+    if (!panels.has(id)) return;
+    const panel = panels.get(id);
+    panel[0] = Math.max(0, Math.min(panel[2] - panel[1], Number(top) || 0));
+    send({ type: "panel_scroll_to", target: id, top: panel[0] });
+  };
+  Object.defineProperty(proto, "scrollTop", { configurable: true,
+    get() { if (isRoot(this)) return state.scrollY || 0; const panel = panels.get(ids.get(this)); return panel ? panel[0] : 0; },
+    set(value) { panelTo(this, value); } });
+  Object.defineProperty(proto, "scrollLeft", { configurable: true,
+    get() { return isRoot(this) ? (state.scrollX || 0) : 0; }, set(_value) {} });
+  proto.scrollTo = proto.scroll = function (x, y) {
+    const top = (x && typeof x === "object") ? x.top : y;
+    if (top !== undefined && top !== null) panelTo(this, top);
+  };
+  proto.scrollBy = function (x, y) {
+    const by = (x && typeof x === "object") ? x.top : y;
+    panelTo(this, this.scrollTop + (Number(by) || 0));
+  };
   // The form fields' validation, which the DOM had none of: Square's fields
   // set a custom message on theirs, and failed
   const fieldProto = (g.HTMLElement || made.HTMLElement).prototype;
@@ -1401,9 +1430,19 @@ function dispatch(message) {
     input.dispatchEvent(new globalThis.Event("change", { bubbles: true }));
     return;
   }
+  if (message.type === "panel_scroll") {
+    // a panel moved (the wheel, a finger): its position, and its scroll event
+    const id = Number(message.target);
+    panels.set(id, [message.top, message.height, message.scroll_height]);
+    const element = nodeOf(id);
+    if (element) element.dispatchEvent(new globalThis.Event("scroll"));
+    return;
+  }
   if (message.type === "geometry") {
     geometry.clear();
     for (const [id, box] of Object.entries(message.boxes || {})) geometry.set(Number(id), box);
+    panels.clear();
+    for (const [id, panel] of Object.entries(message.panels || {})) panels.set(Number(id), panel);
     if (message.height) state.height = message.height;
     for (const observer of observers) observer._check();
     for (const observer of resizers) observer._check();

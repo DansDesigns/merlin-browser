@@ -18,7 +18,7 @@ import urllib.parse
 import urllib.error
 import urllib.request
 
-from PyQt6.QtCore import QObject, QRectF, QStandardPaths, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, QRectF, QStandardPaths, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QImage, QPainter
 from PyQt6.QtWidgets import QScrollBar, QWidget
 
@@ -726,7 +726,8 @@ class MerlinView(QWidget):
         self._find = ("", -1)          # what was searched for, and where it was
         self._widgets: dict = {}       # form control element -> its Qt widget
         self._places: dict = {}        # form control element -> (rect, fixed)
-        self._buttons: list = []       # (rect, element, fixed) for buttons
+        self._panel_scroll: dict = {}  # each scrolling panel's position, by its key, for this page
+        self._buttons: list = []       # (rect, element, fixed, panels it is in) for buttons
         self._focused_once = False
         self.cert_troubles: list = []  # items held back for certificate problems
         self._cert_failed_url = None   # the page a certificate stopped
@@ -743,6 +744,17 @@ class MerlinView(QWidget):
         self._page = _Page(self, profile)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
+        # Touch: a finger drags the page or the panel under it, a flick glides
+        # on, a tap clicks. Without this a touch became a mouse drag, which
+        # scrolls nothing: touch scrolling had gone when Merlin Engine took
+        # over from Chromium, which does its own.
+        self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
+        self._touch = None                     # the finger down now, if any
+        self._glide = QTimer(self)
+        self._glide.setInterval(16)
+        self._glide.timeout.connect(self._glide_step)
+        self._glide_speed = 0.0
+        self._glide_at = None
         self._url = QUrl()
         self._title = ""
         self._zoom = 1.0
@@ -1311,6 +1323,7 @@ class MerlinView(QWidget):
         self._element_count = sum(1 for _ in self._document.root.elements())
         if self._element_count > BIG_PAGE:
             self._display = None          # the old page goes; the new one is being laid out
+            self._panel_scroll = {}       # and its panels' positions with it
         self._find = ("", -1)
         self._found_rect = None
         self._markup = prepared.get("markup", markup) if prepared else markup
@@ -1869,7 +1882,17 @@ class MerlinView(QWidget):
         if self._script is None or self._display is None:
             return
         self._script.send({"type": "geometry", "boxes": self._geometry_now(),
-                           "height": float(self.height())})
+                           "height": float(self.height()), "panels": self._panels_now()})
+
+    def _panels_now(self) -> dict:
+        """Each scrolling panel's position, shown height and whole height."""
+        panels = {}
+        for panel in (self._display.scrollers if self._display is not None else []):
+            known = panel["element"].attrs.get("data-mjs")
+            if known:
+                panels[known] = [self._display.panel_offset(panel), panel["area"].height(),
+                                 panel["area"].height() + panel["max"]]
+        return panels
 
     def _geometry_now(self) -> dict:
         boxes = {}
@@ -1879,7 +1902,10 @@ class MerlinView(QWidget):
         if self._display.fixed is not None:
             sources.append((self._display.fixed.boxes, True))
         for listed, fixed in sources:
-            for rect, element in listed:
+            for index, (rect, element) in enumerate(listed):
+                if not fixed and self._display.scrollers:
+                    # where it is shown, its panels' scroll taken off
+                    rect = rect.translated(0, -self._display.shift_of("box", index)[0])
                 known = element.attrs.get("data-mjs")
                 if not known:
                     continue
@@ -1946,7 +1972,17 @@ class MerlinView(QWidget):
             candidates += [(r, e) for r, e in self._display.fixed.boxes if r.contains(point) and hittable(e, True)]
         if not candidates:
             page_point = point.__class__(point.x(), point.y() + self._scroll)
-            candidates = [(r, e) for r, e in self._display.boxes if r.contains(page_point) and hittable(e, False)]
+            display = self._display
+            for index, (r, e) in enumerate(display.boxes):
+                if display.scrollers:
+                    # in a scrolling panel: where it is shown, and only inside it
+                    dy, through = display.shift_of("box", index)
+                    if dy or through:
+                        if not all(area.contains(page_point) for area in through):
+                            continue
+                        r = r.translated(0, -dy)
+                if r.contains(page_point) and hittable(e, False):
+                    candidates.append((r, e))
         for rect, element in sorted(candidates, key=lambda c: c[0].width() * c[0].height()):
             if element.attrs.get("data-mjs"):
                 return int(element.attrs["data-mjs"])
@@ -1967,6 +2003,19 @@ class MerlinView(QWidget):
             src = str(message.get("src", ""))
             if src and not self._images.get("__pending__" + src):
                 self._want_image(src)
+        elif kind == "panel_scroll_to":
+            # a page's script moved a panel (scrollTop, scrollTo)
+            display = self._display
+            target = str(message.get("target"))
+            for panel in (display.scrollers if display is not None else []):
+                if panel["element"].attrs.get("data-mjs") == target:
+                    top = max(0.0, min(panel["max"], float(message.get("top") or 0.0)))
+                    if abs(top - display.panel_offset(panel)) > 0.01:
+                        self._panel_scroll[panel["key"]] = top
+                        self._place_controls()
+                        self.update()
+                        self._panel_moved(panel, top)
+                    break
         elif kind == "pick_file":
             # the page's own button asked for its file input's dialog
             element = self._by_script_id.get(str(message.get("target")))
@@ -2224,6 +2273,8 @@ class MerlinView(QWidget):
             self._finish_load()
 
     def _shown_laid_out(self) -> None:
+        if self._display is not None:
+            self._display.panel_scroll = self._panel_scroll     # positions kept across layouts
         self._update_scrollbar()
         self._sync_controls()
         self.update()
@@ -2308,10 +2359,12 @@ class MerlinView(QWidget):
             return
         found, buttons = {}, []
         self._control_sticky = {}
+        self._control_panels = {}
         for source, fixed in ((self._display, False), (self._display.fixed, True)):
             if source is None:
                 continue
             around = []
+            panels = []
             pinned = 0
             for item in source.items:
                 # a fixed box's fields are taken from the fixed list, pinned to
@@ -2328,12 +2381,18 @@ class MerlinView(QWidget):
                     around.append(item[1])
                 elif item and item[0] == "sticky_pop" and around:
                     around.pop()
+                elif item and item[0] == "scroll_push":
+                    panels.append(item[1])
+                elif item and item[0] == "scroll_pop" and panels:
+                    panels.pop()
                 elif item and item[0] == "control":
                     found[item[2]] = (item[1], fixed, item[3], item[4])
                     if around:
                         self._control_sticky[item[2]] = around[-1]
+                    if panels:
+                        self._control_panels[item[2]] = list(panels)
                 elif item and item[0] == "button":
-                    buttons.append((item[1], item[2], fixed))
+                    buttons.append((item[1], item[2], fixed, list(panels)))
         for element in [e for e in self._widgets if e not in found]:
             widget = self._widgets.pop(element)
             widget.hide()
@@ -2371,10 +2430,20 @@ class MerlinView(QWidget):
             sticky = getattr(self, "_control_sticky", {}).get(element)
             if sticky is not None and self._display is not None:
                 top += self._display.sticky_offset(sticky, self._scroll)
+            # in a scrolling panel: moved with it, and shown only inside it
+            inside_panel = True
+            moved = 0.0
+            for panel in getattr(self, "_control_panels", {}).get(element, []):
+                window_area = panel["area"].translated(0, -moved - (0.0 if fixed else self._scroll))
+                moved += self._display.panel_offset(panel) if self._display is not None else 0.0
+                spot = QRectF(rect.left(), top - moved, rect.width(), rect.height())
+                if not window_area.contains(spot.center()):
+                    inside_panel = False
+            top -= moved
             height = max(rect.height(), 8.0)
             widget.setGeometry(round(rect.left()), round(top), max(8, round(rect.width())),
                                round(height))
-            shown = top + height > 0 and top < bottom and rect.left() < right
+            shown = top + height > 0 and top < bottom and rect.left() < right and inside_panel
             if shown and fixed:
                 # a field is a widget over the page; one in a fixed box at
                 # z-index 0 or below (GitHub's email box) hides while content
@@ -2699,9 +2768,21 @@ class MerlinView(QWidget):
 
     def _button_at(self, position):
         point = position.toPointF() if hasattr(position, "toPointF") else position
-        for rect, element, fixed in reversed(self._buttons):
+        for entry in reversed(self._buttons):
+            rect, element, fixed = entry[:3]
             y = point.y() + (0.0 if fixed else self._scroll)
-            if rect.contains(point.__class__(point.x(), y)):
+            spot = point.__class__(point.x(), y)
+            if self._display is not None and len(entry) > 3 and entry[3]:
+                # in a scrolling panel: where it is shown, and only inside it
+                moved, seen = 0.0, True
+                for panel in entry[3]:
+                    if not panel["area"].translated(0, -moved).contains(spot):
+                        seen = False
+                    moved += self._display.panel_offset(panel)
+                if not seen:
+                    continue
+                rect = rect.translated(0, -moved)
+            if rect.contains(spot):
                 return element
         return None
 
@@ -3045,7 +3126,176 @@ class MerlinView(QWidget):
             painting.NOW = time.monotonic() - self._animation_epoch
             paint(painter, self._display, visible, pictures)
 
+    def _scroll_panels(self, position, delta: float) -> float:
+        """Scroll the panels under position (window terms) by delta pixels,
+        innermost first, as far as each can go; returns what is left over for
+        the page, as browsers hand a scroll on at a panel's end."""
+        display = self._display
+        if display is None or not display.scrollers or not delta:
+            return delta
+        point = position.toPointF() if hasattr(position, "toPointF") else position
+        page_point = point.__class__(point.x(), point.y() + self._scroll)
+        chain = []
+        for panel in display.scrollers:             # outermost first
+            first, last = panel["boxes"]
+            outer = sum(display.panel_offset(other) for other in chain
+                        if other["boxes"][0] <= first and last <= other["boxes"][1])
+            if panel["area"].translated(0, -outer).contains(page_point):
+                chain.append(panel)
+        moved_any = False
+        for panel in reversed(chain):               # innermost first
+            if not delta:
+                break
+            now = display.panel_offset(panel)
+            wanted = max(0.0, min(panel["max"], now + delta))
+            if abs(wanted - now) > 0.01:
+                self._panel_scroll[panel["key"]] = wanted
+                delta -= wanted - now
+                moved_any = True
+                self._panel_moved(panel, wanted)
+        if moved_any:
+            self._place_controls()
+            self.update()
+        return delta
+
+    def _panel_moved(self, panel, top: float) -> None:
+        """A panel scrolled: its scripts told, with a scroll event on it, and
+        where things in it now are (soon after, not on every wheel step)."""
+        if self._script is None:
+            return
+        if not getattr(self, "_geometry_soon", None):
+            self._geometry_soon = QTimer(self)
+            self._geometry_soon.setSingleShot(True)
+            self._geometry_soon.setInterval(120)
+            self._geometry_soon.timeout.connect(self._send_geometry)
+        self._geometry_soon.start()
+        known = panel["element"].attrs.get("data-mjs")
+        if known:
+            self._script.send({"type": "panel_scroll", "target": int(known), "top": float(top),
+                               "height": float(panel["area"].height()),
+                               "scroll_height": float(panel["area"].height() + panel["max"])})
+
+    TOUCH_SLOP = 10.0              # pixels a finger may move and still tap
+    TAP_TIME = 0.6                 # seconds a tap may last
+
+    def event(self, event) -> bool:                            # noqa: D401
+        kind = event.type()
+        if kind in (QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate,
+                    QEvent.Type.TouchEnd, QEvent.Type.TouchCancel):
+            return self._on_touch(event)
+        return super().event(event)
+
+    def _on_touch(self, event) -> bool:
+        points = event.points()
+        kind = event.type()
+        if len(points) != 1:
+            # two fingers or more: the back and forward swipe's, not a scroll
+            self._touch = None
+            event.ignore()
+            return False
+        point = points[0].position()
+        now = time.monotonic()
+        if kind == QEvent.Type.TouchBegin:
+            self._glide.stop()                 # a finger down stops a glide
+            self._touch = {"start": point, "last": point, "began": now, "dragging": False,
+                           "samples": [(now, point.y())], "latch": [None]}
+            event.accept()
+            return True
+        touch = self._touch
+        if touch is None:
+            event.accept()
+            return True
+        if kind == QEvent.Type.TouchCancel:
+            self._touch = None
+            event.accept()
+            return True
+        if kind == QEvent.Type.TouchUpdate:
+            if not touch["dragging"] and (point - touch["start"]).manhattanLength() >= self.TOUCH_SLOP:
+                touch["dragging"] = True
+                touch["last"] = touch["start"]                 # the way it came counts too
+            if touch["dragging"]:
+                delta = touch["last"].y() - point.y()          # finger up, page up
+                self._touch_scroll(touch["start"], delta, touch["latch"])
+                touch["samples"] = [s for s in touch["samples"] if now - s[0] < 0.1] + [(now, point.y())]
+            touch["last"] = point
+            event.accept()
+            return True
+        # the finger lifted: a tap clicks; a flick glides on
+        self._touch = None
+        if not touch["dragging"]:
+            if now - touch["began"] < self.TAP_TIME:
+                from PyQt6.QtGui import QMouseEvent
+
+                for press in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease):
+                    synthetic = QMouseEvent(press, point, self.mapToGlobal(point), Qt.MouseButton.LeftButton,
+                                            Qt.MouseButton.LeftButton if press == QEvent.Type.MouseButtonPress
+                                            else Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+                    if press == QEvent.Type.MouseButtonRelease:
+                        self.mouseReleaseEvent(synthetic)
+                    else:
+                        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        else:
+            samples = [s for s in touch["samples"] if now - s[0] < 0.1]
+            if len(samples) >= 2 and samples[-1][0] > samples[0][0]:
+                speed = (samples[0][1] - samples[-1][1]) / (samples[-1][0] - samples[0][0])
+                if abs(speed) > 150.0:
+                    self._glide_speed, self._glide_at = speed, touch["start"]
+                    self._glide_latch = touch["latch"]
+                    self._glide_last = now
+                    self._glide.start()
+        event.accept()
+        return True
+
+    def _touch_scroll(self, where, delta: float, latch=None) -> float:
+        """Scroll the panel under where, else the page, by delta pixels;
+        returns what could not be scrolled. A gesture keeps to what it first
+        moved (latch: [None], then the panel's key or "page"), as browsers
+        keep it: a flick to the end of a list does not then move the page."""
+        latch = latch if latch is not None else [None]
+        if latch[0] in (None, "page") and latch[0] != "page":
+            before_panels = dict(self._panel_scroll)
+            left = self._scroll_panels(where, delta)
+            if left != delta:
+                moved = [k for k, v in self._panel_scroll.items() if before_panels.get(k) != v]
+                latch[0] = moved[0] if moved else latch[0]
+                return left
+        elif latch[0] != "page":
+            panel = next((p for p in (self._display.scrollers if self._display else [])
+                          if p["key"] == latch[0]), None)
+            if panel is None:
+                return delta
+            now = self._display.panel_offset(panel)
+            wanted = max(0.0, min(panel["max"], now + delta))
+            if abs(wanted - now) > 0.01:
+                self._panel_scroll[panel["key"]] = wanted
+                self._place_controls()
+                self.update()
+                self._panel_moved(panel, wanted)
+            return delta - (wanted - now)
+        before = self.scrollbar.value()
+        self.scrollbar.setValue(round(before + delta))
+        if self.scrollbar.value() != before:
+            latch[0] = "page"
+        return delta - (self.scrollbar.value() - before)
+
+    def _glide_step(self) -> None:
+        """A flick going on after the finger lifts, slowing as it goes."""
+        now = time.monotonic()
+        step = min(0.05, max(0.001, now - self._glide_last))
+        self._glide_last = now
+        delta = self._glide_speed * step
+        left = self._touch_scroll(self._glide_at, delta, getattr(self, "_glide_latch", None))
+        self._glide_speed *= 0.95 ** (step * 60.0)      # about as a phone slows
+        if abs(self._glide_speed) < 20.0 or abs(left) >= abs(delta) - 0.01:
+            self._glide.stop()                          # stopped, or at the end
+
     def wheelEvent(self, event) -> None:                      # noqa: N802
+        self._glide.stop()
+        left = self._scroll_panels(event.position(), float(-event.angleDelta().y()))
+        if left != float(-event.angleDelta().y()):
+            if left:
+                self.scrollbar.setValue(self.scrollbar.value() + round(left))
+            return
         self.scrollbar.setValue(self.scrollbar.value() - event.angleDelta().y())
 
     def keyPressEvent(self, event) -> None:                   # noqa: N802
@@ -3084,7 +3334,15 @@ class MerlinView(QWidget):
                     if rect.translated(0, moved).contains(point):
                         return href
         # the last laid out is, as a rule, the one on top
-        for rect, href in reversed(self._display.links):
+        display = self._display
+        for index in range(len(display.links) - 1, -1, -1):
+            rect, href = display.links[index]
+            if display.scrollers:
+                dy, through = display.shift_of("link", index)
+                if dy or through:
+                    if not all(area.contains(point) for area in through):
+                        continue
+                    rect = rect.translated(0, -dy)
             if rect.contains(point):
                 return href
         return below

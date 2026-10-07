@@ -1115,6 +1115,10 @@ def test_merlin_engine_tabs(app) -> None:
     wait(app, 1.5)
     check("with the switch on, a new tab is drawn by MerlinEngine",
           isinstance(view, MerlinView) and window.current() is view)
+    summary = window._engine_summary()
+    check("About names the engine of this tab and of new tabs (it had said only Chromium's codecs)",
+          "Engine for this tab: Merlin Engine" in summary and "Engine for new tabs: Merlin Engine" in summary,
+          summary)
     check("and the window follows it: title and address",
           view.title() == "Drawn by Merlin" and window.url_bar.text().startswith("data:"))
     window.save_session()
@@ -1122,6 +1126,9 @@ def test_merlin_engine_tabs(app) -> None:
     other = window.new_tab(page("chromium"))
     wait(app, 1.0)
     check("with it off, new tabs are Chromium again", isinstance(other, WebView))
+    summary = window._engine_summary()
+    check("and for a Chromium tab, with new tabs in Chromium, says so",
+          "Engine for this tab: Chromium" in summary and "Engine for new tabs: Chromium" in summary, summary)
     window.tabs.setCurrentIndex(window.tabs.indexOf(view))
     window.reopen_in_other_engine()
     wait(app, 1.0)
@@ -1747,8 +1754,8 @@ def test_javascript_permission(app) -> None:
           abs(middle_x - (picture.width() - 1) / 2) <= 0.5 and abs(middle_y - (picture.height() - 1) / 2) <= 0.5,
           f"centre ({middle_x}, {middle_y}) in {picture.width()}x{picture.height()}")
     plus.close()
-    check("robot checks open with Chromium unless that is turned off (Settings > Merlin Engine)",
-          fresh.get("robot_checks_chromium") is True)
+    check("a robot check met in Merlin Engine is shown there, never handed to Chromium",
+          "robot_checks_chromium" not in fresh._data)
     check("and its start page offers Convert Files where Wikipedia was",
           [t["title"] for t in fresh.get("start_tiles")][0] == "Convert Files"
           and fresh.get("start_tiles")[0]["url"] == "http://convert.to.it/",

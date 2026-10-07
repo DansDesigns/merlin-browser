@@ -84,6 +84,23 @@ class DisplayList:
         self.animated = False            # whether anything on it is animated: paint keeps time
         self.animated_boxes = []         # where: only those in view are drawn again
         self.sticky = []                 # position: sticky boxes, each a dict (see Layout)
+        self.scrollers = []              # panels that scroll inside the page (overflow: auto)
+        self.panel_scroll = {}           # each panel's scroll, by its key: kept by the view
+
+    def panel_offset(self, scroller: dict) -> float:
+        """How far a panel's contents are scrolled, within its range."""
+        return max(0.0, min(float(self.panel_scroll.get(scroller["key"], 0.0)), scroller["max"]))
+
+    def shift_of(self, kind: str, index: int):
+        """For the box or link at index: how far up the panels it is in have
+        moved it, and the panels' areas it is seen through (in page terms)."""
+        dy, through = 0.0, []
+        for scroller in self.scrollers:            # outermost first
+            first, last = scroller["boxes" if kind == "box" else "links"]
+            if first <= index < last:
+                through.append(scroller["area"].translated(0, -dy))
+                dy += self.panel_offset(scroller)
+        return dy, through
 
     def sticky_offset(self, info: dict, scroll: float) -> float:
         """How far a sticky box is moved down with the page scrolled by scroll.
@@ -628,7 +645,10 @@ class Layout:
         if clips:
             clip_index = len(self.out.items)
             self.out.items.append(None)          # ("clip_push", rect, radius), once known
+            self.out.items.append(None)          # ("scroll_push", panel), if its content scrolls
             clip_links = len(self.out.links)
+            clip_boxes = len(self.out.boxes)
+            clip_scrollers = len(self.out.scrollers)
         position = style.get("position")
         positioned = position in ("relative", "absolute", "fixed", "sticky")
         if positioned:
@@ -793,14 +813,33 @@ class Layout:
                           max(0.0, box.width() - border[1] - border[3]),
                           max(0.0, box.height() - border[0] - border[2]))
             self.out.items[clip_index] = ("clip_push", area, max(0.0, radius - max(border)))
+            reach = content_height - inner_height
+            if overflow in ("auto", "scroll") and reach > 0.5:
+                # A panel that scrolls inside the page: its content is drawn
+                # moved up by its own scroll, seen through its area, and its
+                # boxes and links move with it. Merlin Engine had scrolled only
+                # whole pages: Ponder's results, an app laid out one window
+                # high, were cut off at the window's edge.
+                # keyed by its HTML id where it has one, which stays as the
+                # page's scripts start and change it; its script number else
+                key = (f"id:{element.id}" if element.id else
+                       element.attrs.get("data-mjs") or f"{element.tag}#{id(element)}")
+                panel = {"key": key,
+                         "element": element, "area": area, "max": reach + padding[2],
+                         "boxes": (clip_boxes, len(self.out.boxes) - 1), "links": (clip_links, len(self.out.links))}
+                # outermost first: this panel goes before those inside it
+                self.out.scrollers.insert(clip_scrollers, panel)
+                self.out.items[clip_index + 1] = ("scroll_push", panel)
+                self.out.items.append(("scroll_pop",))
+            else:
+                kept = []
+                for rect, target in self.out.links[clip_links:]:
+                    inside_rect = rect.intersected(area)
+                    if not inside_rect.isEmpty():
+                        kept.append((inside_rect, target))
+                del self.out.links[clip_links:]
+                self.out.links.extend(kept)
             self.out.items.append(("clip_pop",))
-            kept = []
-            for rect, target in self.out.links[clip_links:]:
-                inside_rect = rect.intersected(area)
-                if not inside_rect.isEmpty():
-                    kept.append((inside_rect, target))
-            del self.out.links[clip_links:]
-            self.out.links.extend(kept)
         if perspective is not None:
             perspective["box"] = (box.x(), box.y(), box.width(), box.height())
             self._perspectives.pop()
@@ -1274,6 +1313,12 @@ class Layout:
                 if align in ("stretch", "normal") and \
                         self._length(entry["style"].get("height"), 0.0, vertical=True) is None:
                     forced = max(height, cross - top_margin - bottom_margin)
+                    if single and room is not None and entry["style"].get("overflow") in (
+                            "hidden", "clip", "auto", "scroll"):
+                        # stretched to the row's height, as CSS has it, what it
+                        # holds overflowing inside it: Ponder's results list had
+                        # grown to its contents' 1,264 pixels, past its panel
+                        forced = max(0.0, room - top_margin - bottom_margin)
                     offset = 0.0
                 else:
                     taken = height + top_margin + bottom_margin
@@ -1621,6 +1666,10 @@ class Layout:
                 return (kind, item[1].translated(dx, dy)) + tuple(item[2:])
             if kind == "text":
                 return (kind, item[1] + dx, item[2] + dy) + item[3:]
+            if kind == "scroll_push":
+                # the panel's area moves with it (its record is shared)
+                item[1]["area"] = item[1]["area"].translated(dx, dy)
+                return item
             return item
         for index in range(items_from, len(self.out.items) if items_to is None else items_to):
             self.out.items[index] = moved(self.out.items[index])

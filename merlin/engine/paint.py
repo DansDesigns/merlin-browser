@@ -71,8 +71,8 @@ def _colour(rgba) -> QColor:
     return QColor(rgba[0], rgba[1], rgba[2], rgba[3])
 
 
-_PUSHES = ("clip_push", "opacity_push", "sticky_push", "fixed_push", "xform_push")
-_POPS = ("clip_pop", "opacity_pop", "sticky_pop", "fixed_pop", "xform_pop")
+_PUSHES = ("clip_push", "opacity_push", "sticky_push", "fixed_push", "xform_push", "scroll_push")
+_POPS = ("clip_pop", "opacity_pop", "sticky_pop", "fixed_pop", "xform_pop", "scroll_pop")
 
 # The time animations are drawn at, in seconds since the page was shown: set
 # by the view before each paint.
@@ -162,6 +162,11 @@ def _apply(painter, display: DisplayList, item, shown: list, scroll: float) -> N
         # what is in view, in the element's own terms, so culling stays right
         shown.append(inverse.mapRect(shown[-1]) if invertible
                      else QRectF(-1e7, -1e7, 2e7, 2e7))
+    elif kind == "scroll_push":
+        # a panel scrolled inside the page: its contents moved up by its scroll
+        moved = display.panel_offset(item[1])
+        painter.translate(0, -moved)
+        shown.append(shown[-1].translated(0, moved))
     elif kind == "fixed_push":
         # pinned to the window: the page's scroll undone for what is inside
         painter.translate(0, scroll)

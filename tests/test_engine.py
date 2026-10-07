@@ -672,7 +672,7 @@ def test_forms(app) -> None:
         view.setUrl(QUrl(base + "/form-post"))
         wait(app, 1.5)
         QTest.keyClicks(field("name"), "Posted")
-        rect = next(r for r, e, f in view._buttons if e.tag == "button")
+        rect = next(b[0] for b in view._buttons if b[1].tag == "button")
         QTest.mouseClick(view, Qt.MouseButton.LeftButton,
                          pos=QPoint(int(rect.center().x()), int(rect.center().y() - view._scroll)))
         wait(app, 1.5)
@@ -683,7 +683,7 @@ def test_forms(app) -> None:
         view.setUrl(QUrl(base + "/form-get"))
         wait(app, 1.5)
         QTest.keyClicks(field("name"), "gone")
-        view._press_button(next(e for r, e, f in view._buttons if e.attrs.get("type") == "reset"))
+        view._press_button(next(b[1] for b in view._buttons if b[1].attrs.get("type") == "reset"))
         check("Reset puts the page's own values back", field("name").text() == "")
         QTest.keyClicks(field("name"), "kept")
         view.resize(520, 600)
@@ -3358,6 +3358,186 @@ def test_page_background_pictures_and_safe_painting(app) -> None:
         view.close()
 
 
+def test_scrolling_panels_and_touch(app) -> None:
+    """Panels that scroll inside the page (overflow: auto): laid out, drawn
+    moved, scrolled by the wheel (on to the page at their end), clicked where
+    they are shown, seen and moved by their scripts; and touch: a drag
+    scrolls, a flick glides, a tap clicks."""
+    from PyQt6.QtCore import QPointF
+    from PyQt6.QtGui import QWheelEvent
+    from PyQt6.QtTest import QTest
+
+    from merlin.engine import MerlinView
+    from merlin.engine.css import Styler
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+    from merlin.engine.script import LocalStorage
+
+    # Ponder's own layout: one window high, the results a panel stretched in a row
+    document = parse("<style>body{margin:0;height:600px;display:flex;flex-direction:column}"
+                     " .view{display:flex;flex-direction:column;flex:1;overflow:hidden}"
+                     " .body{display:flex;flex:1;overflow:hidden} .list{flex:1;overflow-y:auto}"
+                     " .row{height:100px}</style><div class=view><div style='height:40px'>bar</div>"
+                     "<div class=body><div class=list id=list>"
+                     + "".join(f"<div class=row>{n}</div>" for n in range(20)) + "</div></div></div>")
+    styles = Styler(document, viewport=(800, 600)).compute()
+    out = Layout(document, styles, 800, viewport_height=600).run()
+    lists = [p for p in out.scrollers if p["element"].id == "list"]
+    check("a results list stretched in a row of a page one window high is a panel its own height, scrolling the rest"
+          " (Ponder's had grown to its contents, cut off at the window's edge)",
+          lists and round(lists[0]["area"].height()) == 560 and round(lists[0]["max"]) == 1440,
+          str([(round(p["area"].height()), round(p["max"])) for p in out.scrollers]))
+    deno = _deno_for_tests()
+    if not deno:
+        print("  skip  panels with scripts and touch: Deno is not here")
+        return
+    folder = tempfile.mkdtemp(prefix="merlin-panels-")
+    open(os.path.join(folder, "index.html"), "w").write(
+        "<!DOCTYPE html><html><head><title>Panels</title><style>body{margin:0} #panel{height:200px;overflow:auto}"
+        " .row{height:50px} .tall{height:2000px}</style></head><body>"
+        "<div id=panel>" + "".join(f"<div class=row onclick=\"say('row {n}')\">row {n}</div>" for n in range(20))
+        + "</div><p id=out>none</p><p id=seen>none</p><div class=tall></div><script>"
+        "function say(w) { document.getElementById('out').textContent = w; }"
+        "document.getElementById('panel').addEventListener('scroll', (e) => {"
+        " document.getElementById('seen').textContent = 'scrolled ' + Math.round(e.target.scrollTop)"
+        " + ' of ' + e.target.scrollHeight + ' in ' + e.target.clientHeight; });"
+        "</script></body></html>")
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    class Host:
+        settings = {}
+
+        def javascript_allowed(self, site):
+            return True
+
+        def deno_for_scripts(self):
+            return deno
+
+        def script_cache_dir(self):
+            return os.path.join(folder, "cache")
+
+        def local_storage(self):
+            return LocalStorage(None)
+
+    view = MerlinView()
+    view._host = Host()
+    view.resize(700, 500)
+    view.show()
+
+    def text(eid):
+        found = next((x for x in view._document.root.elements() if x.id == eid), None) if view._document else None
+        return " ".join(found.text().split()) if found is not None else ""
+
+    def until(test, seconds=5):
+        end = time.time() + seconds
+        while time.time() < end and not test():
+            app.processEvents()
+            time.sleep(0.02)
+        return test()
+
+    def panel():
+        return next((p for p in view._display.scrollers if p["element"].id == "panel"), None) if view._display else None
+
+    def wheel(y, notches):
+        event = QWheelEvent(QPointF(100, y), QPointF(view.mapToGlobal(QPoint(100, y))), QPoint(0, 0),
+                            QPoint(0, -120 * notches), Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                            Qt.ScrollPhase.NoScrollPhase, False)
+        view.wheelEvent(event)
+        app.processEvents()
+    try:
+        view.setUrl(QUrl(f"http://127.0.0.1:{server.server_address[1]}/index.html"))
+        until(lambda: panel() is not None and view._script is not None and text("out") == "none", 15)
+        wait(app, 1.0)
+        wheel(100, 1)
+        check("the wheel over a panel scrolls the panel, not the page",
+              round(view._display.panel_offset(panel())) == 120 and view._scroll == 0,
+              f"panel {view._display.panel_offset(panel()):.0f}, page {view._scroll}")
+        check("its scripts hear it scroll, with its scrollTop, scrollHeight and clientHeight",
+              until(lambda: text("seen") == "scrolled 120 of 1000 in 200"), text("seen"))
+        QTest.mouseClick(view, Qt.MouseButton.LeftButton, pos=QPoint(100, 10))
+        check("a click lands on the row shown there, the panel scrolled (row 2, at 120 down)",
+              until(lambda: text("out") == "row 2"), text("out"))
+        wheel(100, 10)
+        check("at the panel's end, the wheel goes on to the page",
+              round(view._display.panel_offset(panel())) == 800 and view._scroll > 0,
+              f"panel {view._display.panel_offset(panel()):.0f}, page {view._scroll}")
+        view.scrollbar.setValue(0)
+        view._script.send({"type": "run", "code": "document.getElementById('panel').scrollTop = 250"}) \
+            if False else None
+        view._on_script_message({"type": "panel_scroll_to", "target": panel()["element"].attrs["data-mjs"], "top": 250})
+        check("a script setting a panel's scrollTop moves it", round(view._display.panel_offset(panel())) == 250)
+        from PyQt6.QtCore import QEvent
+
+        class Finger:
+            """A touch event as Qt hands one on: its kind and its points."""
+
+            def __init__(self, kind, *where):
+                self._kind, self._points = kind, [type("P", (), {"position": (lambda self, w=w: QPointF(*w))})()
+                                                  for w in where]
+
+            def type(self):
+                return self._kind
+
+            def points(self):
+                return self._points
+
+            def accept(self):
+                pass
+
+            def ignore(self):
+                pass
+
+        def drag(path, pause=0.012):
+            view._on_touch(Finger(QEvent.Type.TouchBegin, path[0]))
+            for spot in path[1:]:
+                time.sleep(pause)
+                view._on_touch(Finger(QEvent.Type.TouchUpdate, spot))
+                app.processEvents()
+            view._on_touch(Finger(QEvent.Type.TouchEnd, path[-1]))
+        check("Merlin Engine's view takes touch events (they had become mouse drags, scrolling nothing)",
+              view.testAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents))
+        view._panel_scroll[panel()["key"]] = 0.0
+        view.scrollbar.setValue(0)
+        drag([(100, 150 - y) for y in range(0, 101, 10)], pause=0.03)
+        view._glide.stop()
+        dragged = view._display.panel_offset(panel())
+        check("a finger dragged up 100 pixels scrolls the panel under it 100", round(dragged) == 100, f"{dragged:.0f}")
+        view._panel_scroll[panel()["key"]] = 0.0
+        drag([(100, 180 - y) for y in range(0, 121, 30)], pause=0.01)
+        flicked = view._display.panel_offset(panel())
+        until(lambda: not view._glide.isActive(), 3)
+        check("flicked, it glides on after the finger lifts, and slows to a stop",
+              view._display.panel_offset(panel()) > flicked + 20 and not view._glide.isActive(),
+              f"{flicked:.0f} then {view._display.panel_offset(panel()):.0f}")
+        check("a flick keeps to the panel it moved, the page left where it was at its end",
+              view._scroll == 0, f"page {view._scroll}")
+        view._panel_scroll[panel()["key"]] = 0.0
+        view.update()
+        drag([(100, 300), (100, 200), (100, 100)], pause=0.05)
+        view._glide.stop()
+        check("a drag outside any panel scrolls the page", view._scroll > 0 and view._display.panel_offset(panel()) == 0,
+              f"page {view._scroll}")
+        view.scrollbar.setValue(0)
+        app.processEvents()
+        view._on_touch(Finger(QEvent.Type.TouchBegin, (100, 60)))
+        view._on_touch(Finger(QEvent.Type.TouchEnd, (100, 60)))
+        check("a tap clicks what is under it (row 1)", until(lambda: text("out") == "row 1"), text("out"))
+        ignored = view._on_touch(Finger(QEvent.Type.TouchBegin, (100, 60), (200, 60)))
+        check("a two-finger touch is left to the back and forward swipe", ignored is False)
+    finally:
+        view.close()
+        server.shutdown()
+
+
 def test_modern_colours() -> None:
     """CSS Color 4 and 5, as GitHub uses them: unread, faint lines came out solid."""
     from merlin.engine.css import parse_colour
@@ -3648,6 +3828,8 @@ def main() -> int:
     test_clicks_land_where_browsers_land(app)
     print("test_page_background_pictures_and_safe_painting")
     test_page_background_pictures_and_safe_painting(app)
+    print("test_scrolling_panels_and_touch")
+    test_scrolling_panels_and_touch(app)
     print("test_chrome_connections")
     test_chrome_connections(app)
     print("test_animations_and_3d")

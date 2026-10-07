@@ -1185,7 +1185,6 @@ class BrowserWindow(QMainWindow):
                            or float(self.settings.get("default_zoom", 1.0)))
         if _is_merlin_view(view):
             self.tabs.setTabToolTip(index, "Merlin Engine")
-            view.loadFinished.connect(lambda _ok, v=view: self._robot_check(v))
 
         if not background:
             self.tabs.setCurrentIndex(index)
@@ -2567,50 +2566,6 @@ class BrowserWindow(QMainWindow):
                 view.page().apply_cosmetic("")   # force recompute next nav
                 view.reload()
 
-    def _robot_check(self, view) -> None:
-        """A page that checks for robots, met in a Merlin Engine tab, opens in
-        Chromium in that tab's place. Google answers Merlin Engine's searches
-        with its "unusual traffic" page every time (it tells programs from
-        browsers by how their connections are made, and Merlin Engine's are
-        Python's), and its puzzle needs frames Merlin Engine does not draw;
-        Cloudflare's "Just a moment..." is the same. Chromium is a browser to
-        them, and shows the page asked for."""
-        from urllib.parse import parse_qs, urlparse
-
-        if not _is_merlin_view(view) or view.property("robot_checked") \
-                or not self.settings.get("robot_checks_chromium", True):
-            return
-        url = view.url()
-        host, path = url.host().lower(), url.path()
-        markup = getattr(view, "_markup", "") or ""
-        google = ".google." in "." + host and path.startswith("/sorry")
-        cloudflare = view.title().strip().lower().startswith("just a moment") and "challenge-platform" in markup
-        if not (google or cloudflare):
-            return
-        target = url.toString()
-        if google:
-            wanted = parse_qs(urlparse(target).query).get("continue", [""])[0]
-            if wanted.startswith(("https://", "http://")):
-                target = wanted
-        view.setProperty("robot_checked", True)
-        index = self.tabs.indexOf(view)
-        if index < 0:
-            return
-        setting = self.settings.get("merlin_engine", False)
-        self.settings.set("merlin_engine", False, save=False)
-        try:
-            self.new_tab(target)
-        finally:
-            self.settings.set("merlin_engine", setting, save=False)
-        added = self.tabs.count() - 1
-        if added != index + 1:
-            self.tabs.tabBar().moveTab(added, index + 1)
-        self.close_tab(index)
-        self.tabs.setCurrentIndex(index)
-        self.status_label.setText(
-            f"{'Google' if google else 'This site'} checks for robots, and Merlin Engine cannot pass: "
-            "opened with Chromium instead")
-
     def reopen_in_other_engine(self) -> None:
         """The current page again, in a new tab drawn by the other engine.
 
@@ -2831,14 +2786,26 @@ class BrowserWindow(QMainWindow):
 
     # ----------------------------------------------------------- diagnostics
     def _engine_summary(self) -> str:
+        """Which engine draws this tab and new ones, then Chromium's codecs: the
+        line had said only "Chromium engine, licensed codecs off", whichever
+        engine was in use."""
+        view = self.current()
+        this_tab = "Merlin Engine" if _is_merlin_view(view) else "Chromium"
+        new_tabs = "Merlin Engine" if self.settings.get("merlin_engine", False) else "Chromium"
+        lines = [f"Engine for this tab: {this_tab}", f"Engine for new tabs: {new_tabs}"]
+        if _is_merlin_view(view) or new_tabs == "Merlin Engine":
+            try:
+                from .engine import chromelike
+
+                lines.append("Connections: as Chrome's (curl_cffi)" if chromelike.usable()
+                             else "Connections: Python's own")
+            except Exception:                              # noqa: BLE001
+                pass
         codecs = dict(self._codec_probe.get("codecs", []))
-        if not codecs:
-            return "Chromium engine"
-        licensed = [n for n in ("H.264 / AVC", "AAC")
-                    if codecs.get(n, "no") != "no"]
-        if len(licensed) == 2:
-            return "Chromium engine, licensed codecs on"
-        return "Chromium engine, licensed codecs off"
+        if codecs:
+            licensed = [n for n in ("H.264 / AVC", "AAC") if codecs.get(n, "no") != "no"]
+            lines.append("Chromium: licensed codecs " + ("on" if len(licensed) == 2 else "off"))
+        return "<br>".join(lines)
 
     def probe_codecs(self, then=None) -> None:
         """Ask the engine what it can decode, using a scratch page."""
