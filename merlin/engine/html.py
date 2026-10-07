@@ -142,6 +142,10 @@ class _Builder(HTMLParser):
             return
         self._close(tag)                             # a stray end tag is ignored
 
+    def handle_decl(self, decl):
+        if decl.lower().startswith("doctype") and not getattr(self, "doctype", ""):
+            self.doctype = decl
+
     def handle_data(self, data):
         if not data:
             return
@@ -170,4 +174,12 @@ def parse(markup: str, url: str = "") -> Document:
     builder = _Builder()
     builder.feed(markup)
     builder.close()
-    return Document(builder.root, url)
+    document = Document(builder.root, url)
+    # No doctype, or an old one browsers treat so: quirks mode, as browsers
+    # decide it. Hacker News has none, and its table text, inside <center>,
+    # is left-aligned there by the quirks rules for tables.
+    doctype = (getattr(builder, "doctype", "") or "").strip().lower()
+    document.quirks = not doctype.startswith("doctype html") or any(
+        old in doctype for old in ("-//w3c//dtd html 3", "-//w3c//dtd html 4.0 transitional//en\"",
+                                   "-//ietf//dtd html", "-//w3o//dtd w3 html"))
+    return document

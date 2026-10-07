@@ -93,6 +93,7 @@ class Document:
     def __init__(self, root: Element, url: str = ""):
         self.root = root
         self.url = url
+        self.quirks = False          # no doctype: the page is drawn by browsers' quirks rules
 
     @property
     def body(self) -> Element:
@@ -140,7 +141,9 @@ def to_html(document) -> str:
     """
     from .html import VOID
 
-    out = ["<!DOCTYPE html>"]
+    # the doctype only for a page in standards mode: one without (Hacker News)
+    # is in quirks mode, and stays so through its scripts and back
+    out = [] if getattr(document, "quirks", False) else ["<!DOCTYPE html>"]
 
     def escape(text: str, attribute: bool = False) -> str:
         text = text.replace("&", "&amp;")

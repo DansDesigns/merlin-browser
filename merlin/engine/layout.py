@@ -230,6 +230,29 @@ def _origin(value, width: float, height: float):
     return x, y
 
 
+def _layer_of(value, index: int) -> str:
+    """One background layer's part of a comma list (size, position, repeat),
+    the list repeated if it is shorter than the layers, as CSS has it."""
+    parts = _split_layers(str(value or ""))
+    return parts[index % len(parts)].strip() if parts else ""
+
+
+def _split_layers(value: str) -> list:
+    out, depth, current = [], 0, []
+    for character in value:
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+        if character == "," and depth == 0:
+            out.append("".join(current))
+            current = []
+        else:
+            current.append(character)
+    out.append("".join(current))
+    return [part for part in out if part.strip()]
+
+
 def _object_fit(style: dict):
     """How an image fills its box: object-fit and object-position, as given."""
     fit = str(style.get("object-fit") or "fill").strip().lower()
@@ -677,8 +700,15 @@ class Layout:
             paint.append(("rrect", box, colour, radius) if radius > 0.5 else ("rect", box, colour))
         gradients = style.get("background-image")
         if gradients and not hidden and not owns_canvas:
-            for gradient in reversed(gradients):          # the first layer is on top
-                paint.append(("gradient", box, gradient, radius))
+            count = len(gradients)
+            for index in range(count - 1, -1, -1):          # the first layer is on top
+                gradient = gradients[index]
+                if gradient and gradient[0] == "url":
+                    paint.append(("bgimage", box, gradient[1], _layer_of(style.get("background-size"), index),
+                                  _layer_of(style.get("background-position"), index),
+                                  _layer_of(style.get("background-repeat"), index), radius))
+                else:
+                    paint.append(("gradient", box, gradient, radius))
         if hidden:
             border = [0.0, 0.0, 0.0, 0.0]
         if radius > 0.5 and len(set(border)) == 1 and border[0] > 0:
@@ -1264,6 +1294,17 @@ class Layout:
             height = basis if basis is not None else (
                 fixed_height if fixed_height is not None
                 else self._scratch_height(element, item_style, border_width))
+            if (basis is not None or fixed_height is not None) \
+                    and item_style.get("min-height") in (None, "auto") \
+                    and item_style.get("overflow", "visible") in (None, "visible") \
+                    and item_style.get("overflow-y", "visible") in (None, "visible"):
+                # A flex item is never smaller than its content (its automatic
+                # minimum size), unless it clips what overflows. Square's
+                # column held AlterniTech's products at height: 100%, laid out
+                # 355 high: the footer came after the first row of products,
+                # the rest drawn beneath it.
+                as_content = dict(item_style, height=None, **{"flex-basis": "auto"})
+                height = max(height, self._scratch_height(element, as_content, border_width))
             entries.append({"element": element, "style": item_style, "margin": margin,
                             "width": border_width, "height": height, "align": align,
                             "grow": item_style.get("flex-grow", 0.0)})

@@ -284,7 +284,7 @@ function install(html) {
   // stopped on "Unable to get document domain"
   const documentProperties = {
     domain: () => new URL(state.url).hostname, characterSet: () => "UTF-8", charset: () => "UTF-8",
-    inputEncoding: () => "UTF-8", compatMode: () => "CSS1Compat", contentType: () => "text/html",
+    inputEncoding: () => "UTF-8", compatMode: () => (state.quirks ? "BackCompat" : "CSS1Compat"), contentType: () => "text/html",
     designMode: () => "off", lastModified: () => new Date().toLocaleString("en-US"),
     scrollingElement: () => document_.documentElement, fullscreenElement: () => null,
     pointerLockElement: () => null, pictureInPictureElement: () => null,
@@ -1325,7 +1325,7 @@ function serialize(node, out) {
   out.push("</", tag, ">");
 }
 function pageNow() {
-  const out = ["<!DOCTYPE html>"];
+  const out = state.quirks ? [] : ["<!DOCTYPE html>"];   // the page's own mode, kept
   serialize(document_.documentElement, out);
   return out.join("");
 }
@@ -1426,6 +1426,8 @@ async function main() {
       try { message = JSON.parse(line); } catch (_) { continue; }
       if (message.type === "load") {
         Object.assign(state, message.state || {});
+        // a page given without a doctype is in quirks mode, as Merlin found it
+        state.quirks = !/^\s*<!doctype\s+html/i.test(String(message.html || ""));
         install(message.html);
         // Merlin's numbering of the elements becomes the ids here, and the
         // attributes go, so the page's scripts never see them; with the layout

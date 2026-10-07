@@ -1140,7 +1140,20 @@ summary { display: block; cursor: pointer }
 details:not([open]) > :not(summary) { display: none }
 """
 
+# <center>, and align="center", centre the boxes in them, not only their text,
+# as browsers' own -webkit-center does: Hacker News' 85% table sits in the
+# middle of the page so
+DEFAULT_STYLESHEET += """
+center > *, div[align=center] > table, td[align=center] > table, th[align=center] > table,
+table[align=center] { margin-left: auto; margin-right: auto }
+"""
 _DEFAULT_RULES = parse_stylesheet(DEFAULT_STYLESHEET)
+# The HTML specification's rules for a page in quirks mode (no doctype): a
+# table starts its text afresh, inheriting none of it. Without them the
+# centring of Hacker News' <center> had run into every cell of its table.
+_QUIRKS_RULES = parse_stylesheet(
+    "table { text-align: left; font-weight: normal; font-style: normal; font-size: medium;"
+    " line-height: normal; white-space: normal }")
 
 
 _VIEWPORT_UNIT = re.compile(r"\d(?:[sld]?v(?:w|h|min|max|i|b))\b")
@@ -1184,7 +1197,7 @@ class Styler:
                 for key in index_keys(rule.selector):
                     author.setdefault(key, []).append((rule, base))
         default: dict = {}
-        for rule in _DEFAULT_RULES:
+        for rule in _DEFAULT_RULES + (_QUIRKS_RULES if getattr(self.document, "quirks", False) else []):
             for key in index_keys(rule.selector):
                 default.setdefault(key, []).append((rule, 0))
         self._index = {"default": default, "author": author}
@@ -1345,6 +1358,19 @@ class Styler:
         for child in element.children:
             if isinstance(child, Element) and not getattr(child, "pseudo", None):
                 self._compute(child, style, root_size)
+        if style.get("display") == "inline" and element.tag not in ("br", "img", "svg", "input", "select",
+                                                                     "textarea", "button", "iframe", "video"):
+            # A block inside an inline element: browsers split the inline round
+            # it and lay the block out as a block. Here the inline is laid out
+            # as a block that holds it. GitHub's header, a block inside a
+            # <react-partial> (inline, as any unknown element is), had no box:
+            # its black bar missing, its parts spread down 1,000 pixels. So
+            # with any card wrapped in an <a>.
+            for child in element.children:
+                if isinstance(child, Element) and not getattr(child, "pseudo", None) and \
+                        self.styles.get(child, {}).get("display") in _BLOCK_LEVEL:
+                    style["display"] = "block"
+                    break
 
     # elements that have no inside of their own for a ::before or ::after
     _NO_PSEUDO = {"img", "input", "br", "hr", "textarea", "select", "iframe", "video", "audio",
@@ -1639,9 +1665,37 @@ def expand_shorthand(name: str, value: str) -> list:
         kind = name.split("-")[1]
         values = [v for v in _split_outside(value, " ") if v.strip()]
         return [(f"border-{side}-{kind}", v) for side, v in zip(sides, _sides(values))]
+    if name == "background" and "url(" in value.lower():
+        images, sizes, positions, repeats = [], [], [], []
+        layers = _split_outside(value, ",")
+        image_pattern = r"""(?:url\((?:[^()]|\([^()]*\))*\)|[a-z-]*gradient\((?:[^()]|\([^()]*\))*\))"""
+        for layer in layers:
+            found = re.search(image_pattern, layer, re.I)
+            images.append(found.group(0) if found else "none")
+            rest = re.sub(image_pattern, " ", layer, flags=re.I)
+            words = [w for w in _split_outside(rest, " ") if w.strip()]
+            repeat = next((w for w in words if w.lower() in ("repeat", "no-repeat", "repeat-x", "repeat-y",
+                                                             "space", "round")), "repeat")
+            repeats.append(repeat)
+            spot = " ".join(w for w in words if w.lower() not in ("repeat", "no-repeat", "repeat-x", "repeat-y",
+                                                                     "space", "round", "fixed", "scroll", "local",
+                                                                     "border-box", "padding-box", "content-box")
+                            and parse_colour(w) is None)
+            where, _slash, size = spot.partition("/")
+            positions.append(where.strip() or "0% 0%")
+            sizes.append(size.strip() or "auto")
+        colour = "transparent"
+        for token in reversed(_split_outside(re.sub(image_pattern, " ", layers[-1], flags=re.I), " ")):
+            if token.strip() and parse_colour(token) is not None:
+                colour = token.strip()
+                break
+        return [("background-image", ", ".join(images)), ("background-size", ", ".join(sizes)),
+                ("background-position", ", ".join(positions)), ("background-repeat", ", ".join(repeats)),
+                ("background-color", colour)]
     if name in ("background", "background-image") and "gradient(" in value.lower():
         layers = _split_outside(value, ",")
-        images = [layer.strip() for layer in layers if "gradient(" in layer.lower()]
+        images = [layer.strip() for layer in layers
+                  if "gradient(" in layer.lower() or "url(" in layer.lower()]
         found = [("background-image", ", ".join(images))]
         if name == "background":
             # the shorthand sets the colour too: a colour in its last layer, or none
@@ -2005,6 +2059,9 @@ def _individual_transforms(style: dict, font: float, root_size: float, viewport)
     return ops
 
 
+_BLOCK_LEVEL = {"block", "flex", "grid", "table", "list-item", "flow-root"}
+
+
 def _content_text(value, element) -> str | None:
     """content, as the text of a ::before or ::after; None for none or normal,
     which make no box. Strings with their CSS escapes ("\\eb20", an icon
@@ -2241,6 +2298,15 @@ def parse_gradients(value: str, font: float = 16.0, root_size: float = 16.0,
     """
     layers = []
     for layer in _split_outside(value or "", ","):
+        picture = re.match(r"""^\s*url\(\s*(['"]?)(.*?)\1\s*\)\s*$""", layer, re.S | re.I)
+        if picture:
+            # a picture, as a layer: drawn by background-size, -position and
+            # -repeat. Only gradients had been kept: every background photo on
+            # the web had been left out
+            address = picture.group(2).strip()
+            if address:
+                layers.append(("url", address))
+            continue
         found = re.match(r"^\s*(?:repeating-)?(linear|radial)-gradient\((.*)\)\s*$", layer,
                          re.S | re.I)
         if not found:
@@ -2293,6 +2359,22 @@ def parse_gradients(value: str, font: float = 16.0, root_size: float = 16.0,
 
 
 # ------------------------------------------------------------------ web fonts
+
+def absolute_urls(text: str, base: str) -> str:
+    """A stylesheet's url()s made whole against its own address: a picture's
+    path is the sheet's, not the page's. data: and fragments are left."""
+    import urllib.parse
+
+    if not text or "url(" not in text.lower() or not base:
+        return text
+
+    def whole(match):
+        quote, address = match.group(1), match.group(2).strip()
+        if not address or address.startswith(("data:", "#")) or re.match(r"^[a-z][a-z0-9+.-]*:", address, re.I):
+            return match.group(0)
+        return f"url({quote}{urllib.parse.urljoin(base, address)}{quote})"
+    return re.sub(r"""url\(\s*(['"]?)([^'")]*)\1\s*\)""", whole, text, flags=re.I)
+
 
 def font_faces(text: str) -> list:
     """The @font-face blocks in a stylesheet: family, sources, weight, style.

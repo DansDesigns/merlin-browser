@@ -5,6 +5,42 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.17
+  Quirks mode. A page with no doctype (or an old one browsers treat so) is
+  drawn by browsers' quirks rules, as the HTML specification gives them: a
+  table starts its text afresh, inheriting no text-align, white-space,
+  line-height or font from outside it. Hacker News has no doctype and is laid
+  out in a table inside <center>: its every story had been centred, where in a
+  browser they are left-aligned. So with many older pages.
+  The page's mode is kept through its scripts: it goes to them without a
+  doctype if it came without one, comes back so, and document.compatMode says
+  BackCompat. Every page had gone to its scripts with <!DOCTYPE html>.
+  <center>, and align="center" on a table or its cell, centre the boxes in them,
+  not their text only, as browsers' -webkit-center does: Hacker News' 85% table
+  sits in the middle of the page.
+
+1.8.16
+  Background pictures. background-image: url(), and url() in the background
+  shorthand, had never been drawn, only gradients: every photo set as a
+  section's backdrop on the web was missing, and AlterniTech's hero, a photo
+  under a dark overlay, was the overlay alone. Picture layers are kept with the
+  gradients, in order; a stylesheet's url()s are made whole against its own
+  address; the pictures are fetched as the page's images are; and each is drawn
+  by background-size (cover, contain, auto, lengths and percentages),
+  background-position (keywords, percentages, lengths) and background-repeat
+  (repeat by default, no-repeat, repeat-x, repeat-y), clipped to its box and
+  rounded corners. The shorthand gives each layer its size, position and repeat.
+  A block inside an inline element is laid out as a block. Browsers split the
+  inline round it; here the inline is laid out as the block that holds it.
+  GitHub's header is a block inside a <react-partial>, inline as any unknown
+  element is: it had no box, its black bar was missing and its parts spread
+  down a thousand pixels of white while the page was new. So with any card
+  wrapped in an <a>.
+  A flex item in a column is never smaller than its content, unless it clips
+  what overflows: its automatic minimum size, as CSS has it. Square's column
+  held AlterniTech's products at height: 100%, laid out 355 high: the footer
+  came after the first row of products, the rest drawn beneath it.
+
 1.8.15
   Images laid out as blocks are drawn. An <img> with display: block, or a flex
   or grid item, had been given its box and never its picture: Tailwind makes

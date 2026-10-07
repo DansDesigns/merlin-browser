@@ -292,6 +292,12 @@ def _draw(painter, item, visible: QRectF, images) -> None:
             renderer = _svg_renderer(markup)
             if renderer is not None:
                 renderer.render(painter, rect)
+    elif kind == "bgimage":
+        rect = item[1]
+        picture = images.get(item[2])
+        if rect.intersects(visible) and picture is not None and picture is not False \
+                and not (hasattr(picture, "isNull") and picture.isNull()):
+            draw_background_picture(painter, rect, picture, item[3], item[4], item[5], item[6])
     elif kind == "gradient":
         rect, spec, radius = item[1], item[2], item[3]
         if rect.intersects(visible):
@@ -359,6 +365,108 @@ def _draw(painter, item, visible: QRectF, images) -> None:
             painter.drawText(rect.adjusted(4, 2, -4, -2),
                              Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
                              | Qt.TextFlag.TextWordWrap, alt)
+
+
+def _background_length(word: str, room: float):
+    """A length in a background's size or position: px, %, or a bare number."""
+    word = word.strip().lower()
+    try:
+        if word.endswith("%"):
+            return room * float(word[:-1]) / 100.0
+        if word.endswith("px"):
+            return float(word[:-2])
+        if word.endswith("rem") or word.endswith("em"):
+            return float(word.rstrip("rem").rstrip("e") or 0) * 16.0
+        return float(word)
+    except ValueError:
+        return None
+
+
+def draw_background_picture(painter, rect: QRectF, picture, size: str, position: str,
+                            repeat: str, radius: float) -> None:
+    """A background picture in its box, as CSS draws one: sized by
+    background-size (cover, contain, auto, lengths), placed by
+    background-position, repeated by background-repeat (repeat by default),
+    and clipped to the box and its rounded corners."""
+    if isinstance(picture, SvgPicture):
+        own_w, own_h = float(picture.width()), float(picture.height())
+    else:
+        own_w, own_h = float(picture.width()), float(picture.height())
+    if own_w <= 0 or own_h <= 0 or rect.width() <= 0 or rect.height() <= 0:
+        return
+    words = (size or "auto").strip().lower().split()
+    if words[:1] == ["cover"]:
+        scale = max(rect.width() / own_w, rect.height() / own_h)
+        tile_w, tile_h = own_w * scale, own_h * scale
+    elif words[:1] == ["contain"]:
+        scale = min(rect.width() / own_w, rect.height() / own_h)
+        tile_w, tile_h = own_w * scale, own_h * scale
+    else:
+        width_word = words[0] if words else "auto"
+        height_word = words[1] if len(words) > 1 else "auto"
+        tile_w = None if width_word == "auto" else _background_length(width_word, rect.width())
+        tile_h = None if height_word == "auto" else _background_length(height_word, rect.height())
+        if tile_w is None and tile_h is None:
+            tile_w, tile_h = own_w, own_h
+        elif tile_w is None:
+            tile_w = tile_h * own_w / own_h
+        elif tile_h is None:
+            tile_h = tile_w * own_h / own_w
+    if not tile_w or not tile_h or tile_w <= 0 or tile_h <= 0:
+        return
+    # where: keywords, percentages (of the room left), lengths
+    spots = (position or "0% 0%").strip().lower().split()
+    named_x = {"left": "0%", "center": "50%", "right": "100%"}
+    named_y = {"top": "0%", "center": "50%", "bottom": "100%"}
+    if len(spots) == 1:
+        spots = [spots[0], "center"] if spots[0] not in ("top", "bottom") else ["center", spots[0]]
+    first, second = spots[0], spots[1]
+    if first in named_y and first != "center" or second in ("left", "right"):
+        first, second = second, first
+    first, second = named_x.get(first, first), named_y.get(second, second)
+
+    def place(word, room, tile):
+        if word.endswith("%"):
+            try:
+                return (room - tile) * float(word[:-1]) / 100.0
+            except ValueError:
+                return 0.0
+        found = _background_length(word, room)
+        return found if found is not None else 0.0
+    x = rect.x() + place(first, rect.width(), tile_w)
+    y = rect.y() + place(second, rect.height(), tile_h)
+    repeat = (repeat or "repeat").strip().lower()
+    across = repeat in ("repeat", "repeat-x", "space", "round") or repeat.startswith("repeat ")
+    down = repeat in ("repeat", "repeat-y", "space", "round") or repeat.endswith(" repeat")
+    painter.save()
+    if radius and radius > 0.5:
+        from PyQt6.QtGui import QPainterPath
+
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+        painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
+    else:
+        painter.setClipRect(rect, Qt.ClipOperation.IntersectClip)
+    xs = [x]
+    if across:
+        start = x - tile_w * (int((x - rect.x()) / tile_w) + 1)
+        xs = [start + tile_w * n for n in range(int(rect.width() / tile_w) + 3)]
+    ys = [y]
+    if down:
+        start = y - tile_h * (int((y - rect.y()) / tile_h) + 1)
+        ys = [start + tile_h * n for n in range(int(rect.height() / tile_h) + 3)]
+    if len(xs) * len(ys) > 4000:                      # a tiny tile over a huge box: enough
+        xs, ys = xs[:80], ys[:50]
+    for top in ys:
+        for left in xs:
+            target = QRectF(left, top, tile_w, tile_h)
+            if not target.intersects(rect):
+                continue
+            if isinstance(picture, SvgPicture):
+                picture.render(painter, target)
+            else:
+                painter.drawImage(target, picture)
+    painter.restore()
 
 
 def _fitted(rect: QRectF, picture, fit) -> QRectF:

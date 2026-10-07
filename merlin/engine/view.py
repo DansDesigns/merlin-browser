@@ -1192,7 +1192,9 @@ class MerlinView(QWidget):
                 with_bases.append((source[1], page_url))
                 continue
             address = urllib.parse.urljoin(page_url, source[1])
-            text = fetched.get(address, "")
+            from .css import absolute_urls
+
+            text = absolute_urls(fetched.get(address, ""), address)     # its pictures are its own
             media = source[2]
             sheets.append(f"@media {media} {{{text}}}" if media and media != "all" else text)
             with_bases.append((text, address))        # a font's url is the sheet's, not the page's
@@ -1352,6 +1354,22 @@ class MerlinView(QWidget):
                 self._report_image(src)
                 continue
             wanted.append(src)
+        # background pictures, as the page's styles give them, fetched as its
+        # images are (they had never been fetched, nor drawn)
+        for element, style in (self._styles or {}).items():
+            layers = style.get("background-image")
+            if not layers or style.get("display") == "none" or not isinstance(layers, list):
+                continue
+            for layer in layers:
+                if not (isinstance(layer, tuple) and layer and layer[0] == "url"):
+                    continue
+                src = layer[1]
+                if not src or src in self._images or src in wanted or src.startswith("#"):
+                    continue
+                if self._blocked(self._url.resolved(QUrl(src)).toString(), "image"):
+                    self._images[src] = False
+                    continue
+                wanted.append(src)
         if not wanted:
             if any(v is False for v in self._images.values()):
                 self._layout()

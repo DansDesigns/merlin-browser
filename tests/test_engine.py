@@ -2995,6 +2995,97 @@ def test_images_as_blocks_and_fitting(app) -> None:
           texts and tile.width() >= 32 + max(t[1] + 0 for t in texts) * 0 + 60, f"{tile.width():.0f} wide")
 
 
+def test_backgrounds_blocks_in_inlines_and_columns(app) -> None:
+    """Background pictures (size, position, repeat, under an overlay), a
+    stylesheet's urls made whole, a block inside an inline element, and a
+    column flex item never smaller than its content."""
+    from PyQt6.QtCore import QRectF
+    from PyQt6.QtGui import QColor, QImage, QPainter
+
+    from merlin.engine import paint as painting
+    from merlin.engine.css import Styler, absolute_urls
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+
+    picture = QImage(200, 100, QImage.Format.Format_RGB32)
+    picture.fill(QColor(255, 0, 0))
+
+    def drawn(css):
+        document = parse(f"<style>body{{margin:0}} div{{width:400px;height:100px}}</style><div style='{css}'></div>")
+        styles = Styler(document).compute()
+        out = Layout(document, styles, 800, images={"p.png": picture}, viewport_height=300).run()
+        image = QImage(800, 300, QImage.Format.Format_RGB32)
+        image.fill(QColor(255, 255, 255))
+        painter = QPainter(image)
+        painting.paint(painter, out, QRectF(0, 0, 800, 300), images={"p.png": picture})
+        painter.end()
+        red = [image.pixelColor(x, 50).red() == 255 and image.pixelColor(x, 50).green() == 0 for x in range(400)]
+        return red, image.pixelColor(200, 50)
+    red, _middle = drawn("background: url(p.png) center / cover no-repeat")
+    check("a background picture is drawn (none had been): cover fills its box", all(red))
+    red, _middle = drawn("background: url(p.png) center / contain no-repeat")
+    check("contain fits it whole, centred", red.index(True) == 100 and not red[50] and not red[350])
+    red, _middle = drawn("background-image: url(p.png); background-size: 50px 25px")
+    check("a background picture repeats by default", all(red))
+    _red, middle = drawn("--o: linear-gradient(rgba(0,0,0,.6), rgba(0,0,0,.6)); --s: url(p.png);"
+                         " background-image: var(--o), var(--s); background-size: cover")
+    check("an overlay over a picture, both from var() (AlterniTech's hero): the picture dimmed beneath",
+          (middle.red(), middle.green(), middle.blue()) == (102, 0, 0), str((middle.red(), middle.green(), middle.blue())))
+    check("a stylesheet's url() is made whole against its own address; data: is left",
+          absolute_urls(".h{background:url('../img/a.jpg')} .d{background:url(data:x)}", "https://s.test/css/m.css")
+          == ".h{background:url('https://s.test/img/a.jpg')} .d{background:url(data:x)}")
+    for label, markup in (("a span", "<span><header id=h style='display:block;background:black;height:50px'>x</header></span>"),
+                          ("a custom element (GitHub's react-partial)",
+                           "<react-partial><div><header id=h style='display:flex;height:50px'><a>x</a></header></div></react-partial>")):
+        document = parse("<style>body{margin:0}</style>" + markup)
+        styles = Styler(document).compute()
+        out = Layout(document, styles, 800, viewport_height=400).run()
+        header = [r for r, e in out.boxes if e.id == "h"]
+        check(f"a block inside {label} is laid out as a block (GitHub's header had no box)",
+              header and round(header[0].width()) == 800 and round(header[0].height()) == 50)
+    document = parse("<style>body{margin:0} .main{display:flex;flex-direction:column;min-height:300px}"
+                     " .col{height:100%;flex-grow:1} .tall{height:900px}</style>"
+                     "<div class=main><div class=col id=col><div class=tall></div></div></div><footer id=f>end</footer>")
+    styles = Styler(document).compute()
+    out = Layout(document, styles, 800, viewport_height=300).run()
+    boxes = {e.attrs.get("id"): r for r, e in out.boxes if e.attrs.get("id")}
+    check("a column flex item at height: 100% grows to its content; what follows comes after it (AlterniTech's products)",
+          boxes["col"].height() >= 900 and boxes["f"].y() >= 900, f"column {boxes['col'].height():.0f}, footer at {boxes['f'].y():.0f}")
+
+
+def test_quirks_mode_and_center(app) -> None:
+    """A page with no doctype is in quirks mode: its tables start their text
+    afresh (Hacker News, centred by <center>, is left-aligned in its table);
+    <center> centres the boxes in it; the mode is kept for the page's scripts."""
+    from merlin.engine.css import Styler
+    from merlin.engine.dom import to_html
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+
+    page = ("<html><body style='margin:0'><center><table id=main width='50%'><tr><td id=cell>story</td></tr></table>"
+            "</center></body></html>")
+    check("a page with no doctype is in quirks mode; <!DOCTYPE html> and HTML 4.01 Strict are not",
+          parse(page).quirks and not parse("<!DOCTYPE html>" + page).quirks
+          and not parse('<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">'
+                        + page).quirks)
+    for doctype, wanted in (("", "left"), ("<!DOCTYPE html>", "center")):
+        document = parse(doctype + page)
+        styles = Styler(document).compute()
+        cell = next(e for e in document.root.elements() if e.id == "cell")
+        check(f"in {'quirks' if not doctype else 'standards'} mode a table's text inside <center> is {wanted}"
+              " (Hacker News had been centred)", styles[cell].get("text-align") == wanted,
+              str(styles[cell].get("text-align")))
+    document = parse(page)
+    styles = Styler(document).compute()
+    out = Layout(document, styles, 800, viewport_height=600).run()
+    table = next(r for r, e in out.boxes if e.id == "main")
+    check("<center> centres the 50% table in it, as browsers do", round(table.x()) == 200 and round(table.width()) == 400,
+          f"x {table.x():.0f} w {table.width():.0f}")
+    check("a quirks page goes to its scripts without a doctype, so it stays in quirks mode through them",
+          not to_html(parse(page)).lower().startswith("<!doctype") and
+          to_html(parse("<!DOCTYPE html>" + page)).startswith("<!DOCTYPE html>"))
+
+
 def test_modern_colours() -> None:
     """CSS Color 4 and 5, as GitHub uses them: unread, faint lines came out solid."""
     from merlin.engine.css import parse_colour
@@ -3275,6 +3366,10 @@ def main() -> int:
     test_box_sizing_and_measuring(app)
     print("test_images_as_blocks_and_fitting")
     test_images_as_blocks_and_fitting(app)
+    print("test_backgrounds_blocks_in_inlines_and_columns")
+    test_backgrounds_blocks_in_inlines_and_columns(app)
+    print("test_quirks_mode_and_center")
+    test_quirks_mode_and_center(app)
     print("test_animations_and_3d")
     test_animations_and_3d(app)
     print("test_server_pages_and_http_fallback")
