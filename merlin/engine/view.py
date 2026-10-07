@@ -1861,9 +1861,19 @@ class MerlinView(QWidget):
         for listed, fixed in sources:
             for rect, element in listed:
                 known = element.attrs.get("data-mjs")
-                if known and known not in boxes:
+                if not known:
+                    continue
+                if known not in boxes:
                     boxes[known] = [round(rect.x(), 1), round(rect.y(), 1), round(rect.width(), 1),
                                     round(rect.height(), 1), fixed]
+                else:
+                    # an inline element across lines: its pieces together, as
+                    # getBoundingClientRect gives them
+                    x, y, w, h, was_fixed = boxes[known]
+                    left, top = min(x, rect.x()), min(y, rect.y())
+                    right, bottom = max(x + w, rect.right()), max(y + h, rect.bottom())
+                    boxes[known] = [round(left, 1), round(top, 1), round(right - left, 1),
+                                    round(bottom - top, 1), was_fixed]
         return boxes
 
     def _send_scroll(self) -> None:
@@ -1882,12 +1892,41 @@ class MerlinView(QWidget):
         if self._display is None:
             return None
         point = position.toPointF() if hasattr(position, "toPointF") else position
+        styles = self._styles or {}
+
+        def hittable(element, fixed: bool) -> bool:
+            # As browsers decide what a click lands on: never a pseudo-element
+            # (it is its owner's), nothing under pointer-events: none, and no
+            # fixed box with a negative z-index, which is behind the page.
+            # Ponder's wallpaper is a body::before over the whole window,
+            # pointer-events: none and z-index: -1: every click had landed on
+            # it, and nothing on the page answered.
+            if getattr(element, "pseudo", None):
+                return False
+            node = element
+            while node is not None and hasattr(node, "attrs"):
+                events = styles.get(node, {}).get("pointer-events")
+                if events == "none":
+                    return False
+                if events not in (None, "", "auto", "inherit"):
+                    break
+                if events == "auto" and node is not element:
+                    break
+                node = node.parent
+            if fixed:
+                order = styles.get(element, {}).get("z-index")
+                try:
+                    if order not in (None, "", "auto") and float(order) < 0:
+                        return False
+                except (TypeError, ValueError):
+                    pass
+            return True
         candidates = []
         if self._display.fixed is not None:
-            candidates += [(r, e) for r, e in self._display.fixed.boxes if r.contains(point)]
+            candidates += [(r, e) for r, e in self._display.fixed.boxes if r.contains(point) and hittable(e, True)]
         if not candidates:
             page_point = point.__class__(point.x(), point.y() + self._scroll)
-            candidates = [(r, e) for r, e in self._display.boxes if r.contains(page_point)]
+            candidates = [(r, e) for r, e in self._display.boxes if r.contains(page_point) and hittable(e, False)]
         for rect, element in sorted(candidates, key=lambda c: c[0].width() * c[0].height()):
             if element.attrs.get("data-mjs"):
                 return int(element.attrs["data-mjs"])

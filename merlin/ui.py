@@ -1257,6 +1257,11 @@ class SettingsDialog(QDialog):
             lambda: getattr(self.window_ref, "reopen_in_other_engine", lambda: None)())
         layout.addWidget(compare)
         layout.addWidget(self._check(
+            "Open robot checks with Chromium", "robot_checks_chromium",
+            "When a site checks for robots (Google's \"unusual traffic\" page, Cloudflare's \"Just a "
+            "moment...\"), open it with Chromium in that tab's place. Merlin Engine cannot pass these "
+            "yet: Google tells it from a browser by how it connects. Turn off to see the check itself."))
+        layout.addWidget(self._check(
             "Use secure DNS (DNS over HTTPS)", "secure_dns",
             "Look site names up over HTTPS, as Brave does, rather than with Windows' or the "
             "router's own DNS, which can hold old addresses and can be read on the way. "

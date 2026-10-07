@@ -1747,6 +1747,8 @@ def test_javascript_permission(app) -> None:
           abs(middle_x - (picture.width() - 1) / 2) <= 0.5 and abs(middle_y - (picture.height() - 1) / 2) <= 0.5,
           f"centre ({middle_x}, {middle_y}) in {picture.width()}x{picture.height()}")
     plus.close()
+    check("robot checks open with Chromium unless that is turned off (Settings > Merlin Engine)",
+          fresh.get("robot_checks_chromium") is True)
     check("and its start page offers Convert Files where Wikipedia was",
           [t["title"] for t in fresh.get("start_tiles")][0] == "Convert Files"
           and fresh.get("start_tiles")[0]["url"] == "http://convert.to.it/",

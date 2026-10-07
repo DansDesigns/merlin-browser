@@ -1617,6 +1617,13 @@ class Layout:
             rect, href = self.out.links[index]
             self.out.links[index] = (rect.translated(dx, dy), href)
 
+    def _style_owner(self, style: dict):
+        """The element whose style this is (each element has its own)."""
+        owners = getattr(self, "_owners", None)
+        if owners is None:
+            owners = self._owners = {id(s): e for e, s in self.styles.items()}
+        return owners.get(id(style))
+
     # ------------------------------------------------------------ inline
     def _items(self, nodes, style: dict, link: str | None, out: list) -> None:
         """Flatten inline content into (kind, payload, style, link) items."""
@@ -1792,6 +1799,14 @@ class Layout:
                                            style.get("text-decoration", "none")))
                     if link:
                         self.out.links.append((QRectF(start_x, cursor, advance, line_height), link))
+                    if style is not block_style and not self._measuring:
+                        # the inline element this text is in has a box here,
+                        # for clicks and its scripts' measurements: a click on
+                        # Ponder's <span> pills had gone to the block round
+                        # them, and their onclick never heard it
+                        owner = self._style_owner(style)
+                        if owner is not None:
+                            self.out.boxes.append((QRectF(start_x, cursor, advance, line_height), owner))
                 cursor += line_height
             elif force:
                 # an empty line from a <br>: as tall as the block's font
@@ -1953,11 +1968,21 @@ class Layout:
         h = self._length(style.get("height"), 0.0, vertical=True)
 
         def attribute(name):
-            value = element.attrs.get(name, "").strip()
-            try:
-                return float(value.rstrip("px")) * self.zoom if value and not value.endswith("%") else None
-            except ValueError:
+            # a length as CSS reads one: px or none, em and rem (an icon set's
+            # width="1em" is its text's size: Hugging Face's header icons had
+            # come out 300 pixels square), or a share of the room
+            value = element.attrs.get(name, "").strip().lower()
+            if not value:
                 return None
+            found = re.match(r"^(-?[\d.]+)\s*(px|em|rem|ex|ch|pt|%)?$", value)
+            if not found:
+                return None
+            number, unit = float(found.group(1)), found.group(2) or "px"
+            font = float(style.get("font-size") or 16.0)
+            if unit == "%":
+                return available * number / 100.0 if name == "width" and available else None
+            factor = {"px": 1.0, "em": font, "rem": 16.0, "ex": font / 2, "ch": font / 2, "pt": 4 / 3}[unit]
+            return number * factor * self.zoom
 
         w = w if w is not None else attribute("width")
         h = h if h is not None else attribute("height")

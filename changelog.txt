@@ -5,6 +5,25 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.19
+  Clicks land where a browser lands them. Never on a pseudo-element (it is its
+  owner's), nothing under pointer-events: none, and no fixed box with a negative
+  z-index, which is behind the page. Ponder's wallpaper is a body::before over
+  the whole window, pointer-events: none and z-index: -1: drawn since 1.8.9,
+  every click had landed on it, and nothing on the page answered.
+  Inline elements have boxes where their text is, for clicks and for their
+  scripts' measurements, an element across lines measured as its pieces
+  together. A click on Ponder's <span> pills (Images, Web, Wiki, Video, Maps)
+  had gone to the block round them, and their onclick never heard it.
+  An <svg>'s width and height attributes are read with their units, as CSS
+  reads them: em (an icon set's width="1em" is its text's size), rem, ex, ch,
+  pt and percentages. Hugging Face's header icons had come out 300 pixels
+  square; its header is now as on the site.
+  Opening robot checks with Chromium is a setting, on for now (Settings >
+  Merlin Engine): turned off, the check is shown in Merlin Engine. Merlin
+  Engine is told from a browser by how it connects; making its connections as
+  Chrome's (curl_cffi) is the next step towards passing them itself.
+
 1.8.18
   A page that checks for robots, met in a Merlin Engine tab, opens with Chromium
   in that tab's place, at the page that was asked for. Google answers Merlin

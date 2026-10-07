@@ -158,6 +158,7 @@ DEFAULTS = {
     "web_fonts": True,                 # Merlin Engine uses sites' own fonts
     "javascript": True,                # Merlin Engine runs pages' JavaScript
     "secure_dns": True,                # site names looked up over HTTPS, as Brave does
+    "robot_checks_chromium": True,     # a robot check met in Merlin Engine opens with Chromium
     "swipe_distance": 520,             # px of travel to complete a swipe
     # --- updates ---
     "check_updates_on_start": True,

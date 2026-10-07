@@ -2566,7 +2566,8 @@ class BrowserWindow(QMainWindow):
         them, and shows the page asked for."""
         from urllib.parse import parse_qs, urlparse
 
-        if not _is_merlin_view(view) or view.property("robot_checked"):
+        if not _is_merlin_view(view) or view.property("robot_checked") \
+                or not self.settings.get("robot_checks_chromium", True):
             return
         url = view.url()
         host, path = url.host().lower(), url.path()

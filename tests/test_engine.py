@@ -3116,6 +3116,98 @@ def test_button_groups_measured(app) -> None:
           f"{boxes['b1'].width():.0f} wide, gap {boxes['b2'].x() - boxes['b1'].right():.0f}")
 
 
+def test_clicks_land_where_browsers_land(app) -> None:
+    """A click on an inline element reaches its own onclick, through a fixed
+    layer of pointer-events: none behind the page (Ponder's wallpaper, its
+    pills and its Toggle Search Functions); and an SVG of width="1em" is its
+    text's size (Hugging Face's header icons)."""
+    from merlin.engine import MerlinView
+    from merlin.engine.css import Styler
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+    from merlin.engine.script import LocalStorage
+
+    document = parse("<style>body{margin:0;font-size:16px}</style><a>Models <svg id=i width='1em' height='1em'"
+                     " viewBox='0 0 24 24'><rect width='24' height='24'/></svg></a>"
+                     "<svg id=r width='2rem' height='1.5em' viewBox='0 0 10 10'></svg>")
+    styles = Styler(document).compute()
+    out = Layout(document, styles, 800, viewport_height=600).run()
+    sizes = {}
+    for item in out.items:
+        if item and item[0] == "svg":
+            sizes.setdefault("svg", []).append((round(item[1].width()), round(item[1].height())))
+    check("an SVG of width=\"1em\" is its text's size, and rem and em read too (they had been 300 square)",
+          sizes.get("svg", [])[:2] == [(16, 16), (32, 24)], str(sizes.get("svg")))
+    deno = _deno_for_tests()
+    if not deno:
+        print("  skip  clicks: Deno is not here")
+        return
+    folder = tempfile.mkdtemp(prefix="merlin-clicks-")
+    open(os.path.join(folder, "index.html"), "w").write(
+        "<!DOCTYPE html><html><head><title>Clicks</title><style>body{margin:0}"
+        "body::before{content:'';position:fixed;inset:0;background:rgba(0,0,0,.1);pointer-events:none;z-index:-1}"
+        "</style></head><body><div id=toggle onclick=\"say('panel')\" style='padding:8px'>Toggle Search Functions:</div>"
+        "<div style='padding:8px'><span onclick=\"say('web')\">Web</span> <span onclick=\"say('wiki')\">Wiki</span></div>"
+        "<p id=out>none</p><script>function say(w) { document.getElementById('out').textContent = 'heard ' + w; }"
+        "</script></body></html>")
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    class Host:
+        settings = {}
+
+        def javascript_allowed(self, site):
+            return True
+
+        def deno_for_scripts(self):
+            return deno
+
+        def script_cache_dir(self):
+            return os.path.join(folder, "cache")
+
+        def local_storage(self):
+            return LocalStorage(None)
+
+    view = MerlinView()
+    view._host = Host()
+    view.resize(700, 400)
+    view.show()
+    from PyQt6.QtTest import QTest
+    try:
+        view.setUrl(QUrl(f"http://127.0.0.1:{server.server_address[1]}/index.html"))
+        wait(app, 3.0)
+
+        def said():
+            found = next((x for x in view._document.root.elements() if x.id == "out"), None)
+            return " ".join(found.text().split()) if found is not None else ""
+
+        def click_on(word):
+            for item in view._display.items:
+                if item and item[0] == "text" and item[3].strip() == word:
+                    QTest.mouseClick(view, Qt.MouseButton.LeftButton,
+                                     pos=QPoint(int(item[1]) + 4, int(item[2]) - 4 - int(view._scroll)))
+                    return
+        for word, wanted in (("Wiki", "heard wiki"), ("Toggle Search Functions:", "heard panel")):
+            click_on(word)
+            end = time.time() + 5
+            while time.time() < end and said() != wanted:
+                app.processEvents()
+                time.sleep(0.02)
+            check(f"a click on {word!r} reaches its own onclick, through a fixed layer of pointer-events: none"
+                  " (Ponder's)", said() == wanted, said())
+    finally:
+        view.close()
+        server.shutdown()
+
+
 def test_modern_colours() -> None:
     """CSS Color 4 and 5, as GitHub uses them: unread, faint lines came out solid."""
     from merlin.engine.css import parse_colour
@@ -3402,6 +3494,8 @@ def main() -> int:
     test_quirks_mode_and_center(app)
     print("test_button_groups_measured")
     test_button_groups_measured(app)
+    print("test_clicks_land_where_browsers_land")
+    test_clicks_land_where_browsers_land(app)
     print("test_animations_and_3d")
     test_animations_and_3d(app)
     print("test_server_pages_and_http_fallback")
