@@ -230,6 +230,16 @@ def _origin(value, width: float, height: float):
     return x, y
 
 
+def _is_percentage(value) -> bool:
+    """A width given as a share of its container (50%, or calc() with one)."""
+    if isinstance(value, tuple) and value:
+        if value[0] == "%":
+            return True
+        if value[0] == "mix" or (value[0] == "calc" and "%" in str(value)):
+            return True
+    return isinstance(value, str) and value.strip().endswith("%")
+
+
 def _layer_of(value, index: int) -> str:
     """One background layer's part of a comma list (size, position, repeat),
     the list repeated if it is shorter than the layers, as CSS has it."""
@@ -442,6 +452,11 @@ class Layout:
         """Lay out a block box at (x, y); returns its height including margins."""
         margin, padding, border = self._edges(style, available)
         width_value = _px(style.get("width"), available, auto=None)
+        if self._measuring and _is_percentage(style.get("width")):
+            # Measured, a width that is a share of the room counts as auto, as
+            # CSS has it: 100% of the space it was measured in had made
+            # AlterniTech's button wrappers 50,000 pixels wide
+            width_value = None
         z = self.zoom
         if width_value is not None:
             width_value *= z
@@ -681,6 +696,10 @@ class Layout:
         box_height = border[0] + padding[0] + inner_height + padding[2] + border[2]
         box_width = border[3] + padding[3] + content_width + padding[1] + border[1]
         box = QRectF(box_x, box_y, box_width, box_height)
+        if self._measuring:
+            # where the box ends, padding and border too, painted or not: a
+            # button with no background had measured without its right padding
+            self.out.items.append(("extent", box.right()))
         if element.tag == "img" and not self._measuring:
             content_box = QRectF(box_x + border[3] + padding[3], box_y + border[0] + padding[0],
                                  content_width, inner_height)
@@ -1834,7 +1853,10 @@ class Layout:
             font, metrics = self.fonts.get(style)
             advance = metrics.horizontalAdvance(text)
             wraps = not pre and style.get("white-space") != "nowrap"
-            if wraps and text != " " and line and used + advance > span[1] - span[0]:
+            # a pixel's tolerance: words measured one by one come to a hair
+            # more than the phrase measured whole, and text given exactly its
+            # own width had wrapped ("All / Products" on AlterniTech's buttons)
+            if wraps and text != " " and line and used + advance > span[1] - span[0] + 1.0:
                 emit(False)
             # a word with no room beside floats goes down below them
             steps = 0
@@ -1875,6 +1897,8 @@ class Layout:
             return ("box", w + m_left + m_right, element, style, link, ascent, 0.0, ascent,
                     (m_left, m_top, w, m_bottom))
         fixed = self._length(style.get("width"), available)
+        if self._measuring and _is_percentage(style.get("width")):
+            fixed = None             # measured, a percentage of the room counts as auto
         if fixed is not None:
             border_width = fixed + edges
         elif element.tag == "select":
@@ -2688,8 +2712,10 @@ def _right_edge(item) -> float:
         return 0.0
     if item[0] == "group":
         return max((_right_edge(sub) for sub in item[1]), default=0.0)
-    if item[0] in ("rect", "image", "rrect", "rborder", "svg", "gradient"):
+    if item[0] in ("rect", "image", "rrect", "rborder", "svg", "gradient", "bgimage"):
         return item[1].right()
+    if item[0] == "extent":
+        return item[1]
     if item[0] == "text":
         return item[1] + QFontMetricsF(item[4]).horizontalAdvance(item[3])
     return 0.0

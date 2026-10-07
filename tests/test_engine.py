@@ -2361,6 +2361,7 @@ def test_window_events_enter_dns_and_saving(app) -> None:
         "addEventListener('load', () => { out.push('load'); show(); });"
         "addEventListener('scroll', () => { out.push('scroll ' + scrollY); show(); });"
         "addEventListener('popstate', (e) => out.push('popstate ' + e.state.page));"
+        "addEventListener('message', (e) => { out.push('message ' + e.data); show(); }); postMessage('hi', '*');"
         "dispatchEvent(new PopStateEvent('popstate', { state: { page: 2 } }));"
         "setTimeout(() => { undefinedThing.call(); }, 50);"
         "setTimeout(() => { out.push('alive'); show(); }, 300);"
@@ -2420,6 +2421,8 @@ def test_window_events_enter_dns_and_saving(app) -> None:
             check("the window's load is heard once, and a popstate with its state",
                   until(view, lambda: "load" in heard(view), 15) and heard(view).count("load") == 1
                   and "popstate 2" in heard(view), heard(view))
+            check("window.postMessage delivers a message event to the window (reCAPTCHA's had stopped on it)",
+                  until(view, lambda: "message hi" in heard(view), 5), heard(view))
             check("an error in a timer is reported, and the page's scripts go on",
                   until(view, lambda: "alive" in heard(view), 5) and view._script is not None, heard(view))
             view.scrollbar.setValue(400)
@@ -3086,6 +3089,33 @@ def test_quirks_mode_and_center(app) -> None:
           to_html(parse("<!DOCTYPE html>" + page)).startswith("<!DOCTYPE html>"))
 
 
+def test_button_groups_measured(app) -> None:
+    """A group of buttons sized to their content: a percentage width counts as
+    auto when measured, an unpainted box's padding counts, and text given
+    exactly its own width stays on one line (AlterniTech's two buttons)."""
+    from merlin.engine.css import Styler
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+
+    page = ("<style>body{margin:0;font-size:16px} .group{display:inline-flex;gap:8px} .wrap{flex:1 1 auto}"
+            ".btn{display:inline-flex;width:100%;box-sizing:border-box;padding:0 24px;justify-content:center}"
+            ".t{display:block;padding-left:.16px} p{margin:0}</style><div class=group id=g>"
+            "<div class=wrap><a class=btn id=b1><span class=t><p>Free Software</p></span></a></div>"
+            "<div class=wrap><a class=btn id=b2><span class=t><p>All Products</p></span></a></div></div>")
+    document = parse(page)
+    styles = Styler(document).compute()
+    out = Layout(document, styles, 1400, viewport_height=600).run()
+    lines = [item[3] for item in out.items if item and item[0] == "text"]
+    boxes = {e.id: r for r, e in out.boxes if e.id}
+    check("button labels each stay on one line (they had wrapped: Free / Software, All / Products)",
+          lines == ["Free Software", "All Products"], str(lines))
+    check("a group of width: 100% buttons is as wide as their content, not the room (it had measured 100,000)",
+          boxes["g"].width() < 400, f"{boxes['g'].width():.0f}")
+    check("each button's padding on both sides counts, painted or not, and the gap between them",
+          boxes["b1"].width() > 140 and boxes["b2"].x() - boxes["b1"].right() >= 7.5,
+          f"{boxes['b1'].width():.0f} wide, gap {boxes['b2'].x() - boxes['b1'].right():.0f}")
+
+
 def test_modern_colours() -> None:
     """CSS Color 4 and 5, as GitHub uses them: unread, faint lines came out solid."""
     from merlin.engine.css import parse_colour
@@ -3370,6 +3400,8 @@ def main() -> int:
     test_backgrounds_blocks_in_inlines_and_columns(app)
     print("test_quirks_mode_and_center")
     test_quirks_mode_and_center(app)
+    print("test_button_groups_measured")
+    test_button_groups_measured(app)
     print("test_animations_and_3d")
     test_animations_and_3d(app)
     print("test_server_pages_and_http_fallback")

@@ -523,6 +523,14 @@ function install(html) {
     if (native.defaultPrevented) { try { event.preventDefault(); } catch (_) {} }
     return result;
   };
+  // window.postMessage: a message event on the window, after the current
+  // task, as in a browser. Missing, reCAPTCHA's script stopped on it.
+  g.postMessage = function (data, targetOrigin) {
+    const origin = (() => { try { return new URL(state.url).origin; } catch (_) { return "null"; } })();
+    setTimeout(() => {
+      try { g.dispatchEvent(new MessageEvent("message", { data, origin, source: g })); } catch (e) { reportError(e); }
+    }, 0);
+  };
   // form.submit() and requestSubmit(), which the DOM had as nothing at all:
   // search boxes that send their form from a script (Google's, Ponder's) did
   // nothing on Enter. requestSubmit runs the page's submit handlers first.

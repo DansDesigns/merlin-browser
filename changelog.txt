@@ -5,6 +5,26 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.18
+  A page that checks for robots, met in a Merlin Engine tab, opens with Chromium
+  in that tab's place, at the page that was asked for. Google answers Merlin
+  Engine's searches with its "unusual traffic" page every time: it tells
+  programs from browsers by how their connections are made, and Merlin Engine's
+  are Python's; its puzzle is in a frame Merlin Engine does not draw. Chromium
+  is a browser to it, and shows the results. Cloudflare's "Just a moment..." is
+  met the same way. The status bar says why.
+  window.postMessage, a message event to the window, as in a browser:
+  reCAPTCHA's script had stopped on it.
+  Buttons sized to their content. Measured, a width that is a share of the room
+  (100%) counts as auto, as CSS has it: AlterniTech's two buttons, each 100% of
+  its wrapper, had measured 50,000 pixels wide. A box's padding and border
+  count where it ends, painted or not: a button with no background had measured
+  without its right-hand padding. And a line holds text given exactly its own
+  width, to a pixel: words measured one by one come to a hair more than the
+  phrase measured whole, and "Free Software" and "All Products" had wrapped.
+  Not yet: Hugging Face's layout; Google's AI Mode button (the Google page in
+  the zip had none to look at).
+
 1.8.17
   Quirks mode. A page with no doctype (or an old one browsers treat so) is
   drawn by browsers' quirks rules, as the HTML specification gives them: a
