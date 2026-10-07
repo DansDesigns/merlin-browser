@@ -229,6 +229,36 @@ def _origin(value, width: float, height: float):
             y = value_px
     return x, y
 
+
+def _object_fit(style: dict):
+    """How an image fills its box: object-fit and object-position, as given."""
+    fit = str(style.get("object-fit") or "fill").strip().lower()
+    if fit not in ("contain", "cover", "none", "scale-down"):
+        return None                              # fill: stretched to the box, as it was
+    where = str(style.get("object-position") or "50% 50%").strip().lower().split()
+    named = {"left": 0.0, "top": 0.0, "center": 0.5, "right": 1.0, "bottom": 1.0}
+
+    def part(word, default):
+        if word in named:
+            return named[word]
+        if word.endswith("%"):
+            try:
+                return float(word[:-1]) / 100.0
+            except ValueError:
+                return default
+        return default
+    if len(where) == 1:
+        x = part(where[0], 0.5)
+        y = 0.5 if where[0] not in ("top", "bottom") else named[where[0]]
+        if where[0] in ("top", "bottom"):
+            x = 0.5
+    else:
+        first, second = where[0], where[1]
+        if first in ("top", "bottom") or second in ("left", "right"):
+            first, second = second, first
+        x, y = part(first, 0.5), part(second, 0.5)
+    return (fit, x, y)
+
 class Layout:
     def __init__(self, document, styles: dict, width: float, zoom: float = 1.0,
                  images: dict | None = None, viewport_height: float = 768.0,
@@ -395,6 +425,17 @@ class Layout:
         max_width = _px(style.get("max-width"), available, auto=None)
         min_width = _px(style.get("min-width"), available, auto=None)
         horizontal_extra = padding[1] + padding[3] + border[1] + border[3]
+        block_image = element.tag == "img"
+        if block_image and style.get("box-sizing") != "border-box":
+            # an image laid out as a block (display: block, a flex or grid
+            # item) is as wide as its picture unless told otherwise, and keeps
+            # its proportions: it had stretched across its container
+            if width_value is None:
+                image_w, _image_h = self._image_size(element, style, available)
+                width_value = image_w
+        if block_image and style.get("box-sizing") == "border-box" and width_value is None:
+            image_w, _image_h = self._image_size(element, style, available)
+            width_value = image_w + horizontal_extra
         if style.get("box-sizing") == "border-box":
             # widths given for the border box hold its padding and border: a
             # 200px box of border-box had come out 250 wide with its padding,
@@ -444,6 +485,22 @@ class Layout:
         min_height = self._length(style.get("min-height"), 0.0, vertical=True)
         max_height = self._length(style.get("max-height"), 0.0, vertical=True)
         fixed_height = self._length(style.get("height"), 0.0, vertical=True)
+        if element.tag == "img" and fixed_height is None:
+            _iw, image_h = self._image_size(element, style, available)
+            given_w = _px(style.get("width"), available, auto=None)
+            picture = self.images.get(element.attrs.get("src", "").strip())
+            if picture and given_w is not None and hasattr(picture, "width") and picture.width() > 0:
+                # a width given and the height left: the height in proportion,
+                # to the content's width (without padding and border, if they
+                # were in the width given)
+                content_w = given_w * self.zoom
+                if style.get("box-sizing") == "border-box":
+                    content_w = max(0.0, content_w - horizontal_extra)
+                image_h = content_w * picture.height() / picture.width()
+            if image_h:
+                fixed_height = image_h
+                if style.get("box-sizing") == "border-box":
+                    fixed_height += padding[0] + padding[2] + border[0] + border[2]
         if style.get("box-sizing") == "border-box":
             # heights given for the border box hold its padding and border, as
             # widths do: Google's 40px Sign in button had grown to 60
@@ -601,6 +658,11 @@ class Layout:
         box_height = border[0] + padding[0] + inner_height + padding[2] + border[2]
         box_width = border[3] + padding[3] + content_width + padding[1] + border[1]
         box = QRectF(box_x, box_y, box_width, box_height)
+        if element.tag == "img" and not self._measuring:
+            content_box = QRectF(box_x + border[3] + padding[3], box_y + border[0] + padding[0],
+                                 content_width, inner_height)
+            self.out.items.append(("image", content_box, element.attrs.get("src", "").strip(),
+                                   element.attrs.get("alt", ""), _object_fit(style)))
 
         colour = style.get("background-color")
         radius = self._length(style.get("border-top-left-radius"), box_width) or 0.0
@@ -972,6 +1034,10 @@ class Layout:
         item = dict(style)
         item["width"] = max(0.0, border_width - padding[1] - padding[3] - border[1] - border[3]) / z
         item["min-width"] = item["max-width"] = None
+        # the sizes given here are the content's, padding and border taken off
+        # already: as border-box they had been taken off twice, and Merlin's
+        # own new-tab tiles came out narrower than their names
+        item["box-sizing"] = "content-box"
         for side in ("top", "right", "bottom", "left"):
             item[f"margin-{side}"] = 0.0
         if border_height is not None:
@@ -1637,7 +1703,7 @@ class Layout:
                         _k, w, element, style, link, h, _d, _lh, _f = part
                         rect = QRectF(pen, baseline - h, w, h)
                         self.out.items.append(("image", rect, element.attrs.get("src", "").strip(),
-                                               element.attrs.get("alt", "")))
+                                               element.attrs.get("alt", ""), _object_fit(style)))
                         if link:
                             self.out.links.append((rect, link))
                         pen += w
@@ -2307,7 +2373,7 @@ class Layout:
         if element.tag == "img":
             rect = QRectF(box_x, box_y, border_width, image_h)
             self.out.items.append(("image", rect, element.attrs.get("src", "").strip(),
-                                   element.attrs.get("alt", "")))
+                                   element.attrs.get("alt", ""), _object_fit(style)))
             if self._link:
                 self.out.links.append((rect, self._link))
             height = image_h
@@ -2378,7 +2444,7 @@ class Layout:
                 return
             rect = QRectF(box_x, box_y, image_w, image_h)
             self.out.items.append(("image", rect, element.attrs.get("src", "").strip(),
-                                   element.attrs.get("alt", "")))
+                                   element.attrs.get("alt", ""), _object_fit(style)))
             height = image_h
         else:
             height = self._item_box(element, style, box_x, box_y, border_width, forced)

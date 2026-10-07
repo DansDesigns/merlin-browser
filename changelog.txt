@@ -5,6 +5,25 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.15
+  Images laid out as blocks are drawn. An <img> with display: block, or a flex
+  or grid item, had been given its box and never its picture: Tailwind makes
+  every image display: block, and galleries, cards and heroes are flex and grid,
+  so on a great many sites most pictures were missing. Such an image is as wide
+  as its picture unless told otherwise, and keeps its proportions to its
+  content's width, padding and border apart.
+  object-fit (contain, cover, none, scale-down) and object-position: a picture
+  in a box of another shape had always been stretched to it, sites' photos
+  warped and enlarged. cover fills its box and is cropped, contain fits whole,
+  placed as object-position says, centred by default.
+  Merlin's new-tab tiles fit their names again. A flex item's size, worked out
+  without its padding and border, had them taken off once more under 1.8.14's
+  border-box: the tiles came out narrower than their names, the search box too
+  short for its text.
+  Not yet: CSS background pictures (background-image: url(), and url() in the
+  background shorthand) are not drawn at all, only gradients: AlterniTech's hero
+  photo, under its dark overlay, is the overlay alone. Next.
+
 1.8.14
   box-sizing: border-box for widths. A width, min-width or max-width given for
   the border box holds its padding and border, as heights now do too: a 200px

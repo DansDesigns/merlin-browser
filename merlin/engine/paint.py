@@ -332,15 +332,23 @@ def _draw(painter, item, visible: QRectF, images) -> None:
                 else baseline - metrics.strikeOutPos()
             painter.fillRect(QRectF(x, y, width, thickness), _colour(rgba))
     elif kind == "image":
-        _k, rect, src, alt = item
+        _k, rect, src, alt = item[:4]
+        fit = item[4] if len(item) > 4 else None
         if not rect.intersects(visible):
             return
         picture = images.get(src)
         if picture is not None and not picture.isNull():
+            target = _fitted(rect, picture, fit)
+            clipped = fit is not None and not rect.contains(target)
+            if clipped:
+                painter.save()
+                painter.setClipRect(rect, Qt.ClipOperation.IntersectClip)
             if isinstance(picture, SvgPicture):
-                picture.render(painter, rect)          # sharp at any size
+                picture.render(painter, target)        # sharp at any size
             else:
-                painter.drawImage(rect, picture)
+                painter.drawImage(target, picture)
+            if clipped:
+                painter.restore()
             return
         # not loaded, or not loadable: a quiet placeholder with the alt text
         painter.setPen(QPen(QColor(160, 160, 160), 1))
@@ -351,6 +359,33 @@ def _draw(painter, item, visible: QRectF, images) -> None:
             painter.drawText(rect.adjusted(4, 2, -4, -2),
                              Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
                              | Qt.TextFlag.TextWordWrap, alt)
+
+
+def _fitted(rect: QRectF, picture, fit) -> QRectF:
+    """Where a picture is drawn in its box, by object-fit: stretched to it
+    (fill), whole within it (contain), covering it and cropped (cover), at its
+    own size (none), or the smaller of none and contain (scale-down); placed
+    by object-position. Every picture had been stretched, sites' photos warped."""
+    if fit is None:
+        return rect
+    kind, at_x, at_y = fit
+    if isinstance(picture, SvgPicture):
+        own_w, own_h = picture.width(), picture.height()
+    else:
+        own_w, own_h = float(picture.width()), float(picture.height())
+    if own_w <= 0 or own_h <= 0 or rect.width() <= 0 or rect.height() <= 0:
+        return rect
+    contain = min(rect.width() / own_w, rect.height() / own_h)
+    if kind == "contain":
+        scale = contain
+    elif kind == "cover":
+        scale = max(rect.width() / own_w, rect.height() / own_h)
+    elif kind == "none":
+        scale = 1.0
+    else:                                          # scale-down
+        scale = min(1.0, contain)
+    w, h = own_w * scale, own_h * scale
+    return QRectF(rect.x() + (rect.width() - w) * at_x, rect.y() + (rect.height() - h) * at_y, w, h)
 
 
 # ------------------------------------------------------------------ gradients

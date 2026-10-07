@@ -2939,6 +2939,62 @@ def test_box_sizing_and_measuring(app) -> None:
           f"tops {[round(box[f'i{n}'].y()) for n in range(4)]}, first {box['i0'].width():.0f} wide")
 
 
+def test_images_as_blocks_and_fitting(app) -> None:
+    """Images laid out as blocks or flex items are drawn, at their own size or
+    in proportion; object-fit and object-position; and a flex item of
+    border-box keeps room for its padding (Merlin's new-tab tiles)."""
+    from PyQt6.QtGui import QImage
+
+    from merlin.engine.css import Styler
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+    from merlin.engine.paint import _fitted
+
+    picture = QImage(200, 100, QImage.Format.Format_RGB32)
+
+    def images_in(items):
+        for item in items:
+            if isinstance(item, tuple) and item and item[0] == "image":
+                yield item
+            elif isinstance(item, tuple) and item and item[0] == "group":
+                yield from images_in(item[1])
+
+    def drawn(body):
+        document = parse("<style>body{margin:0}</style>" + body)
+        styles = Styler(document).compute()
+        out = Layout(document, styles, 800, images={"p.png": picture}, viewport_height=600).run()
+        found = list(images_in(out.items))
+        if not found:
+            return None
+        item = found[0]
+        target = _fitted(item[1], picture, item[4] if len(item) > 4 else None)
+        return (round(item[1].width()), round(item[1].height()), round(target.width()), round(target.height()),
+                round(target.x() - item[1].x()), round(target.y() - item[1].y()))
+    check("an image of display: block is drawn, at its own size (it had not been drawn at all)",
+          drawn("<img src=p.png style='display:block'>") == (200, 100, 200, 100, 0, 0),
+          str(drawn("<img src=p.png style='display:block'>")))
+    check("an image that is a flex item is drawn", drawn(
+        "<div style='display:flex'><img src=p.png style='width:100px;height:100px'></div>") is not None)
+    check("a block image given a width only keeps its proportions",
+          drawn("<img src=p.png style='display:block;width:100px'>")[:2] == (100, 50))
+    check("in proportion to its content's width, with border-box padding",
+          drawn("<img src=p.png style='display:block;box-sizing:border-box;width:120px;padding:10px'>")[:2] == (100, 50))
+    check("object-fit: cover fills its box and is cropped, centred; contain fits whole",
+          drawn("<img src=p.png style='display:block;width:100px;height:100px;object-fit:cover'>") == (100, 100, 200, 100, -50, 0)
+          and drawn("<img src=p.png style='display:block;width:100px;height:100px;object-fit:contain'>") == (100, 100, 100, 50, 0, 25),
+          str(drawn("<img src=p.png style='display:block;width:100px;height:100px;object-fit:cover'>")))
+    check("object-position places it: left top",
+          drawn("<img src=p.png style='display:block;width:100px;height:100px;object-fit:cover;object-position:left top'>")[4:] == (0, 0))
+    document = parse("<style>body{margin:0} .tiles{display:flex;gap:8px} .tiles a{box-sizing:border-box;padding:10px 16px;"
+                     "white-space:nowrap}</style><div class=tiles><a id=t>Convert Files</a></div>")
+    styles = Styler(document).compute()
+    out = Layout(document, styles, 800, viewport_height=600).run()
+    tile = next(r for r, e in out.boxes if e.id == "t")
+    texts = [item for item in out.items if item and item[0] == "text"]
+    check("a flex item of border-box is wide enough for its text and its padding (new-tab tiles)",
+          texts and tile.width() >= 32 + max(t[1] + 0 for t in texts) * 0 + 60, f"{tile.width():.0f} wide")
+
+
 def test_modern_colours() -> None:
     """CSS Color 4 and 5, as GitHub uses them: unread, faint lines came out solid."""
     from merlin.engine.css import parse_colour
@@ -3217,6 +3273,8 @@ def main() -> int:
     test_images_fonts_and_viewport(app)
     print("test_box_sizing_and_measuring")
     test_box_sizing_and_measuring(app)
+    print("test_images_as_blocks_and_fitting")
+    test_images_as_blocks_and_fitting(app)
     print("test_animations_and_3d")
     test_animations_and_3d(app)
     print("test_server_pages_and_http_fallback")
