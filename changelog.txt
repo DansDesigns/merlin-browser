@@ -5,6 +5,51 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.26
+  Updating works again on Windows. Going from 1.8.24 to 1.8.25 stopped with
+  "Could not replace the files: [WinError 5] Access is denied": Ponder's
+  server had been started from inside Merlin's own folder, and Windows will
+  not rename a folder a running program is working in. Ponder now works from
+  Merlin's cache folder; the updater stops Ponder before it begins, waits out
+  a lock a virus scanner holds for a moment, and if the folder still cannot
+  be moved it writes the new files over the old ones instead of giving up.
+  (The updater in 1.8.24 itself cannot be changed from here: see below.)
+  Behavioural biometrics, in Settings > Shields:
+  - Block typing and mouse tracking (on): the companies that recognise people
+    by how they type and move the mouse (BioCatch, TypingDNA, BehavioSec,
+    NuData, NeuroID, ThreatMetrix, iovation and others) and the session-replay
+    services that record every keystroke and click of a visit (FullStory,
+    Microsoft Clarity, Hotjar, LogRocket, Mouseflow, Smartlook, Contentsquare,
+    Quantum Metric and others) are blocked, in both engines. A few are fraud
+    checks on banks' and shops' sign-in pages: if one of those will not go
+    on, shields off for that site lets it run.
+  - Turn off motion and orientation sensors (on): pages are told there are no
+    motion, orientation or light sensors and no battery to read; how a laptop
+    or tablet is held identifies its owner.
+  - Blur timing (off unless turned on): pages' clocks (performance.now, Date,
+    events' timeStamp, animation frames, workers' clocks) tell time in steps
+    of 100 milliseconds, as Tor Browser's do, so the rhythm of typing cannot
+    be measured; in Merlin Engine what is typed and clicked also reaches the
+    page a little late, by a different amount each time, never out of order.
+    Animations a page draws with its scripts may look less smooth, which is
+    why it is a choice.
+  Private windows have the graphics-card protection too (they had been
+  without it), and these protections change for pages loaded from then on
+  when switched, rather than at the next start.
+  Web Workers in Merlin Engine:
+  - workers can start workers of their own (an answer from the inner one had
+    gone astray, so it never arrived)
+  - XMLHttpRequest inside a worker, including one that waits for its answer,
+    as Emscripten's file loading does
+  - SharedWorker: one thread for each address and name, a port for each page
+    or frame that opens it
+  - the Cache API (caches.open, put, match...), kept for as long as the tab is
+    open
+  - no navigator.serviceWorker: Merlin does not run service workers, and a
+    site that finds none goes on without one, where one that never starts
+    would have kept it waiting. OffscreenCanvas waits for <canvas> drawing,
+    which Merlin Engine does not have yet.
+
 1.8.25
   No Rust anywhere in Merlin. Pages' JavaScript had run in Deno, and Deno is
   written in Rust (Merlin's own Rust audit finds it at once): it runs in

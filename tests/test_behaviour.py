@@ -2233,6 +2233,152 @@ def wait(app, seconds: float) -> None:
         time.sleep(0.01)
 
 
+def test_update_with_the_folder_in_use(app) -> None:
+    """Updating when Windows will not let the merlin folder be renamed (1.8.24
+    to 1.8.25 failed: "[WinError 5] Access is denied ... merlin.previous"):
+    the new files are written over the old ones instead; and Ponder, whose
+    working folder inside merlin/ponder had held the lock, works elsewhere."""
+    import time as _time
+
+    from merlin import ponderhost, updater
+
+    def tree(files):
+        root = tempfile.mkdtemp()
+        for name, data in files.items():
+            path = os.path.join(root, *name.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as handle:
+                handle.write(data)
+        return root
+
+    def read(root, name):
+        path = os.path.join(root, *name.split("/"))
+        return open(path, "rb").read() if os.path.isfile(path) else None
+
+    target = tempfile.mkdtemp()
+    live = os.path.join(target, "merlin")
+    os.rename(tree({"app.py": b"old", "ponder/static/mine.jpg": b"mine"}), live)
+    package = tree({"app.py": b"new", "biometrics.py": b"new", "ponder/static/logo.png": b"logo"})
+    real_rename, real_sleep = os.rename, _time.sleep
+    said = []
+
+    def refused(source, destination):
+        raise PermissionError(5, "Access is denied", source)
+
+    os.rename = refused
+    _time.sleep = lambda seconds: None
+    try:
+        updater._swap_in(package, live, os.path.join(target, "merlin.previous"), said.append)
+    finally:
+        os.rename, _time.sleep = real_rename, real_sleep
+    check("a merlin folder Windows will not rename is updated in place",
+          read(live, "app.py") == b"new" and read(live, "biometrics.py") == b"new"
+          and read(live, "ponder/static/mine.jpg") == b"mine" and said)
+
+    target = tempfile.mkdtemp()
+    live = os.path.join(target, "merlin")
+    os.rename(tree({"app.py": b"old", "gone.py": b"old", "ponder/static/mine.jpg": b"mine"}), live)
+    updater._swap_in(package, live, os.path.join(target, "merlin.previous"))
+    check("otherwise the old folder is set aside and replaced, Ponder's pictures kept",
+          read(live, "app.py") == b"new" and read(live, "gone.py") is None
+          and read(live, "ponder/static/mine.jpg") == b"mine"
+          and not os.path.exists(os.path.join(target, "merlin.previous")))
+
+    package_dir = os.path.dirname(os.path.dirname(os.path.abspath(ponderhost.__file__)))
+    neutral = os.path.abspath(ponderhost._neutral_folder())
+    serve = open(os.path.join(ponderhost.ponder_dir(), "serve.py"), encoding="utf-8").read()
+    check("Ponder's server works in a folder outside Merlin's files, and does not move into them",
+          not neutral.startswith(os.path.join(package_dir, "merlin"))
+          and "os.chdir(" not in serve, neutral)
+
+
+def test_behavioural_biometrics(app) -> None:
+    """Behavioural-biometrics protections: the companies that record typing
+    and mouse movement blocked (unless turned off); motion sensors and the
+    battery gone from pages; and Blur timing, when on, pages' clocks in 100 ms
+    steps."""
+    from merlin import biometrics
+
+    blocking = adblock.FilterEngine()
+    blocking.load_text(adblock.builtin_rules({"block_behavioural_tracking": True}))
+    allowing = adblock.FilterEngine()
+    allowing.load_text(adblock.builtin_rules({"block_behavioural_tracking": False}))
+    vendors = ["https://client.biocatch.com/x.js", "https://edge.fullstory.com/s/fs.js",
+               "https://www.clarity.ms/tag/abc", "https://h.online-metrix.net/fp/tags.js",
+               "https://api.typingdna.com/typingdna.js"]
+    check("typing and mouse tracking companies are blocked",
+          all(blocking.should_block(u, "script", True, "shop.example") for u in vendors))
+    check("and not when the setting is off",
+          not any(allowing.should_block(u, "script", True, "shop.example") for u in vendors[:1] + vendors[2:]))
+    check("the companies' own sites still open", not blocking.should_block(
+        "https://www.biocatch.com/", "document", False, "www.biocatch.com"))
+    check("on by default: the vendors blocked and sensors hidden, timing left alone",
+          cfg.DEFAULTS["block_behavioural_tracking"] is True and cfg.DEFAULTS["block_motion_sensors"] is True
+          and cfg.DEFAULTS["blur_timing"] is False)
+
+    # from 127.0.0.1, a secure context, where Chromium has the sensors at all
+    import http.server
+    import threading as _threading
+
+    body = ("<title>probe</title><script>"
+            "document.title = [typeof DeviceMotionEvent, typeof DeviceOrientationEvent, 'ondevicemotion' in window,"
+            " typeof Accelerometer, typeof Gyroscope, typeof navigator.getBattery,"
+            " [performance.now(), Date.now(), new Date().getTime()].every(t => t % 100 === 0),"
+            " new Date(2020, 0, 1).getFullYear(), new Date() instanceof Date, typeof Date.UTC].join(' ');"
+            "</script>").encode()
+
+    class Probe(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Probe)
+    _threading.Thread(target=server.serve_forever, daemon=True).start()
+    probe = f"http://127.0.0.1:{server.server_address[1]}/"
+
+    def probed(**preset):
+        window, settings, _ = make_window(app, "biometrics-" + str(len(RESULTS)), **preset)
+        from merlin import biometrics as _b
+
+        for key in ("gpu_protection", "block_motion_sensors", "blur_timing"):
+            settings.set(key, preset.get(key, cfg.DEFAULTS[key]), save=False)
+        _b.refresh_page_guards(window.profile, settings)
+        view = window.new_tab(probe)
+        deadline = time.time() + 30
+        while time.time() < deadline and "2020" not in (view.title() or ""):
+            app.processEvents()
+            time.sleep(0.02)
+        title = view.title()
+        window.close()
+        # the window and its pages gone before its profile, as Chromium wants
+        from PyQt6.QtCore import QCoreApplication, QEvent
+
+        window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+        wait(app, 0.3)
+        return title
+
+    hidden = probed()
+    check("motion and orientation sensors and the battery are gone from pages",
+          hidden.startswith("undefined undefined false undefined undefined undefined"), hidden)
+    check("with Blur timing off, pages' clocks are as they were",
+          hidden.endswith("2020 true function") and " false 2020" in hidden, hidden)
+    blurred = probed(blur_timing=True)
+    check("with Blur timing on, pages' clocks tell time in 100 ms steps, and Date still works",
+          blurred.endswith("true 2020 true function"), blurred)
+    shown = probed(block_motion_sensors=False)
+    check("with the sensors setting off, pages see them as before",
+          shown.startswith("function function true function function function"), shown)
+    check("the timing script is Tor Browser's precision", "var STEP = 100;" in biometrics.timing_script())
+    server.shutdown()
+
+
 def main() -> int:
     app = QApplication([sys.argv[0]])
     for test in (test_session, test_placeholders, test_tab_churn,
@@ -2260,7 +2406,8 @@ def main() -> int:
                  test_loading_bar_and_save_names, test_javascript_permission,
                  test_download_popup, test_hand_over_needs_an_answer, test_linux_uninstaller,
                  test_corner_layer, test_ponder_built_in,
-                 test_node_runtime_fetched_without_rust):
+                 test_node_runtime_fetched_without_rust, test_update_with_the_folder_in_use,
+                 test_behavioural_biometrics):
         print(f"\n{test.__name__}")
         try:
             test(app)

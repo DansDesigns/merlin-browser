@@ -1182,7 +1182,30 @@ class SettingsDialog(QDialog):
             "changes, so it identifies this machine across unrelated sites. "
             "Merlin reports one generic value, empties the WebGPU "
             "descriptors, and varies the extension list per site. Applies to "
-            "new windows."))
+            "pages loaded from now on."))
+        layout.addWidget(self._check(
+            "Block typing and mouse tracking (behavioural biometrics)",
+            "block_behavioural_tracking",
+            "Some companies recognise people by how they type and move the "
+            "mouse: how long each key is held, the gaps between keys, the path "
+            "of the pointer. Session-replay services record every keystroke "
+            "and click of a visit. Merlin blocks the companies that do this. "
+            "A few of them are fraud checks on banks' and shops' sign-in "
+            "pages: if one of those will not go on, turn shields off for that "
+            "site."))
+        layout.addWidget(self._check(
+            "Turn off motion and orientation sensors for websites",
+            "block_motion_sensors",
+            "How a laptop or tablet is held and moved identifies its owner. "
+            "Pages are told there are no motion, orientation or light sensors "
+            "and no battery to read. Applies to pages loaded from now on."))
+        layout.addWidget(self._check(
+            "Blur timing (as Tor Browser does)", "blur_timing",
+            "Pages' clocks tell time in steps of 100 milliseconds, and in "
+            "Merlin Engine what you type reaches the page a little late, so "
+            "the rhythm of your typing is lost. Animations drawn by a page's "
+            "scripts may look less smooth, so it is off unless you turn it on. "
+            "Applies to pages loaded from now on."))
         layout.addWidget(self._check("Upgrade navigations to HTTPS", "https_upgrade"))
         layout.addWidget(self._check("Prevent WebRTC local IP leaks",
                                      "block_webrtc_leak"))

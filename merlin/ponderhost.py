@@ -97,6 +97,19 @@ def _log_path() -> str:
     return os.path.join(folder, "ponder-log.txt")
 
 
+def _neutral_folder() -> str:
+    """Where Ponder's process works: anywhere but inside Merlin's own files.
+    On Windows a process's working folder, and every folder above it, cannot
+    be renamed while it runs, and the updater renames the merlin folder."""
+    try:
+        from . import settings as cfg
+
+        os.makedirs(cfg.CACHE_DIR, exist_ok=True)
+        return cfg.CACHE_DIR
+    except Exception:                                      # noqa: BLE001
+        return os.path.expanduser("~")
+
+
 def _note(text: str) -> None:
     try:
         from . import crashlog
@@ -222,7 +235,7 @@ def _bring_up() -> None:
         log.flush()
         process = subprocess.Popen([python, serve, "--port", str(port), "--with-parent"],
                                    stdin=subprocess.PIPE, stdout=log, stderr=log,
-                                   cwd=ponder_dir(), **_quiet())
+                                   cwd=_neutral_folder(), **_quiet())
         log.close()
     except Exception as exc:                               # noqa: BLE001
         _set("failed", f"Ponder would not start: {exc}")

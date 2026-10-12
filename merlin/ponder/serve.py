@@ -39,9 +39,11 @@ def main(argv=None) -> int:
     parser.add_argument("--with-parent", action="store_true")
     args = parser.parse_args(argv)
 
-    # Ponder's modules are top-level ones (config, main...): found here first
+    # Ponder's modules are top-level ones (config, main...): found here first.
+    # Its working folder is not this one (Merlin starts it elsewhere): on
+    # Windows a folder a process works in cannot be renamed, and Merlin's
+    # updater, renaming the merlin folder, failed with "Access is denied"
     sys.path.insert(0, HERE)
-    os.chdir(HERE)
     if args.with_parent:
         _end_with_parent()
 

@@ -2507,6 +2507,11 @@ class BrowserWindow(QMainWindow):
             self._update_shield_badge()
         elif key == "block_third_party_cookies":
             self._apply_cookie_filter()
+        elif key in ("gpu_protection", "block_motion_sensors", "blur_timing"):
+            # for pages loaded from now on, in this window's profile
+            from . import biometrics
+
+            biometrics.refresh_page_guards(self.profile, self.settings)
 
     # ------------------------------------------------------------- ui state
     def _update_url_bar(self, url: QUrl, force: bool = False) -> None:
@@ -2959,6 +2964,11 @@ class BrowserWindow(QMainWindow):
     def new_private_window(self) -> "BrowserWindow":
         private_profile = QWebEngineProfile(self)          # off the record
         private_profile.setUrlRequestInterceptor(self.interceptor)
+        # the same page protections as other windows (a private window had
+        # been without the graphics-card guard)
+        from . import biometrics
+
+        biometrics.install_page_guards(private_profile, self.settings)
         window = BrowserWindow(
             self.app, self.settings, private_profile, self.filter_engine,
             self.filter_loader, self.interceptor, self.history, self.bookmarks,

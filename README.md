@@ -1,5 +1,5 @@
 # Merlin Browser
-![version](https://img.shields.io/badge/version-1.8.25-6f8ff0)
+![version](https://img.shields.io/badge/version-1.8.26-6f8ff0)
 
 ### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6 Requires a reinstall as there has been a fundamental change to the folder structure. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
 
@@ -37,6 +37,11 @@ Chromium through Qt WebEngine.
 - GPU fingerprinting protection: one generic WebGL vendor and renderer for
   every user, emptied WebGPU adapter descriptors, and a WebGL extension list
   that varies per site so a hash of it cannot follow you around
+- Behavioural-biometrics protection: the companies that recognise people by
+  how they type and move the mouse, and session-replay services, are blocked;
+  motion, orientation and light sensors and the battery are hidden from pages;
+  and a Blur timing switch coarsens pages' clocks to 100 ms, as Tor Browser
+  does, so the rhythm of typing cannot be measured
 
 **Interface**
 
@@ -168,7 +173,8 @@ smb:// addresses, which Chromium cannot, and file:// folders, and saves
 downloads. It runs JavaScript in V8 (by way of Node.js), each tab's scripts in
 a process of their own under Node's permission model, with nothing of Node left
 for the page and everything it fetches (modules too) fetched by Merlin, through
-the content blocker, with Web Workers as threads of that process; JavaScript is
+the content blocker, with Web Workers as threads of that process (workers of
+their own, SharedWorkers, XMLHttpRequest and the Cache API too); JavaScript is
 on by default, with a switch in Settings.
 
 Frames (`<iframe>`) are pages of their own, each with its scripts in a process
@@ -317,6 +323,7 @@ merlin/
   winexe.py      writing the icon into a Windows executable
   corners.py     the antialiased rounded corner overlay
   fingerprint.py WebGL and WebGPU de-identification
+  biometrics.py  sensors hidden and timing blurred, for behavioural biometrics
   passwords.py   saved logins, encrypted by the operating system
   importer.py    reading other browsers' bookmarks and history
   importui.py    the import dialog

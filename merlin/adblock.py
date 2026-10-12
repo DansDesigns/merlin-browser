@@ -116,6 +116,71 @@ BUILTIN_RULES = """
 ##iframe[src*="doubleclick.net"]
 """.strip()
 
+# Behavioural biometrics and session replay (Settings > Shields > "Block
+# typing and mouse tracking", on unless turned off). These record how a
+# person types, moves the mouse and scrolls: the timing of each key, the
+# path of the pointer, every click, and in session replay the whole visit, to
+# be played back. A typing rhythm identifies a person as surely as a
+# fingerprint does, and it goes with them from machine to machine.
+#
+# Some are fraud checks on banks' and shops' sign-in and checkout pages. If one
+# of those refuses to go on, shields off for that site (the shield in the
+# address bar) lets it run there.
+BEHAVIOURAL_RULES = """
+! behavioural biometrics: typing rhythm, pointer movement, how a device is held
+||biocatch.com^$third-party
+||typingdna.com^$third-party
+||behaviosec.com^$third-party
+||nudatasecurity.com^$third-party
+||neuro-id.com^$third-party
+||neuroid.cloud^$third-party
+||callsign.com^$third-party
+||securedtouch.com^$third-party
+||sardine.ai^$third-party
+||forter.com^$third-party
+||online-metrix.net^$third-party
+||h-online-metrix.net^$third-party
+||iovation.com^$third-party
+||iesnare.com^$third-party
+||plurilock.com^$third-party
+||zighra.com^$third-party
+! session replay and heatmaps: every keystroke, click and movement, recorded
+||hotjar.com^$third-party
+||hotjar.io^$third-party
+||fullstory.com^$third-party
+||mouseflow.com^$third-party
+||smartlook.com^$third-party
+||smartlook.cloud^$third-party
+||clarity.ms^$third-party
+||logrocket.com^$third-party
+||logrocket.io^$third-party
+||lr-ingest.io^$third-party
+||lr-ingest.com^$third-party
+||quantummetric.com^$third-party
+||contentsquare.net^$third-party
+||contentsquare.com^$third-party
+||clicktale.net^$third-party
+||glassboxdigital.io^$third-party
+||inspectlet.com^$third-party
+||luckyorange.com^$third-party
+||luckyorange.net^$third-party
+||sessioncam.com^$third-party
+||sessionstack.com^$third-party
+||crazyegg.com^$third-party
+||decibelinsight.net^$third-party
+||heapanalytics.com^$third-party
+||mc.yandex.ru^$third-party
+""".strip()
+
+
+def builtin_rules(settings=None) -> str:
+    """The rules Merlin carries itself: BUILTIN_RULES, and the behavioural
+    tracking ones unless Settings > Shields has them off."""
+    rules = BUILTIN_RULES
+    if settings is None or settings.get("block_behavioural_tracking", True):
+        rules += "\n" + BEHAVIOURAL_RULES
+    return rules
+
 
 def _anchor_regex(pattern: str) -> str:
     """Translate an Adblock pattern into a Python regex string."""
@@ -530,7 +595,7 @@ class FilterLoader(QObject):
     def build_engine(self) -> "FilterEngine":
         """Parse every cached list into a fresh engine. Safe off-thread."""
         engine = FilterEngine()
-        engine.load_text(BUILTIN_RULES)
+        engine.load_text(builtin_rules(self.settings))
         for url in self.settings.get("filter_lists", []):
             path = self._cache_path(url)
             if os.path.exists(path):

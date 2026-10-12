@@ -4159,6 +4159,187 @@ def test_node_scripts(app) -> None:
         server.shutdown()
 
 
+def test_worker_features(app) -> None:
+    """What workers have in browsers: a worker starting workers of its own,
+    XMLHttpRequest in a worker (waiting for its answer too, as Emscripten's
+    file loading does), SharedWorker (one thread, a port for each), the Cache
+    API, and no navigator.serviceWorker (a half one is worse than none)."""
+    from merlin.engine import MerlinView
+    from merlin.engine.script import LocalStorage
+
+    runtime = _node_for_tests()
+    if not runtime:
+        check("Node.js is here for pages' scripts", False, "set MERLIN_NODE")
+        return
+    folder = tempfile.mkdtemp(prefix="merlin-workers-")
+    files = {
+        "index.html": "<!DOCTYPE html><html><body><p id=nested>waiting</p><p id=xhr>waiting</p><p id=shared>waiting</p>"
+                      "<p id=cache>waiting</p><p id=sw>waiting</p><p id=pagexhr>waiting</p><script>"
+                      "const out = (id, t) => document.getElementById(id).textContent = t;"
+                      "const w = new Worker('/outer.js'); w.onmessage = (e) => out(e.data[0], e.data[1]); w.postMessage('go');"
+                      "const s1 = new SharedWorker('/shared.js', 'one'), s2 = new SharedWorker('/shared.js', 'one'); let got = [];"
+                      "for (const s of [s1, s2]) { s.port.onmessage = (e) => { got.push(e.data); out('shared', got.sort().join(',')); };"
+                      " s.port.postMessage('hi'); }"
+                      "caches.open('v1').then(async (c) => { await c.put('/n.js', new Response('cached!'));"
+                      " out('cache', await (await caches.match('/n.js')).text()); });"
+                      "out('sw', 'serviceWorker ' + ('serviceWorker' in navigator));"
+                      "const x = new XMLHttpRequest(); x.open('GET', '/n.js');"
+                      " x.onload = () => out('pagexhr', 'page xhr ' + x.status + ' ' + x.responseText.trim()); x.send();"
+                      "</script></body></html>",
+        "outer.js": "onmessage = () => {"
+                    " const inner = new Worker('/inner.js'); inner.onmessage = (e) => postMessage(['nested', 'nested says ' + e.data]);"
+                    " inner.postMessage(5);"
+                    " const x = new XMLHttpRequest(); x.open('GET', '/n.js', false); x.send();"
+                    " const y = new XMLHttpRequest(); y.open('GET', '/lib.js');"
+                    " y.onload = () => postMessage(['xhr', 'sync ' + x.status + ' ' + x.responseText.trim() + ' | async ' + y.responseText.trim()]);"
+                    " y.send(); };",
+        "inner.js": "onmessage = (e) => postMessage(e.data * 10);",
+        "shared.js": "let count = 0; onconnect = (e) => { const port = e.ports[0]; const mine = ++count;"
+                     " port.onmessage = (m) => port.postMessage(m.data + ' from connection ' + mine); };",
+        "n.js": "export const n = 42;",
+        "lib.js": "export default 'LIB';",
+    }
+    for name, text in files.items():
+        open(os.path.join(folder, name), "w").write(text)
+
+    class Pages(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Pages)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    class Host:
+        settings = {}
+
+        def javascript_allowed(self, site):
+            return True
+
+        def node_for_scripts(self):
+            return runtime
+
+        def local_storage(self):
+            return LocalStorage(None)
+
+    def text_of(eid):
+        found = next((x for x in view._document.root.elements() if x.id == eid), None) if view._document else None
+        return " ".join(found.text().split()) if found is not None else ""
+
+    def until(test, seconds):
+        end = time.time() + seconds
+        while time.time() < end and not test():
+            app.processEvents()
+            time.sleep(0.02)
+        return test()
+
+    view = MerlinView()
+    view._host = Host()
+    view.resize(900, 700)
+    view.show()
+    try:
+        view.setUrl(QUrl(f"http://127.0.0.1:{server.server_address[1]}/index.html"))
+        until(lambda: all(text_of(i) != "waiting" for i in ("nested", "xhr", "shared", "cache", "pagexhr"))
+              and "," in text_of("shared"), 20)
+        check("a worker starts a worker of its own, and hears from it", text_of("nested") == "nested says 50",
+              text_of("nested"))
+        check("XMLHttpRequest in a worker, waiting for its answer and not",
+              text_of("xhr") == "sync 200 export const n = 42; | async export default 'LIB';", text_of("xhr"))
+        check("two SharedWorkers of one address and name are one thread, a port each",
+              text_of("shared") == "hi from connection 1,hi from connection 2", text_of("shared"))
+        check("the Cache API keeps a response and gives it back", text_of("cache") == "cached!", text_of("cache"))
+        check("no navigator.serviceWorker: sites go without, rather than wait on one that never runs",
+              text_of("sw") == "serviceWorker false", text_of("sw"))
+        check("the page's own XMLHttpRequest still works", text_of("pagexhr") == "page xhr 200 export const n = 42;",
+              text_of("pagexhr"))
+    finally:
+        view.shutdown()
+        view.deleteLater()
+        server.shutdown()
+
+
+def test_blur_timing(app) -> None:
+    """Settings > Shields > Blur timing in Merlin Engine: the page's clocks,
+    and its workers', in 100 ms steps; what is typed still arrives, in order."""
+    from PyQt6.QtTest import QTest
+
+    from merlin.engine import MerlinView
+    from merlin.engine.script import LocalStorage
+
+    runtime = _node_for_tests()
+    if not runtime:
+        check("Node.js is here for pages' scripts", False, "set MERLIN_NODE")
+        return
+    page = ("<!DOCTYPE html><html><body><p id=clocks>waiting</p><p id=worker>waiting</p><p id=typed></p>"
+            "<input id=field><script>"
+            "const out = (id, t) => document.getElementById(id).textContent = t;"
+            "const steps = (list) => list.every((t) => t % 100 === 0);"
+            "out('clocks', [steps([performance.now(), Date.now(), new Date().getTime(), new Event('x').timeStamp]),"
+            " new Date(2020, 0, 1).getFullYear(), new Date() instanceof Date].join(' '));"
+            "const w = new Worker(URL.createObjectURL(new Blob(['postMessage([performance.now(), Date.now()].every((t) => t %25 100 === 0))'])));"
+            "w.onmessage = (e) => out('worker', 'worker ' + e.data);"
+            "document.getElementById('field').addEventListener('input', (e) => out('typed', e.target.value));"
+            "</script></body></html>").replace("%25", "%")
+
+    class Host:
+        settings = {"blur_timing": True}
+
+        def javascript_allowed(self, site):
+            return True
+
+        def node_for_scripts(self):
+            return runtime
+
+        def local_storage(self):
+            return LocalStorage(None)
+
+    def text_of(eid):
+        found = next((x for x in view._document.root.elements() if x.id == eid), None) if view._document else None
+        return " ".join(found.text().split()) if found is not None else ""
+
+    def until(test, seconds):
+        end = time.time() + seconds
+        while time.time() < end and not test():
+            app.processEvents()
+            time.sleep(0.02)
+        return test()
+
+    folder = tempfile.mkdtemp(prefix="merlin-blur-")
+    open(os.path.join(folder, "index.html"), "w").write(page)
+
+    class Pages(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Pages)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    view = MerlinView()
+    view._host = Host()
+    view.resize(900, 700)
+    view.show()
+    try:
+        view.setUrl(QUrl(f"http://127.0.0.1:{server.server_address[1]}/index.html"))
+        until(lambda: text_of("clocks") not in ("", "waiting") and text_of("worker") not in ("", "waiting"), 15)
+        check("Blur timing: the page's clocks (and an event's timeStamp) in 100 ms steps, Date still a Date",
+              text_of("clocks") == "true 2020 true", text_of("clocks"))
+        check("Blur timing: a worker's clocks too", text_of("worker") == "worker true", text_of("worker"))
+        field = next((w for e, w in view._widgets.items() if e.attrs.get("id") == "field"), None)
+        if field is not None:
+            field.setFocus()
+            QTest.keyClicks(field, "merlin")
+        check("Blur timing: what is typed reaches the page, late but in order",
+              until(lambda: text_of("typed") == "merlin", 8), text_of("typed"))
+    finally:
+        view.shutdown()
+        view.deleteLater()
+        server.shutdown()
+
+
 def main() -> int:
     app = QApplication(sys.argv[:1])
     for test in (test_no_chromium, test_without_html_parser, test_parsing, test_cascade, test_layout,
@@ -4242,6 +4423,10 @@ def main() -> int:
     test_layout_for_dialogs_and_settings(app)
     print("test_node_scripts")
     test_node_scripts(app)
+    print("test_worker_features")
+    test_worker_features(app)
+    print("test_blur_timing")
+    test_blur_timing(app)
     print("test_view")
     test_view(app)
     if FAILED:

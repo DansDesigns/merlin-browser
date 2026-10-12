@@ -1817,8 +1817,15 @@ class MerlinView(QWidget, FramesMixin):
             "brands": _scripts_brands(), "importMap": host.mapping or {}, **self._frame_script_state(),
             "cookie": cookie_string(self._cookies(), self._url.toString()),
             "storage": storage.load(self._origin()),
+            "blurTiming": self._blur_timing(),
             "scheme": "dark" if getattr(self._host, "dark", False) else "light"}})
         self._scripts_started_for_frames()
+
+    def _blur_timing(self) -> bool:
+        """Settings > Shields > Blur timing: the page's clocks coarse, and
+        what a person does reaching it a little late (js/host.js)."""
+        settings = getattr(self._host, "settings", None)
+        return bool(settings is not None and settings.get("blur_timing", False))
 
     def _origin(self) -> str:
         return f"{self._url.scheme()}://{self._url.authority()}"

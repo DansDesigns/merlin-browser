@@ -11,8 +11,7 @@ import { parseHTML } from "./linkedom.bundle.js";
 import vm from "node:vm";
 import fs from "node:fs";
 import { registerHooks } from "node:module";
-import { Worker as NodeWorker } from "node:worker_threads";
-import { resolveObjectURL } from "node:buffer";
+import { makeWorkerClasses, makeXHR, makeCacheStorage, coarsenClocks } from "./workers.js";
 
 // Node's own process, kept here before the page's globals are made: the page
 // never sees it (see lockDown)
@@ -180,6 +179,16 @@ async function merlinFetch(input, init = {}) {
     { status: answer.status, statusText: answer.statusText || "", headers: answer.headers || {} });
   Object.defineProperty(response, "url", { value: answer.url || url });
   return response;
+}
+
+// A fetch for the page's workers and XMLHttpRequest: the answer as it came,
+// its body as bytes
+async function pageFetch(request) {
+  const body = request.body ? toBase64(request.body instanceof Uint8Array ? request.body : new Uint8Array(request.body)) : null;
+  const reply = await ask({ type: "fetch", url: request.url, method: request.method || "GET",
+                            headers: request.headers || {}, body, credentials: "same-origin" });
+  if (reply.error) return { error: reply.error };
+  return { status: reply.status, statusText: reply.statusText, headers: reply.headers, url: reply.url, body: fromBase64(reply.body) };
 }
 
 // ------------------------------------------------------------------ the page
@@ -411,7 +420,9 @@ function install(html) {
     userAgentData: chromeHints(state.userAgent, state.brands), clipboard: { writeText: async () => {}, readText: async () => "" },
     sendBeacon(url, data) { merlinFetch(url, { method: "POST", body: data ?? null }).catch(() => {}); return true; },
     permissions: { query: async () => ({ state: "prompt", addEventListener() {} }) },
-    mediaDevices: undefined, serviceWorker: undefined, geolocation: undefined,
+    mediaDevices: undefined, geolocation: undefined,
+    // no serviceWorker at all: a site then does without, as in a browser with
+    // them off; one there, but never taking requests, left sites waiting
   };
   g.screen = { width: state.width, height: state.height, availWidth: state.width, availHeight: state.height,
                colorDepth: 24, pixelDepth: 24, orientation: { type: "landscape-primary", angle: 0, addEventListener() {} } };
@@ -524,8 +535,21 @@ function install(html) {
   g.getSelection = () => ({ rangeCount: 0, toString: () => "", removeAllRanges() {}, addRange() {} });
   g.WebSocket = class { constructor() { throw new Error("WebSocket is not available in Merlin Engine yet"); } };
   g.EventSource = class { constructor() { this.readyState = 2; } close() {} addEventListener() {} };
-  g.Worker = makeWorkerClass();
-  g.XMLHttpRequest = makeXHR();
+  // Web Workers, SharedWorkers, XMLHttpRequest and the Cache API (workers.js):
+  // what they fetch is fetched by Merlin, as everything the page fetches
+  const env = {
+    blurTiming: () => !!state.blurTiming,
+    base: () => state.url,
+    fetch: pageFetch,
+    userAgent: () => state.userAgent, language: () => state.language,
+    console: (level, text) => send({ type: "console", level, text }),
+    reportError: (e) => reportError(e),
+  };
+  const workers = makeWorkerClasses(env);
+  g.Worker = workers.Worker;
+  g.SharedWorker = workers.SharedWorker;
+  g.XMLHttpRequest = makeXHR(env);
+  g.caches = makeCacheStorage({ base: () => state.url, fetch: (input, init) => merlinFetch(input, init) });
   // a form field's type as browsers give it: linkedom gave null for an input
   // with none, and React, seeing no text field, ignored typing in it
   const INPUT_TYPES = new Set(["text", "search", "tel", "url", "email", "password", "date", "month",
@@ -1188,40 +1212,6 @@ function bindInlineHandlers(root) {
   }
 }
 
-function makeXHR() {
-  return class XMLHttpRequest {
-    static UNSENT = 0; static OPENED = 1; static HEADERS_RECEIVED = 2; static LOADING = 3; static DONE = 4;
-    constructor() { this.readyState = 0; this.status = 0; this.statusText = ""; this.response = null; this.responseText = "";
-      this.responseType = ""; this.responseURL = ""; this.withCredentials = false; this.timeout = 0; this._headers = {};
-      this._listeners = {}; this.upload = { addEventListener() {} }; this._responseHeaders = new NativeHeaders(); }
-    open(method, url) { this._method = method; this._url = url; this.readyState = 1; this._emit("readystatechange"); }
-    setRequestHeader(k, v) { this._headers[k] = v; }
-    getResponseHeader(k) { return this._responseHeaders.get(k); }
-    getAllResponseHeaders() { let text = ""; this._responseHeaders.forEach((v, k) => { text += `${k}: ${v}\r\n`; }); return text; }
-    overrideMimeType() {}
-    addEventListener(type, fn) { (this._listeners[type] ||= []).push(fn); }
-    removeEventListener(type, fn) { this._listeners[type] = (this._listeners[type] || []).filter(f => f !== fn); }
-    _emit(type) { const event = { type, target: this, currentTarget: this };
-      try { this["on" + type]?.(event); } catch (e) { reportError(e); }
-      for (const fn of this._listeners[type] || []) { try { fn.call(this, event); } catch (e) { reportError(e); } } }
-    abort() { this._aborted = true; }
-    async send(body = null) {
-      try {
-        const response = await merlinFetch(this._url, { method: this._method, headers: this._headers, body });
-        if (this._aborted) return;
-        this.status = response.status; this.statusText = response.statusText; this.responseURL = response.url;
-        this._responseHeaders = response.headers; this.readyState = 2; this._emit("readystatechange");
-        const buffer = await response.arrayBuffer();
-        const text = decoder.decode(buffer);
-        this.responseText = text;
-        this.response = this.responseType === "json" ? (() => { try { return JSON.parse(text); } catch (_) { return null; } })()
-          : this.responseType === "arraybuffer" ? buffer : text;
-        this.readyState = 4; this._emit("readystatechange"); this._emit("load"); this._emit("loadend");
-      } catch (e) { this.readyState = 4; this._emit("readystatechange"); this._emit("error"); this._emit("loadend"); }
-    }
-  };
-}
-
 // ------------------------------------------------------------------ scripts
 const JS_TYPES = ["", "text/javascript", "application/javascript", "module", "text/ecmascript", "application/ecmascript"];
 const ran = new WeakSet();
@@ -1687,113 +1677,6 @@ function installWebExtras(g) {
 }
 
 
-// ------------------------------------------------------------------ workers
-// A Web Worker: a Node worker thread of this process (worker-host.js), its
-// fetches made by Merlin through this host. Convert to it! does its work in
-// one: without workers its page was never built, and stayed white.
-const WORKER_HOST = new URL("./worker-host.js", import.meta.url);
-function makeWorkerClass() {
-  return class Worker extends NodeEventTarget {
-    constructor(scriptURL, options = {}) {
-      super();
-      const url = new URL(String(scriptURL), state.url).href;
-      this._queue = [];
-      this._thread = null;
-      this._ended = false;
-      for (const kind of ["message", "messageerror", "error"]) {
-        let handler = null;
-        Object.defineProperty(this, "on" + kind, { configurable: true, enumerable: true,
-          get: () => handler,
-          set: (fn) => {
-            if (handler) this.removeEventListener(kind, handler);
-            handler = typeof fn === "function" ? fn : null;
-            if (handler) this.addEventListener(kind, handler);
-          } });
-      }
-      const type = options && options.type === "module" ? "module" : "classic";
-      const name = options && options.name ? String(options.name) : "";
-      (async () => {
-        let source;
-        let base = url;
-        if (url.startsWith("blob:")) {
-          const blob = resolveObjectURL(url);
-          if (!blob) throw new Error(`the worker's script (${url}) is gone`);
-          source = await blob.text();
-          base = state.url;
-        } else if (url.startsWith("data:")) {
-          const comma = url.indexOf(",");
-          const head = url.slice(5, comma), body = url.slice(comma + 1);
-          source = head.endsWith(";base64") ? decoder.decode(fromBase64(body)) : decodeURIComponent(body);
-          base = state.url;
-        }
-        if (this._ended) return;
-        const thread = new NodeWorker(WORKER_HOST, {
-          workerData: { url: base, type, name, source, userAgent: state.userAgent, language: state.language },
-          resourceLimits: { maxOldGenerationSizeMb: 1024 },
-        });
-        this._thread = thread;
-        thread.on("message", (message) => this._fromThread(message));
-        thread.on("error", (error) => this._failed(String(error && error.message || error)));
-        for (const [data, transfer] of this._queue.splice(0)) this._send(data, transfer);
-      })().catch((error) => this._failed(String(error && error.message || error)));
-    }
-    _send(data, transfer) {
-      const list = Array.isArray(transfer) ? transfer : (transfer && transfer.transfer) || [];
-      const ports = list.filter((x) => x instanceof MessagePort);
-      try { this._thread.postMessage({ __merlin: "message", data, ports }, list); }
-      catch (error) { throw new DOMException(String(error && error.message || error), "DataCloneError"); }
-    }
-    postMessage(data, transfer) {
-      if (this._ended) return;
-      if (!this._thread) {
-        // cloned now, as a browser does, though sent once the thread is up
-        this._queue.push([transfer ? data : structuredClone(data), transfer]);
-        return;
-      }
-      this._send(data, transfer);
-    }
-    terminate() {
-      this._ended = true;
-      if (this._thread) this._thread.terminate().catch(() => {});
-    }
-    _failed(message) {
-      const event = new NodeEvent("error", { cancelable: true });
-      try { Object.defineProperty(event, "message", { value: message, configurable: true }); } catch (_) {}
-      send({ type: "console", level: "warn", text: `worker: ${message}` });
-      this.dispatchEvent(event);
-    }
-    async _fromThread(message) {
-      if (!message || typeof message !== "object") return;
-      const kind = message.__merlin;
-      if (kind === "message") {
-        this.dispatchEvent(new NodeMessageEvent("message", { data: message.data, ports: message.ports || [] }));
-      } else if (kind === "console") {
-        send({ type: "console", level: message.level || "log", text: message.text || "" });
-      } else if (kind === "failed") {
-        this._failed(message.message || "the worker's script failed");
-      } else if (kind === "closed") {
-        this.terminate();
-      } else if (kind === "ask" || kind === "ask_now") {
-        let answer;
-        try {
-          const reply = await ask({ type: "fetch", url: message.url, method: message.method || "GET",
-                                    headers: message.headers || {}, body: message.body ? toBase64(message.body) : null,
-                                    credentials: "same-origin" });
-          answer = reply.error ? { error: reply.error } : { status: reply.status, statusText: reply.statusText,
-                   headers: reply.headers, url: reply.url, body: fromBase64(reply.body) };
-        } catch (error) { answer = { error: String(error && error.message || error) }; }
-        if (kind === "ask") {
-          if (this._thread) this._thread.postMessage({ __merlin: "answer", id: message.id, ...answer });
-        } else {
-          message.port.postMessage(answer);
-          Atomics.store(message.flag, 0, 1);
-          Atomics.notify(message.flag, 0);
-        }
-      }
-    }
-  };
-}
-
 // ------------------------------------------------------------------ frames
 // Each frame's page runs in a process of its own, as Chrome runs each
 // site's frames apart. Other windows (the parent, the top, a frame's
@@ -2123,6 +2006,38 @@ function activateLabel(target) {
   return false;                    // a text field: Merlin puts the cursor in it
 }
 
+// ------------------------------------------------------------------ timing, blurred
+// With "Blur timing" on (Settings > Shields): the page's clocks tell time in
+// steps of 100 milliseconds, as Tor Browser's do, and what a person does
+// reaches it a little late (above). Behavioural biometrics tell people apart
+// by how long keys are held and the gaps between them; at this precision
+// those are gone.
+const BLUR_STEP_MS = 100, BLUR_JITTER_MS = 40;
+const PEOPLE = new Set(["click", "input", "key", "submit"]);
+let lane = Promise.resolve();
+function blurTiming(g) {
+  const step = coarsenClocks(g, BLUR_STEP_MS);
+  // an event's timeStamp
+  for (let proto = g.Event && g.Event.prototype; proto; proto = Object.getPrototypeOf(proto)) {
+    const found = Object.getOwnPropertyDescriptor(proto, "timeStamp");
+    if (!found) continue;
+    const read = found.get ? (event) => found.get.call(event) : () => found.value;
+    try {
+      Object.defineProperty(g.Event.prototype, "timeStamp", { configurable: true, enumerable: true,
+        get() { return step(Number(read(this)) || 0); } });
+    } catch (_) {}
+    break;
+  }
+  // animation frames are given the time too
+  const frame = g.requestAnimationFrame;
+  if (typeof frame === "function") {
+    g.requestAnimationFrame = function requestAnimationFrame(callback) {
+      if (typeof callback !== "function") return frame(callback);
+      return frame((t) => callback(step(t)));
+    };
+  }
+}
+
 // ------------------------------------------------------------------ the loop
 async function main() {
   let buffer = "";
@@ -2139,6 +2054,7 @@ async function main() {
         // a page given without a doctype is in quirks mode, as Merlin found it
         state.quirks = !/^\s*<!doctype\s+html/i.test(String(message.html || ""));
         install(message.html);
+        if (state.blurTiming) blurTiming(globalThis);
         lockDown();
         // Merlin's numbering of the elements becomes the ids here, and the
         // attributes go, so the page's scripts never see them; with the layout
@@ -2161,6 +2077,12 @@ async function main() {
         runScripts().then(changed).catch(e => reportError(e));
       } else if (message.type === "answer") {
         const resolve = waiting.get(message.id); waiting.delete(message.id); resolve?.(message);
+      } else if (state.blurTiming && PEOPLE.has(message.type)) {
+        // what a person does reaches the page a little late, by a different
+        // amount each time and never out of order: the rhythm of typing and
+        // clicking, which can tell people apart, is lost
+        lane = lane.then(() => new Promise((resolve) => setTimeout(resolve, Math.random() * BLUR_JITTER_MS)))
+          .then(() => { try { dispatch(message); } catch (e) { reportError(e); send({ type: "handled", id: message.id, prevented: false }); } });
       } else {
         try { dispatch(message); } catch (e) { reportError(e); send({ type: "handled", id: message.id, prevented: false }); }
       }

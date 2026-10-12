@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import threading
 import urllib.error
 import urllib.request
@@ -255,21 +256,8 @@ class Updater(QObject):
             self.status.emit("Replacing the application files...")
             package = os.path.join(staged, "merlin")
             if os.path.isdir(package):
-                live = os.path.join(target, "merlin")
-                keep = os.path.join(target, "merlin.previous")
-                if os.path.isdir(keep):
-                    shutil.rmtree(keep, ignore_errors=True)
-                if os.path.isdir(live):
-                    os.rename(live, keep)
-                try:
-                    shutil.copytree(package, live)
-                except Exception:                        # noqa: BLE001
-                    # put the old one back rather than leave nothing behind
-                    if os.path.isdir(keep) and not os.path.isdir(live):
-                        os.rename(keep, live)
-                    raise
-                _keep_ponder_pictures(keep, live)
-                shutil.rmtree(keep, ignore_errors=True)
+                _swap_in(package, os.path.join(target, "merlin"),
+                         os.path.join(target, "merlin.previous"), self.status.emit)
             for single in ("merlin-run.py", "version.txt"):
                 source_file = os.path.join(staged, single)
                 if os.path.isfile(source_file):
@@ -339,3 +327,53 @@ def _keep_ponder_pictures(old_package: str, new_package: str) -> None:
                 shutil.copyfile(source, target)
             except OSError:
                 pass
+
+
+def _swap_in(package: str, live: str, keep: str, say=lambda text: None) -> None:
+    """Put the new merlin folder (package) where the running one (live) is.
+
+    The old one is set aside, the new one copied in, and the old one removed;
+    if the old one cannot be moved (Windows, a folder in use), the new files
+    are written over it instead, and the update still goes in."""
+    if os.path.isdir(keep):
+        shutil.rmtree(keep, ignore_errors=True)
+    if os.path.isdir(live) and not _set_aside(live, keep):
+        say("Writing the new files over the old ones...")
+        shutil.copytree(package, live, dirs_exist_ok=True)
+        return
+    try:
+        shutil.copytree(package, live)
+    except Exception:                                    # noqa: BLE001
+        # put the old one back rather than leave nothing behind
+        if os.path.isdir(keep) and not os.path.isdir(live):
+            os.rename(keep, live)
+        raise
+    if os.path.isdir(keep):
+        _keep_ponder_pictures(keep, live)
+        shutil.rmtree(keep, ignore_errors=True)
+
+
+def _set_aside(live: str, keep: str) -> bool:
+    """Rename the merlin folder out of the way; whether that could be done.
+
+    On Windows a folder cannot be renamed while a program works in it or holds
+    one of its files open: Ponder, started by Merlin from inside it (as 1.8.23
+    and 1.8.24 did), stopped the update with "Access is denied". Ponder is
+    stopped first, and a lock that a virus scanner or the search indexer holds
+    for a moment is waited out; if the folder still cannot move, the caller
+    writes the new files over the old ones instead."""
+    import time
+
+    try:
+        from . import ponderhost
+
+        ponderhost.stop()                    # started again at the next search
+    except Exception:                        # noqa: BLE001
+        pass
+    for attempt in range(5):
+        try:
+            os.rename(live, keep)
+            return True
+        except OSError:
+            time.sleep(0.4 * (attempt + 1))
+    return False

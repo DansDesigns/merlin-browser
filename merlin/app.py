@@ -591,21 +591,11 @@ def main(argv: list[str] | None = None) -> int:
     interceptor = adblock.RequestInterceptor(filter_engine, settings, app)
     profile.setUrlRequestInterceptor(interceptor)
 
-    if settings.get("gpu_protection", True):
-        from PyQt6.QtWebEngineCore import QWebEngineScript
+    # the graphics card hidden, motion sensors gone, timing blurred, as
+    # Settings > Shields has them (biometrics.py)
+    from . import biometrics
 
-        from . import fingerprint
-
-        guard = QWebEngineScript()
-        guard.setName("merlin-gpu-guard")
-        guard.setSourceCode(fingerprint.build_script(fingerprint.new_seed()))
-        # before the page's own scripts, or a tracker could read the real
-        # values first, and in the page's world so that page scripts see it
-        guard.setInjectionPoint(
-            QWebEngineScript.InjectionPoint.DocumentCreation)
-        guard.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
-        guard.setRunsOnSubFrames(True)
-        profile.scripts().insert(guard)
+    biometrics.install_page_guards(profile, settings)
 
 
     history = History()
@@ -630,8 +620,15 @@ def main(argv: list[str] | None = None) -> int:
     filter_loader.engine_ready.connect(adopt_engine)
     # the built-in list is tiny, so shields work from the first paint while the
     # full lists parse in the background
-    filter_engine.load_text(adblock.BUILTIN_RULES)
+    filter_engine.load_text(adblock.builtin_rules(settings))
     filter_loader.load_cached_async()
+
+    def shields_changed(key, value):
+        # the behavioural-tracking companies in or out of the rules
+        if key == "block_behavioural_tracking":
+            filter_loader.load_cached_async()
+
+    settings.changed.connect(shields_changed)
 
     # two-finger swipe navigation, filtered at application level because
     # QtWebEngine's render widget consumes input before a view filter sees it

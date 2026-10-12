@@ -9,6 +9,7 @@
 import vm from "node:vm";
 import { parentPort, workerData, receiveMessageOnPort, MessageChannel as NodeChannel } from "node:worker_threads";
 import { registerHooks } from "node:module";
+import { makeWorkerClasses, makeXHR, makeCacheStorage, coarsenClocks } from "./workers.js";
 
 let locked = false;
 registerHooks({
@@ -20,7 +21,7 @@ registerHooks({
 
 const proc = globalThis.process;
 const g = globalThis;
-const { url: scriptUrl, type, name, userAgent, language, source: givenSource } = workerData;
+const { url: scriptUrl, type, name, userAgent, language, source: givenSource, shared, blurTiming } = workerData;
 const decoder = new TextDecoder();
 const NativeResponse = globalThis.Response, NativeHeaders = globalThis.Headers, NativeRequest = globalThis.Request;
 
@@ -33,6 +34,7 @@ parentPort.on("message", (message) => {
     return;
   }
   if (message && message.__merlin === "message") { deliver(message.data, message.ports || []); return; }
+  if (message && message.__merlin === "connect") { connect(message.port); return; }
 });
 function ask(request) {
   return new Promise((resolve) => { const id = nextId++; waiting.set(id, resolve); parentPort.postMessage({ __merlin: "ask", id, ...request }); });
@@ -47,6 +49,15 @@ function askNow(request) {
   const got = receiveMessageOnPort(port1);
   port1.close();
   return got ? got.message : { error: "no answer" };
+}
+// console to the page's console, never to the process's output, which is
+// Merlin's channel to the page's host
+for (const level of ["log", "info", "warn", "error", "debug"]) {
+  console[level] = (...args) => {
+    if (level === "debug") return;
+    const text = args.map((a) => { try { return typeof a === "string" ? a : JSON.stringify(a) ?? String(a); } catch (_) { return String(a); } }).join(" ");
+    try { parentPort.postMessage({ __merlin: "console", level, text: "worker: " + text }); } catch (_) {}
+  };
 }
 function report(error) {
   try { parentPort.postMessage({ __merlin: "console", level: "error", text: "worker: " + String(error && error.stack || error) }); } catch (_) {}
@@ -80,7 +91,7 @@ g.removeEventListener = (kind, listener, options) => {
   if (wrapped) events.removeEventListener(kind, wrapped, options);
 };
 g.dispatchEvent = (event) => events.dispatchEvent(event);
-for (const kind of ["message", "messageerror", "error"]) {
+for (const kind of ["message", "messageerror", "error", "connect"]) {
   let handler = null;
   Object.defineProperty(g, "on" + kind, { configurable: true,
     get: () => handler,
@@ -113,9 +124,18 @@ function deliver(data, ports) {
   const event = new MessageEvent("message", { data, ports: ports || [] });
   events.dispatchEvent(event);
 }
+// a SharedWorker's new port, as a connect event, once its script has run
+const earlyPorts = [];
+function connect(port) {
+  if (!started) { earlyPorts.push(port); return; }
+  const event = new MessageEvent("connect", { data: "", ports: [port] });
+  try { Object.defineProperty(event, "source", { value: port, configurable: true }); } catch (_) {}
+  events.dispatchEvent(event);
+}
 function begin() {
   started = true;
   for (const [data, ports] of early.splice(0)) deliver(data, ports);
+  for (const port of earlyPorts.splice(0)) connect(port);
 }
 
 async function workerFetch(input, init = {}) {
@@ -141,6 +161,24 @@ async function workerFetch(input, init = {}) {
   return response;
 }
 g.fetch = workerFetch;
+
+// workers of its own, XMLHttpRequest (waiting, if asked, as Emscripten's file
+// loading does), and caches: as the page has them (workers.js)
+const env = {
+  blurTiming: () => !!blurTiming,
+  base: () => scriptUrl,
+  fetch: (request) => ask({ kind: "fetch", ...request }),
+  fetchNow: (request) => askNow({ kind: "fetch", ...request }),
+  userAgent: () => userAgent, language: () => language,
+  console: (level, text) => { try { parentPort.postMessage({ __merlin: "console", level, text }); } catch (_) {} },
+  reportError: (e) => report(e),
+};
+const nested = makeWorkerClasses(env);
+g.Worker = nested.Worker;
+g.SharedWorker = nested.SharedWorker;
+g.XMLHttpRequest = makeXHR(env);
+g.caches = makeCacheStorage({ base: () => scriptUrl, fetch: (input, init) => workerFetch(input, init) });
+if (!shared) { try { delete g.onconnect; } catch (_) {} }
 g.importScripts = (...urls) => {
   for (const each of urls) {
     const url = new URL(String(each), scriptUrl).href;
@@ -177,6 +215,10 @@ async function evaluated(url) {
   if (module.status === "errored") throw module.error;
   return module;
 }
+
+// the page's clocks blurred (Settings > Shields > Blur timing): a worker's too,
+// or a page would time what it is told in one
+if (blurTiming) coarsenClocks(g, 100);
 
 // ------------------------------------------------------------ nothing of Node left
 locked = true;

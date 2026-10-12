@@ -137,6 +137,9 @@ DEFAULTS = {
     "block_third_party_cookies": True,
     "send_do_not_track": True,
     "gpu_protection": True,            # de-identify WebGL and WebGPU
+    "block_behavioural_tracking": True,  # typing/mouse biometrics, session replay
+    "block_motion_sensors": True,      # motion, orientation, light, battery
+    "blur_timing": False,              # clocks in 100 ms steps, as Tor Browser
     "https_upgrade": True,
     "https_upgrade_exceptions": [],    # hosts that only answer on http
     "block_webrtc_leak": True,
