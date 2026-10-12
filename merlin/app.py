@@ -720,6 +720,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.private:
         window.new_private_window()
 
+    # Deno, which an older Merlin fetched to run pages' JavaScript, goes: it
+    # is Rust, and Merlin has none (Node.js runs them now)
+    try:
+        from . import media as _media_tools
+
+        import threading as _threading
+
+        # off the window's thread: its module cache can be thousands of files
+        QTimer.singleShot(3000, lambda: _threading.Thread(target=_media_tools.remove_deno, daemon=True).start())
+    except Exception:                                  # noqa: BLE001
+        pass
+
     # Ponder, the built-in search engine: started in the background once the
     # window is up, so it is ready by the first search
     if settings.get("search_engine") == "Ponder":
@@ -863,7 +875,7 @@ def _shut_down(app, profile) -> None:
         pass
     stopped = media.stop_helpers()
     if stopped:
-        crashlog.note(f"shutdown: stopped {stopped} yt-dlp/Deno process(es)")
+        crashlog.note(f"shutdown: stopped {stopped} yt-dlp/Node process(es)")
 
     released = 0
     for widget in app.topLevelWidgets():

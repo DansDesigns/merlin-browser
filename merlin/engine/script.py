@@ -1,10 +1,14 @@
-"""JavaScript for Merlin Engine: a Deno (V8) process for each tab, where allowed.
+"""JavaScript for Merlin Engine: a Node.js (V8) process for each tab, where allowed.
 
-The page's DOM and scripts live in that process (js/host.js), run by Deno with
-no permissions: no files, no network, no environment. It may import modules
-only from the page's own hosts. Everything else the page asks for (fetch,
-XMLHttpRequest, scripts) is done here by Merlin, with the page's cookies,
-through the content blocker. After scripts change the page, the new page comes
+The page's DOM and scripts live in that process (js/host.js), run by Node
+under its permission model: it may read its own files and nothing else, start
+no processes, load no add-ons; and nothing of Node is left for the page's code
+(see lockDown in host.js). Everything the page asks for (fetch,
+XMLHttpRequest, its scripts and modules) is done here by Merlin, with the
+page's cookies, through the content blocker.
+
+Node, not Deno as before: Deno is written in Rust, and Merlin has none. Node is
+C++ (V8 itself, libuv, OpenSSL), checked by Merlin's Rust audit. After scripts change the page, the new page comes
 back and Merlin Engine styles and lays it out; clicks, typing and scrolling go
 to the page's scripts as events.
 
@@ -76,35 +80,41 @@ def import_hosts(markup: str, page_url: str) -> list:
     return sorted(hosts)
 
 
+def host_command(node: str) -> list:
+    """How a page's scripts are started: Node, its permissions as few as can be."""
+    folder = os.path.dirname(HOST)
+    # --preserve-symlinks: Node would otherwise look up every folder above
+    # its files to find their real paths, which the permission model refuses
+    # --allow-worker: a page's Web Workers are threads of this process
+    return [node, "--permission", f"--allow-fs-read={folder}", "--allow-worker",
+            "--preserve-symlinks", "--preserve-symlinks-main",
+            "--experimental-vm-modules", "--no-warnings",
+            f"--max-old-space-size={MEMORY_MB}", HOST]
+
+
 class ScriptHost(QObject):
-    """One page's scripts, in a Deno process of their own."""
+    """One page's scripts, in a Node process of their own."""
 
     message = pyqtSignal(object)          # a dict from the page's scripts
     ended = pyqtSignal()
 
-    def __init__(self, deno: str, hosts: list, cache_dir: str, parent=None, mapping=None):
+    def __init__(self, node: str, hosts: list, cache_dir: str, parent=None, mapping=None):
         super().__init__(parent)
-        command = [deno, "run", "--quiet", "--no-prompt", "--no-config", "--no-lock",
-                   f"--v8-flags=--max-old-space-size={MEMORY_MB}"]
-        if hosts:
-            command.append("--allow-import=" + ",".join(hosts))
-        if mapping:
-            os.makedirs(cache_dir, exist_ok=True)
-            import tempfile
-
-            handle, path = tempfile.mkstemp(prefix="importmap-", suffix=".json", dir=cache_dir)
-            with os.fdopen(handle, "w", encoding="utf-8") as out:
-                json.dump(mapping, out)
-            command.append("--import-map=" + path)
-        command.append(HOST)
+        command = host_command(node)
+        # the import map is given to the page's host with the page (see
+        # _start_script), and its modules come through Merlin, from any host
+        self.mapping = mapping
         kwargs = {}
         if os.name == "nt":
             kwargs["creationflags"] = 0x08000000               # no console window
-        os.makedirs(cache_dir, exist_ok=True)
-        env = dict(os.environ, DENO_DIR=cache_dir, NO_COLOR="1", DENO_NO_UPDATE_CHECK="1")
+        # nothing of the environment the page could learn from, beyond what
+        # Node itself needs to start
+        env = {key: value for key, value in os.environ.items()
+               if key.upper() in ("SYSTEMROOT", "WINDIR", "TEMP", "TMP", "PATH", "LANG", "LC_ALL", "TZ")}
+        env["NODE_OPTIONS"] = ""
         self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, env=env, **kwargs)
-        # Deno's own messages, should it fail: the last of them, for the log
+        # Node's own messages, should it fail: the last of them, for the log
         from collections import deque
 
         self.errors = deque(maxlen=30)
@@ -112,7 +122,7 @@ class ScriptHost(QObject):
         self._lock = threading.Lock()
         self._closed = False
         # the process goes with its tab: when the view is deleted, this is too,
-        # and a Deno process had been left running for every tab closed
+        # and a process had been left running for every tab closed
         process = self.process
         self.destroyed.connect(lambda *_a: _kill(process))
         threading.Thread(target=self._read, daemon=True).start()
@@ -280,6 +290,60 @@ class LocalStorage:
             os.makedirs(self.folder, exist_ok=True)
             with open(path + ".part", "w", encoding="utf-8") as handle:
                 json.dump(items, handle)
+            os.replace(path + ".part", path)
+        except OSError:
+            pass
+
+
+class ScriptCache:
+    """Scripts and modules kept on disk between visits, for as long as their
+    server says they may be (Cache-Control max-age, or immutable), as a
+    browser keeps them. Deno had kept the modules it fetched; now that Merlin
+    fetches them, Merlin keeps them: Hugging Face's thousand modules are not
+    fetched again on every visit. Nothing kept that the server says not to."""
+
+    LONGEST = 30 * 24 * 3600
+
+    def __init__(self, folder: str):
+        self.folder = folder
+
+    def _path(self, url: str) -> str:
+        import hashlib
+
+        return os.path.join(self.folder, hashlib.sha256(url.encode("utf-8")).hexdigest()[:40] + ".json")
+
+    def get(self, url: str):
+        import time
+
+        if not self.folder:
+            return None
+        try:
+            with open(self._path(url), encoding="utf-8") as handle:
+                kept = json.load(handle)
+        except (OSError, ValueError):
+            return None
+        if kept.get("url") != url or kept.get("until", 0) < time.time():
+            return None
+        return kept.get("answer")
+
+    def put(self, url: str, answer: dict) -> None:
+        import time
+
+        if not self.folder or answer.get("error") or answer.get("status") != 200:
+            return
+        headers = {k.lower(): v for k, v in (answer.get("headers") or {}).items()}
+        control = headers.get("cache-control", "").lower()
+        if "no-store" in control or "no-cache" in control or "private" in control:
+            return
+        found = re.search(r"max-age\s*=\s*(\d+)", control)
+        keep = self.LONGEST if "immutable" in control else int(found.group(1)) if found else 0
+        if keep <= 0:
+            return
+        try:
+            os.makedirs(self.folder, exist_ok=True)
+            path = self._path(url)
+            with open(path + ".part", "w", encoding="utf-8") as handle:
+                json.dump({"url": url, "until": time.time() + min(keep, self.LONGEST), "answer": answer}, handle)
             os.replace(path + ".part", path)
         except OSError:
             pass

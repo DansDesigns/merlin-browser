@@ -1917,10 +1917,10 @@ def _shown_style(view, eid) -> dict:
     return {}
 
 
-def _deno_for_tests() -> str:
-    from merlin.media import deno_path
+def _node_for_tests() -> str:
+    from merlin.media import node_path
 
-    found = os.environ.get("MERLIN_DENO") or deno_path()
+    found = os.environ.get("MERLIN_NODE") or node_path()
     return found if found and os.path.exists(found) else ""
 
 
@@ -1935,9 +1935,9 @@ def test_javascript(app) -> None:
     from merlin.engine import MerlinView
     from merlin.engine.script import LocalStorage
 
-    deno = _deno_for_tests()
-    if not deno:
-        print("  skip  JavaScript: Deno is not here (set MERLIN_DENO, or fetch it in Settings)")
+    runtime = _node_for_tests()
+    if not runtime:
+        print("  skip  JavaScript: Node.js is not here (set MERLIN_NODE, or fetch it in Settings)")
         return
     folder = tempfile.mkdtemp(prefix="merlin-js-")
     fixtures = os.path.join(ROOT, "tests", "fixtures", "react18")
@@ -2038,11 +2038,11 @@ def test_javascript(app) -> None:
         def javascript_allowed(self, site):
             return self.allowed
 
-        def deno_for_scripts(self):
-            return deno
+        def node_for_scripts(self):
+            return runtime
 
         def script_cache_dir(self):
-            return os.path.join(folder, "deno-cache")
+            return os.path.join(folder, "runtime-cache")
 
         def local_storage(self):
             return storage
@@ -2363,7 +2363,7 @@ def test_window_events_enter_dns_and_saving(app) -> None:
     from merlin.engine import MerlinView
     from merlin.engine.script import LocalStorage
 
-    deno = _deno_for_tests()
+    runtime = _node_for_tests()
     folder = tempfile.mkdtemp(prefix="merlin-events-")
     open(os.path.join(folder, "index.html"), "w").write(
         "<!DOCTYPE html><html><head><title>Search</title></head><body><p id=heard></p>"
@@ -2400,8 +2400,8 @@ def test_window_events_enter_dns_and_saving(app) -> None:
         def javascript_allowed(self, site):
             return True
 
-        def deno_for_scripts(self):
-            return deno
+        def node_for_scripts(self):
+            return runtime
 
         def script_cache_dir(self):
             return os.path.join(folder, "cache")
@@ -2421,7 +2421,7 @@ def test_window_events_enter_dns_and_saving(app) -> None:
         return " ".join(found.text().split()) if found is not None else ""
 
     try:
-        if deno:
+        if runtime:
             view = MerlinView()
             view._host = Host()
             view.resize(700, 400)
@@ -2461,7 +2461,7 @@ def test_window_events_enter_dns_and_saving(app) -> None:
                       until(view, lambda: wanted in view.url().toString(), 8), view.url().toString())
                 view.close()
         else:
-            print("  skip  window events and Enter: Deno is not here")
+            print("  skip  window events and Enter: Node.js is not here")
         # the debugging zip, written in the background: the window goes on
         view = MerlinView()
         view.show()
@@ -2611,9 +2611,9 @@ def test_escaped_selectors_grids_and_files(app) -> None:
     check("a grid in a flex button is as wide as its content, its label inside (GitHub's Code button)",
           boxes["code"].width() < 200 and boxes["code"].x() <= boxes["label"].x() < boxes["code"].right(),
           f"button {boxes['code'].width():.0f} wide, label at {boxes['label'].x():.0f}")
-    deno = _deno_for_tests()
-    if not deno:
-        print("  skip  file picker: Deno is not here")
+    runtime = _node_for_tests()
+    if not runtime:
+        print("  skip  file picker: Node.js is not here")
         return
     folder = tempfile.mkdtemp(prefix="merlin-pick-")
     open(os.path.join(folder, "index.html"), "w").write(
@@ -2643,8 +2643,8 @@ def test_escaped_selectors_grids_and_files(app) -> None:
         def javascript_allowed(self, site):
             return True
 
-        def deno_for_scripts(self):
-            return deno
+        def node_for_scripts(self):
+            return runtime
 
         def script_cache_dir(self):
             return os.path.join(folder, "cache")
@@ -2686,9 +2686,9 @@ def test_loads_and_walkers(app) -> None:
     TreeWalker, NodeFilter, document.implementation and performance.timing."""
     from merlin.engine import MerlinView
 
-    deno = _deno_for_tests()
-    if not deno:
-        print("  skip  loads and walkers: Deno is not here")
+    runtime = _node_for_tests()
+    if not runtime:
+        print("  skip  loads and walkers: Node.js is not here")
         return
     page = ("<!DOCTYPE html><html><head><title>Loads</title></head><body><div id=r><p id=a>A<b id=b>B</b></p><p id=c>C</p></div>"
             "<p id=css>waiting</p><p id=img>waiting</p><p id=walk></p><script>"
@@ -2737,8 +2737,8 @@ def test_loads_and_walkers(app) -> None:
         def javascript_allowed(self, site):
             return True
 
-        def deno_for_scripts(self):
-            return deno
+        def node_for_scripts(self):
+            return runtime
 
         def script_cache_dir(self):
             return os.path.join(folder, "cache")
@@ -2801,9 +2801,9 @@ def test_images_fonts_and_viewport(app) -> None:
     securedns.install(False)
     first = socket.getaddrinfo("localhost", 80, 0, socket.SOCK_STREAM)[0][0]
     check("localhost is reached on IPv4 first (two seconds a request on Windows otherwise)", first == socket.AF_INET)
-    deno = _deno_for_tests()
-    if not deno:
-        print("  skip  images and viewport: Deno is not here")
+    runtime = _node_for_tests()
+    if not runtime:
+        print("  skip  images and viewport: Node.js is not here")
         return
     folder = tempfile.mkdtemp(prefix="merlin-images-")
     import struct
@@ -2863,8 +2863,8 @@ def test_images_fonts_and_viewport(app) -> None:
         def javascript_allowed(self, site):
             return True
 
-        def deno_for_scripts(self):
-            return deno
+        def node_for_scripts(self):
+            return runtime
 
         def script_cache_dir(self):
             return os.path.join(folder, "cache")
@@ -3156,9 +3156,9 @@ def test_clicks_land_where_browsers_land(app) -> None:
             sizes.setdefault("svg", []).append((round(item[1].width()), round(item[1].height())))
     check("an SVG of width=\"1em\" is its text's size, and rem and em read too (they had been 300 square)",
           sizes.get("svg", [])[:2] == [(16, 16), (32, 24)], str(sizes.get("svg")))
-    deno = _deno_for_tests()
-    if not deno:
-        print("  skip  clicks: Deno is not here")
+    runtime = _node_for_tests()
+    if not runtime:
+        print("  skip  clicks: Node.js is not here")
         return
     folder = tempfile.mkdtemp(prefix="merlin-clicks-")
     open(os.path.join(folder, "index.html"), "w").write(
@@ -3185,8 +3185,8 @@ def test_clicks_land_where_browsers_land(app) -> None:
         def javascript_allowed(self, site):
             return True
 
-        def deno_for_scripts(self):
-            return deno
+        def node_for_scripts(self):
+            return runtime
 
         def script_cache_dir(self):
             return os.path.join(folder, "cache")
@@ -3414,9 +3414,9 @@ def test_scrolling_panels_and_touch(app) -> None:
           " (Ponder's had grown to its contents, cut off at the window's edge)",
           lists and round(lists[0]["area"].height()) == 560 and round(lists[0]["max"]) == 1440,
           str([(round(p["area"].height()), round(p["max"])) for p in out.scrollers]))
-    deno = _deno_for_tests()
-    if not deno:
-        print("  skip  panels with scripts and touch: Deno is not here")
+    runtime = _node_for_tests()
+    if not runtime:
+        print("  skip  panels with scripts and touch: Node.js is not here")
         return
     folder = tempfile.mkdtemp(prefix="merlin-panels-")
     open(os.path.join(folder, "index.html"), "w").write(
@@ -3446,8 +3446,8 @@ def test_scrolling_panels_and_touch(app) -> None:
         def javascript_allowed(self, site):
             return True
 
-        def deno_for_scripts(self):
-            return deno
+        def node_for_scripts(self):
+            return runtime
 
         def script_cache_dir(self):
             return os.path.join(folder, "cache")
@@ -3809,9 +3809,9 @@ def test_frames(app) -> None:
           frames_in("<div style='display:flex'><iframe style='border:0'></iframe><iframe style='border:0;width:100px'></iframe></div>")
           == [(300, 150), (100, 150)])
 
-    deno = _deno_for_tests()
-    if not deno:
-        check("Deno is here for the frames' scripts", False, "set MERLIN_DENO")
+    runtime = _node_for_tests()
+    if not runtime:
+        check("Node.js is here for the frames' scripts", False, "set MERLIN_NODE")
         return
     seen = {}
     folder = tempfile.mkdtemp(prefix="merlin-frames-")
@@ -3880,11 +3880,11 @@ def test_frames(app) -> None:
         def javascript_allowed(self, site):
             return True
 
-        def deno_for_scripts(self):
-            return deno
+        def node_for_scripts(self):
+            return runtime
 
         def script_cache_dir(self):
-            return os.path.join(folder, "deno-cache")
+            return os.path.join(folder, "runtime-cache")
 
     def until(test, seconds):
         end = time.time() + seconds
@@ -3969,6 +3969,196 @@ def test_frames(app) -> None:
         child_server.shutdown()
 
 
+def test_layout_for_dialogs_and_settings(app) -> None:
+    """What Ponder's dialogs and settings needed of layout: a box centred by
+    translate(-50%, -50%) clicked where it is drawn, -webkit-line-clamp,
+    text-transform, overflow-y: auto beside overflow-x: hidden, a panel that
+    scrolls in a fixed box, and a range input as a slider."""
+    from merlin.engine.css import Styler
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+
+    def laid(markup, width=800, height=600):
+        document = parse("<style>body{margin:0}</style>" + markup)
+        styles = Styler(document, viewport=(width, height)).compute()
+        return document, styles, Layout(document, styles, width, viewport_height=height).run()
+
+    _d, _s, out = laid("<div style='position:fixed;inset:0'><div style='position:absolute;top:50%;left:50%;"
+                       "transform:translate(-50%,-50%);width:200px'><button id=close style='width:100px;height:20px'>Close</button>"
+                       "</div></div>")
+    boxes = out.fixed.boxes if out.fixed is not None else out.boxes
+    close = next(r for r, e in boxes if e.id == "close")
+    check("what is in a box centred by translate(-50%, -50%) is where it is drawn (Ponder's Close had done nothing)",
+          abs(close.x() - 300) < 1 and close.y() < 300, f"{close}")
+    _d, _s, out = laid("<p id=c style='margin:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;"
+                       "overflow:hidden;line-height:20px;width:100px'>one two three four five six seven eight nine ten</p>")
+    clamp = next(r for r, e in out.boxes if e.id == "c")
+    check("-webkit-line-clamp: 2 shows two lines (Ponder's snippets had run on)", clamp.height() == 40, f"{clamp.height()}")
+
+    def texts(items):
+        for item in items:
+            if item and item[0] == "text":
+                yield item[3]
+            elif item and item[0] == "group":
+                yield from texts(item[1])
+    _d, _s, out = laid("<div style='text-transform:uppercase'>web <b>backend</b></div>"
+                       "<div style='text-transform:capitalize'>show summary</div>")
+    check("text-transform: uppercase and capitalize are drawn (Ponder's headings showed as written)",
+          list(texts(out.items)) == ["WEB ", "BACKEND", "Show Summary"], str(list(texts(out.items))))
+    document, styles, out = laid("<div id=p style='position:fixed;top:40px;right:10px;width:300px;max-height:calc(100vh - 60px);"
+                                 "overflow-y:auto;overflow-x:hidden'>" + "<p>line</p>" * 60 + "</div>", height=560)
+    panel = next(e for e in document.root.elements() if e.id == "p")
+    check("overflow-y: auto with overflow-x: hidden scrolls (it had come out hidden, the last written)",
+          styles[panel].get("overflow") == "auto", str(styles[panel].get("overflow")))
+    _d, _s, whole = laid("<div style='height:100vh;display:flex;flex-direction:column;overflow:hidden'>"
+                       "<div style='height:50px'>bar</div><div id=list style='flex:1;overflow-y:auto'>"
+                       + "<p style='height:100px;margin:0'>card</p>" * 30 + "</div></div>", height=600)
+    check("a page one window high, its list scrolling in a panel, is one window high (Ponder's results had "
+          "scrolled on, past the list's end, into nothing)", abs(whole.height - 600) < 1 and len(whole.scrollers) == 1,
+          f"{whole.height:.0f} high")
+    check("and a panel in a fixed box scrolls (Ponder's settings, taller than the window, were cut off)",
+          out.fixed is not None and len(out.fixed.scrollers) == 1 and out.fixed.scrollers[0]["max"] > 100,
+          str(len(out.fixed.scrollers) if out.fixed is not None else None))
+
+
+def test_node_scripts(app) -> None:
+    """Pages' JavaScript in Node.js (Deno, before, is Rust): nothing of Node
+    for the page, no file or network of its own; the DOM as browsers have it
+    for selects, labels and styles; FileReader; multipart FormData; Web
+    Workers; and a page's own file input never put in the page."""
+    from merlin.engine import MerlinView
+    from merlin.engine.script import LocalStorage, host_command
+    from PyQt6.QtWidgets import QFileDialog
+
+    runtime = _node_for_tests()
+    if not runtime:
+        check("Node.js is here for pages' scripts", False, "set MERLIN_NODE")
+        return
+    from merlin import rustaudit
+
+    check("the Node that runs pages' scripts has no Rust in it", not rustaudit.scan_file(runtime))
+    command = host_command(runtime)
+    check("pages' scripts run under Node's permission model, reading only Merlin's own script files",
+          "--permission" in command and any(c.startswith("--allow-fs-read=") and c.rstrip("/\\").endswith("js")
+                                             for c in command) and "--allow-child-process" not in command)
+    folder = tempfile.mkdtemp(prefix="merlin-node-")
+    posted = {}
+    open(os.path.join(folder, "index.html"), "w").write(
+        "<!DOCTYPE html><html><head><title>N</title></head><body>"
+        "<p id=sandbox>waiting</p><p id=select>waiting</p><p id=style>waiting</p><p id=reader>waiting</p>"
+        "<p id=form>waiting</p><p id=worker>waiting</p><p id=picked>none</p>"
+        "<label class=toggle id=label><input type=checkbox id=box style='opacity:0;width:0;height:0;position:absolute'>"
+        "<span id=track style='display:inline-block;width:36px;height:20px;background:#888'></span></label>"
+        "<div id=panel style='display:block'>panel</div><button id=hide>hide</button><button id=browse>Browse</button>"
+        "<script>"
+        "const out = (id, t) => document.getElementById(id).textContent = t;"
+        "(async () => { const r = [];"
+        " r.push(typeof process, typeof require, typeof Buffer, typeof Deno);"
+        " try { await (new Function('return import(\"node:fs\")'))(); r.push('LEAK'); } catch (e) { r.push('no-node'); }"
+        " try { await import('node:net'); r.push('LEAK'); } catch (e) { r.push('no-net'); }"
+        " out('sandbox', r.join(' ')); })();"
+        "const s = document.createElement('select'); for (const v of ['none','a.jpg','b.jpg']) { const o = document.createElement('option'); o.value = v; o.textContent = v; s.appendChild(o); }"
+        "document.body.appendChild(s); s.value = 'b.jpg'; const before = s.selectedIndex; while (s.options.length > 1) s.remove(1);"
+        "out('select', before + ' ' + s.options.length + ' ' + s.isConnected + ' ' + s.value);"
+        "document.getElementById('hide').addEventListener('click', () => { document.getElementById('panel').style.display = 'none'; });"
+        "document.getElementById('box').addEventListener('change', (e) => out('style', 'toggled ' + e.target.checked));"
+        "const fr = new FileReader(); fr.onload = () => out('reader', fr.result); fr.readAsDataURL(new Blob(['hi'], {type: 'text/plain'}));"
+        "const fd = new FormData(); fd.append('file', new File(['abc'], 'a.txt', {type: 'text/plain'})); fd.append('name', 'x');"
+        "fetch('/upload', {method: 'POST', body: fd}).then(r => r.text()).then(t => out('form', t));"
+        "const w = new Worker(URL.createObjectURL(new Blob(['onmessage = (e) => postMessage(e.data * 2 + \" \" + typeof process)'], {type: 'text/javascript'})));"
+        "w.onmessage = (e) => out('worker', 'worker ' + e.data); w.postMessage(21);"
+        "document.getElementById('browse').addEventListener('click', () => { const i = document.createElement('input'); i.type = 'file';"
+        " i.onchange = () => out('picked', i.files[0].name); i.click(); });"
+        "</script></body></html>")
+    picture = os.path.join(folder, "wall.png")
+    open(picture, "wb").write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20)
+
+    class Pages(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def do_POST(self):  # noqa: N802
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            posted["type"] = self.headers.get("Content-Type", "")
+            posted["body"] = body
+            answer = b"multipart " + (b"with the file" if b'filename="a.txt"' in body and b"abc" in body else b"without it")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(answer)))
+            self.end_headers()
+            self.wfile.write(answer)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Pages)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    class Host:
+        settings = {}
+
+        def javascript_allowed(self, site):
+            return True
+
+        def node_for_scripts(self):
+            return runtime
+
+        def local_storage(self):
+            return LocalStorage(None)
+
+    def text_of(view, eid):
+        found = next((x for x in view._document.root.elements() if x.id == eid), None) if view._document else None
+        return " ".join(found.text().split()) if found is not None else ""
+
+    def until(test, seconds):
+        end = time.time() + seconds
+        while time.time() < end and not test():
+            app.processEvents()
+            time.sleep(0.02)
+        return test()
+
+    def click(view, eid):
+        from PyQt6.QtTest import QTest
+
+        box = next(r for r, e in view._display.boxes if e.id == eid)
+        QTest.mouseClick(view, Qt.MouseButton.LeftButton, pos=QPoint(int(box.center().x()), int(box.center().y() - view._scroll)))
+
+    real_dialog = QFileDialog.getOpenFileName
+    QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (picture, ""))
+    view = MerlinView()
+    view._host = Host()
+    view.resize(900, 700)
+    view.show()
+    try:
+        view.setUrl(QUrl(f"http://127.0.0.1:{server.server_address[1]}/index.html"))
+        until(lambda: "worker" in text_of(view, "worker") and "multipart" in text_of(view, "form"), 15)
+        check("a page sees nothing of Node and cannot load its modules (files, network)",
+              text_of(view, "sandbox") == "undefined undefined undefined undefined no-node no-net", text_of(view, "sandbox"))
+        check("a select's value can be set, and remove(i) removes an option, not the select (Ponder's background list)",
+              text_of(view, "select") == "2 1 true none", text_of(view, "select"))
+        check("FileReader reads a Blob (Node has none of its own)", text_of(view, "reader") == "data:text/plain;base64,aGk=",
+              text_of(view, "reader"))
+        check("FormData is sent as multipart/form-data, its file in it (Ponder's background upload)",
+              text_of(view, "form") == "multipart with the file" and posted.get("type", "").startswith("multipart/form-data"),
+              text_of(view, "form"))
+        check("a Web Worker runs, made from a Blob, with nothing of Node (Convert to it! does its work in one)",
+              text_of(view, "worker") == "worker 42 undefined", text_of(view, "worker"))
+        click(view, "hide")
+        check("el.style.display = 'none' is seen (a style changed alone had not been: Ponder's dialogs stayed open)",
+              until(lambda: "display:none" in (next(e for e in view._document.root.elements() if e.id == "panel").attrs.get("style", "").replace(" ", "")), 5))
+        click(view, "track")
+        check("a click in a label works its hidden checkbox (Ponder's toggle switches)",
+              until(lambda: text_of(view, "style") == "toggled true", 5), text_of(view, "style"))
+        click(view, "browse")
+        check("a file input the page made and never put in the page still opens the dialog (Ponder's Browse...)",
+              until(lambda: text_of(view, "picked") == "wall.png", 6), text_of(view, "picked"))
+    finally:
+        QFileDialog.getOpenFileName = real_dialog
+        view.shutdown()
+        view.deleteLater()
+        server.shutdown()
+
+
 def main() -> int:
     app = QApplication(sys.argv[:1])
     for test in (test_no_chromium, test_without_html_parser, test_parsing, test_cascade, test_layout,
@@ -4048,6 +4238,10 @@ def main() -> int:
     test_forms(app)
     print("test_frames")
     test_frames(app)
+    print("test_layout_for_dialogs_and_settings")
+    test_layout_for_dialogs_and_settings(app)
+    print("test_node_scripts")
+    test_node_scripts(app)
     print("test_view")
     test_view(app)
     if FAILED:

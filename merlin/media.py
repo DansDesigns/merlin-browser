@@ -257,18 +257,23 @@ def ytdlp_path() -> str:
     return shutil.which("yt-dlp") or ""
 
 
-# -------------------------------------------------------------------- deno
+# -------------------------------------------------------------------- node
 #
 # Since late 2025 YouTube only hands its video formats to a client that can
 # solve a JavaScript challenge. yt-dlp does that with an external JavaScript
 # runtime, and without one YouTube offers nothing but thumbnails, which yt-dlp
-# reports as "Requested format is not available".
+# reports as "Requested format is not available". Merlin Engine runs pages'
+# JavaScript with the same runtime.
 #
-# Deno is the runtime yt-dlp recommends and enables by default, and it runs
-# the challenge scripts with no file system or network access. Fetched from
-# Deno's own GitHub releases on first use, like yt-dlp.
+# Node.js, not Deno as before: Deno is written in Rust, and Merlin has no Rust
+# anywhere. Node is C++ (V8, libuv, OpenSSL). A pinned release, from
+# nodejs.org itself, checked against the release's own SHA-256 sums, and
+# scanned by Merlin's Rust audit before it is kept: a Node with any Rust in it
+# is refused.
 
-DENO_RELEASES = "https://github.com/denoland/deno/releases/latest/download/"
+NODE_VERSION = "v24.19.0"
+NODE_DIST = f"https://nodejs.org/dist/{NODE_VERSION}/"
+NODE_FOLDER = "node"                       # in Merlin's tools folder
 
 
 def _machine() -> str:
@@ -287,70 +292,142 @@ def _machine() -> str:
         return "x86_64"
 
 
-def _deno_asset() -> str:
+def _node_asset() -> str:
+    """The release archive for this computer."""
     machine = _machine()
     arm = machine in ("aarch64", "arm64")
     if os.name == "nt":
-        return "deno-x86_64-pc-windows-msvc.zip"
+        return f"node-{NODE_VERSION}-win-{'arm64' if arm else 'x64'}.zip"
     if sys.platform == "darwin":
-        return ("deno-aarch64-apple-darwin.zip" if arm
-                else "deno-x86_64-apple-darwin.zip")
-    return ("deno-aarch64-unknown-linux-gnu.zip" if arm
-            else "deno-x86_64-unknown-linux-gnu.zip")
+        return f"node-{NODE_VERSION}-darwin-{'arm64' if arm else 'x64'}.tar.gz"
+    return f"node-{NODE_VERSION}-linux-{'arm64' if arm else 'x64'}.tar.xz"
 
 
-def _deno_name() -> str:
-    return "deno.exe" if os.name == "nt" else "deno"
+def _node_name() -> str:
+    return "node.exe" if os.name == "nt" else "node"
 
 
-def deno_path() -> str:
-    """Deno for yt-dlp: the one Merlin fetched, else one on the PATH."""
-    local = os.path.join(ytdlp_folder(), _deno_name())
+def _node_ok(path: str) -> bool:
+    """A Node new enough for pages' scripts (22 or later: its permission
+    model and module hooks)."""
+    try:
+        done = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=20,
+                              stdin=subprocess.DEVNULL, **_hidden())
+        major = int(done.stdout.strip().lstrip("v").split(".")[0])
+        return done.returncode == 0 and major >= 22
+    except Exception:                             # noqa: BLE001
+        return False
+
+
+def node_path() -> str:
+    """Node.js: the one Merlin fetched, else a recent one on the PATH."""
+    local = os.path.join(ytdlp_folder(), NODE_FOLDER, _node_name())
     if os.path.isfile(local):
         return local
-    return shutil.which("deno") or ""
+    found = shutil.which("node") or ""
+    if found and _node_ok(found):
+        return found
+    return ""
 
 
-def fetch_deno(timeout: int = 300) -> tuple[bool, str]:
-    """Download Deno from its GitHub releases into Merlin's tools folder."""
+def remove_deno() -> bool:
+    """Deno, fetched by an older Merlin, taken away: it is Rust. Whether one was.
+    Its cache of pages' modules goes with it."""
+    gone = False
+    try:
+        from . import settings as cfg
+
+        old_cache = os.path.join(cfg.CACHE_DIR, "js-modules")
+        if os.path.isdir(old_cache):
+            shutil.rmtree(old_cache, ignore_errors=True)
+            gone = True
+    except Exception:                             # noqa: BLE001
+        pass
+    for name in ("deno.exe", "deno"):
+        path = os.path.join(ytdlp_folder(), name)
+        if os.path.isfile(path):
+            try:
+                os.remove(path)
+                gone = True
+            except OSError:
+                pass
+    return gone
+
+
+def fetch_node(timeout: int = 600) -> tuple[bool, str]:
+    """Download Node.js from nodejs.org into Merlin's tools folder."""
+    import hashlib
+    import tarfile
     import tempfile
     import urllib.request
     import zipfile
 
-    folder = ytdlp_folder()
-    target = os.path.join(folder, _deno_name())
+    folder = os.path.join(ytdlp_folder(), NODE_FOLDER)
+    target = os.path.join(folder, _node_name())
+    asset = _node_asset()
     try:
         os.makedirs(folder, exist_ok=True)
-        request = urllib.request.Request(
-            DENO_RELEASES + _deno_asset(),
-            headers={"User-Agent": "Merlin Browser"})
+        ask = lambda url: urllib.request.Request(url, headers={"User-Agent": "Merlin Browser"})   # noqa: E731
+        with urllib.request.urlopen(ask(NODE_DIST + "SHASUMS256.txt"), timeout=60) as response:
+            sums = response.read().decode("utf-8", "replace")
+        wanted = next((line.split()[0] for line in sums.splitlines()
+                       if line.strip().endswith(" " + asset) or line.strip().endswith("*" + asset)), "")
+        if not wanted:
+            return False, f"nodejs.org lists no {asset}"
         with tempfile.TemporaryDirectory() as scratch:
-            archive = os.path.join(scratch, "deno.zip")
-            with urllib.request.urlopen(request, timeout=timeout) as response, \
+            archive = os.path.join(scratch, asset)
+            digest = hashlib.sha256()
+            with urllib.request.urlopen(ask(NODE_DIST + asset), timeout=timeout) as response, \
                     open(archive, "wb") as out:
-                shutil.copyfileobj(response, out)
-            with zipfile.ZipFile(archive) as bundle:
-                names = [n for n in bundle.namelist()
-                         if os.path.basename(n) == _deno_name()]
-                if not names:
-                    return False, "The Deno download did not contain deno."
-                partial = target + ".part"
-                with bundle.open(names[0]) as source, open(partial, "wb") as out:
-                    shutil.copyfileobj(source, out)
+                while True:
+                    chunk = response.read(1 << 20)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    out.write(chunk)
+            if digest.hexdigest() != wanted.lower():
+                return False, "The Node.js download did not match its published checksum."
+            partial = target + ".part"
+            if asset.endswith(".zip"):
+                with zipfile.ZipFile(archive) as bundle:
+                    names = [n for n in bundle.namelist() if n.endswith("/" + _node_name()) and n.count("/") == 1]
+                    if not names:
+                        return False, "The Node.js download did not contain node."
+                    with bundle.open(names[0]) as source, open(partial, "wb") as out:
+                        shutil.copyfileobj(source, out)
+            else:
+                with tarfile.open(archive) as bundle:
+                    member = next((m for m in bundle.getmembers()
+                                   if m.isfile() and m.name.endswith("/bin/node")), None)
+                    if member is None:
+                        return False, "The Node.js download did not contain node."
+                    with bundle.extractfile(member) as source, open(partial, "wb") as out:
+                        shutil.copyfileobj(source, out)
+            # no Rust: what is kept is scanned as Merlin's audit scans everything
+            try:
+                from . import rustaudit
+
+                found = rustaudit.scan_file(partial)
+            except Exception:                     # noqa: BLE001
+                found = []
+            if found:
+                os.remove(partial)
+                return False, "That Node.js contains Rust (" + ", ".join(found[:2]) + "), so it was not kept."
             os.replace(partial, target)
         if os.name != "nt":
             os.chmod(target, 0o755)
     except Exception as exc:                      # noqa: BLE001
-        return False, f"Could not fetch Deno: {exc}"
+        return False, f"Could not fetch Node.js: {exc}"
 
-    ok, version = deno_version()
+    ok, version = node_version()
     if not ok:
-        return False, f"Deno was fetched but will not run: {version}"
-    return True, f"Deno {version} is ready"
+        return False, f"Node.js was fetched but will not run: {version}"
+    remove_deno()
+    return True, f"Node.js {version} is ready"
 
 
-def deno_version() -> tuple[bool, str]:
-    path = deno_path()
+def node_version() -> tuple[bool, str]:
+    path = node_path()
     if not path:
         return False, "not installed"
     try:
@@ -359,8 +436,7 @@ def deno_version() -> tuple[bool, str]:
         return False, str(exc)
     if done.returncode != 0:
         return False, (done.stderr or done.stdout).strip()[:200]
-    first = done.stdout.strip().splitlines()[0] if done.stdout.strip() else ""
-    return True, first.replace("deno ", "").split(" ")[0] or first
+    return True, done.stdout.strip() or "?"
 
 
 def _needs_js_runtime(url: str) -> bool:
@@ -376,7 +452,7 @@ _HELPERS: set = set()
 
 
 def _run_helper(argv: list, timeout: int, record: list = None) -> subprocess.CompletedProcess:
-    """Run yt-dlp or Deno, and remember it until it finishes.
+    """Run yt-dlp or Node, and remember it until it finishes.
 
     A lookup still running when Merlin closes would otherwise carry on for
     up to its whole timeout, keeping a process alive after the window has
@@ -399,7 +475,7 @@ def _run_helper(argv: list, timeout: int, record: list = None) -> subprocess.Com
 
 
 def stop_helpers() -> int:
-    """End any yt-dlp or Deno process still running. Returns how many."""
+    """End any yt-dlp or Node process still running. Returns how many."""
     stopped = 0
     for proc in list(_HELPERS):
         if proc.poll() is None:
@@ -482,7 +558,7 @@ def ytdlp_version() -> tuple[bool, str]:
 
 JS_RUNTIME_MISSING = (
     "YouTube only gives its video to a client that can solve a JavaScript "
-    "challenge, and yt-dlp needs a JavaScript runtime, Deno, to do that.")
+    "challenge, and yt-dlp needs a JavaScript runtime, Node.js, to do that.")
 
 
 # How to ask YouTube for something playable, tried in order until one works.
@@ -780,11 +856,11 @@ def _write_cookie_file(rows: list) -> str:
 
 
 def _resolve(url: str, timeout: int, path: str, base: list) -> tuple[bool, str]:
-    deno = deno_path()
-    if deno:
+    node = node_path()
+    if node:
         # named explicitly rather than left to be found: on Linux yt-dlp only
         # looks on the PATH, and Merlin's copy lives in its own folder
-        base = base + ["--js-runtimes", f"deno:{deno}"]      # a new list: _resolve may run twice
+        base = base + ["--js-runtimes", f"node:{node}"]      # a new list: _resolve may run twice
     elif _needs_js_runtime(url):
         return False, JS_RUNTIME_MISSING
 
@@ -809,7 +885,7 @@ def _resolve(url: str, timeout: int, path: str, base: list) -> tuple[bool, str]:
             base, url, attempts, timeout, note)
     if found_stream:
         return True, found_stream
-    if runtime_missing and not deno:
+    if runtime_missing and not node:
         return False, JS_RUNTIME_MISSING
 
     # YouTube changes often and yt-dlp follows it, so a failure is often just

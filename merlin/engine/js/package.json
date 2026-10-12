@@ -1,0 +1,5 @@
+{
+  "name": "merlin-engine-host",
+  "private": true,
+  "type": "module"
+}

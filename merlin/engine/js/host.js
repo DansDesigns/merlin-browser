@@ -1,4 +1,6 @@
-// Merlin Engine's JavaScript host: one per tab, run by Deno with no permissions.
+// Merlin Engine's JavaScript host: one per tab, run by Node.js (V8, C++: no
+// Rust, as Deno, its runtime before, is) under Node's permission model: no
+// files but its own, no processes, no add-ons.
 //
 // It holds the page's DOM (linkedom), runs the page's scripts against it, and
 // talks to Merlin one JSON message per line on stdin and stdout. Merlin does
@@ -7,11 +9,55 @@
 // the new page is sent back for Merlin Engine to style and lay out.
 import { parseHTML } from "./linkedom.bundle.js";
 import vm from "node:vm";
+import fs from "node:fs";
+import { registerHooks } from "node:module";
+import { Worker as NodeWorker } from "node:worker_threads";
+import { resolveObjectURL } from "node:buffer";
 
-// Deno's own event classes, kept before the DOM's take their names: the
-// window is Deno's event target, and takes only these
-const DenoEvent = globalThis.Event;
-const denoDispatch = globalThis.EventTarget.prototype.dispatchEvent;
+// Node's own process, kept here before the page's globals are made: the page
+// never sees it (see lockDown)
+const proc = globalThis.process;
+// Every module this host needs is above. After the page is in, nothing more
+// is loaded the way Node loads modules: a page's code (an import() made from
+// a Function, say) could otherwise reach Node's own (files, the network).
+// Pages' modules are fetched by Merlin and made here (see importModule).
+let locked = false;
+registerHooks({
+  resolve(specifier, context, next) {
+    if (locked) throw Object.assign(new TypeError(`Failed to resolve module specifier "${specifier}"`), { code: "ERR_MERLIN_BLOCKED" });
+    return next(specifier, context);
+  },
+});
+
+// Node's own event classes, kept before the DOM's take their names. Node's
+// global object is no event target (Deno's and a browser's are): the window's
+// events go to one of its own, standing in for the window.
+const NodeEvent = globalThis.Event;
+const NodeEventTarget = globalThis.EventTarget;
+const NodeMessageEvent = globalThis.MessageEvent;
+const windowEvents = new EventTarget();
+const windowListeners = new WeakMap();      // a page's listener -> what Node is given
+function windowDispatch(event) {
+  for (const name of ["target", "currentTarget", "srcElement"]) {
+    try { Object.defineProperty(event, name, { value: globalThis, configurable: true }); } catch (_) {}
+  }
+  return windowEvents.dispatchEvent(event);
+}
+function windowListen(type, listener, options) {
+  if (!listener) return;
+  let wrapped = windowListeners.get(listener);
+  if (!wrapped) {
+    // called with the window as this, as a browser calls them
+    wrapped = typeof listener === "function" ? function (event) { return listener.call(globalThis, event); }
+      : { handleEvent: (event) => listener.handleEvent(event) };
+    windowListeners.set(listener, wrapped);
+  }
+  windowEvents.addEventListener(type, wrapped, options);
+}
+function windowUnlisten(type, listener, options) {
+  const wrapped = listener && windowListeners.get(listener);
+  if (wrapped) windowEvents.removeEventListener(type, wrapped, options);
+}
 // navigator.userAgentData, as Chrome gives it, from the user agent the
 // connections send: a Chrome user agent with none (as Merlin Engine's had) is
 // a contradiction sites that look for robots look for. Other browsers: none.
@@ -46,13 +92,18 @@ function chromeHints(agent, sent) {
 }
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-const stdout = Deno.stdout;
-const stdinReader = Deno.stdin.readable.getReader();
-
 function send(message) {
   const line = encoder.encode(JSON.stringify(message) + "\n");
   let written = 0;
-  while (written < line.length) written += stdout.writeSync(line.subarray(written));
+  while (written < line.length) {
+    try { written += fs.writeSync(1, line, written); }
+    catch (e) { if (e.code !== "EAGAIN") throw e; }
+  }
+}
+
+// until the page's own is made: an error is never lost for want of one
+if (typeof globalThis.reportError !== "function") {
+  globalThis.reportError = (error) => { try { send({ type: "console", level: "error", text: "Uncaught " + String(error && error.stack || error) }); } catch (_) {} };
 }
 
 // console goes to Merlin as messages: anything printed would break the channel
@@ -113,9 +164,14 @@ async function merlinFetch(input, init = {}) {
     else if (body instanceof URLSearchParams) { bodyB64 = toBase64(encoder.encode(body.toString())); headers["content-type"] ??= "application/x-www-form-urlencoded;charset=UTF-8"; }
     else if (body instanceof ArrayBuffer) bodyB64 = toBase64(new Uint8Array(body));
     else if (ArrayBuffer.isView(body)) bodyB64 = toBase64(new Uint8Array(body.buffer, body.byteOffset, body.byteLength));
-    else if (typeof FormData !== "undefined" && body instanceof FormData) {
-      const encoded = new URLSearchParams(); for (const [k, v] of body) encoded.append(k, String(v));
-      bodyB64 = toBase64(encoder.encode(encoded.toString())); headers["content-type"] ??= "application/x-www-form-urlencoded;charset=UTF-8";
+    else if ((typeof FormData !== "undefined" && body instanceof FormData) || (typeof Blob !== "undefined" && body instanceof Blob)) {
+      // as a browser sends them: FormData as multipart/form-data, its files
+      // in it (it had gone as a plain form, its files lost: Ponder's
+      // background uploads), and a Blob as its bytes, with its type
+      const made = new NativeRequest("http://localhost/", { method: "POST", body });
+      bodyB64 = toBase64(new Uint8Array(await made.arrayBuffer()));
+      const kind = made.headers.get("content-type");
+      if (kind) { for (const key of Object.keys(headers)) if (key.toLowerCase() === "content-type") delete headers[key]; headers["content-type"] = kind; }
     } else bodyB64 = toBase64(encoder.encode(String(body)));
   }
   const answer = await ask({ type: "fetch", url, method, headers, body: bodyB64, credentials: init.credentials || "same-origin" });
@@ -195,8 +251,8 @@ function evaluateMedia(query) {
   return q.split(",").some(alt => alt.split(/\band\b/).every(test));
 }
 
-// Deno has its own localStorage, navigator, location and more, some read-only:
-// assigned, the page's were silently ignored and it got Deno's. Defined instead.
+// The runtime has its own navigator, fetch and more, some read-only: assigned,
+// the page's were silently ignored and it got the runtime's. Defined instead.
 function define(name, value) {
   try { Object.defineProperty(globalThis, name, { value, writable: true, configurable: true, enumerable: true }); }
   catch (_) { try { globalThis[name] = value; } catch (__) {} }
@@ -230,7 +286,7 @@ function install(html) {
   const made = parseHTML(html);
   window_ = made.window; document_ = made.document;
   const g = globalThis;
-  // Deno's own versions of these go first (they are configurable), so the
+  // The runtime's own versions of these go first (they are configurable), so the
   // page's below take their place rather than being silently ignored
   for (const name of ["location", "navigator", "localStorage", "sessionStorage", "history", "screen",
                       "alert", "confirm", "prompt", "open", "close", "WebSocket", "EventSource", "Worker",
@@ -468,7 +524,7 @@ function install(html) {
   g.getSelection = () => ({ rangeCount: 0, toString: () => "", removeAllRanges() {}, addRange() {} });
   g.WebSocket = class { constructor() { throw new Error("WebSocket is not available in Merlin Engine yet"); } };
   g.EventSource = class { constructor() { this.readyState = 2; } close() {} addEventListener() {} };
-  g.Worker = class { constructor() { throw new Error("Workers are not available in Merlin Engine yet"); } };
+  g.Worker = makeWorkerClass();
   g.XMLHttpRequest = makeXHR();
   // a form field's type as browsers give it: linkedom gave null for an input
   // with none, and React, seeing no text field, ignored typing in it
@@ -532,18 +588,16 @@ function install(html) {
       } catch (_) {}
     }
   }
-  // The window is Deno's own event target, which takes only Deno's events: an
+  // The window's event target takes only Node's own events: an
   // event made from the DOM's classes (PopStateEvent, or the load and scroll
   // this host sends) failed on it, reading 'target', so no page ever heard a
   // window's load, scroll or popstate. It is passed on as a native event with
   // the same details, and a cancelled one is cancelled for the page too.
-  const NativeEvent = DenoEvent;
-  const nativeDispatch = denoDispatch;
-  // one load for the page, after its scripts, as browsers give it: Deno
-  // fires its own load on the window too, and pages heard two
-  g.addEventListener("load", (event) => { if (!state.pageLoad) event.stopImmediatePropagation(); }, { capture: true });
+  const NativeEvent = NodeEvent;
+  g.addEventListener = windowListen;
+  g.removeEventListener = windowUnlisten;
   g.dispatchEvent = function (event) {
-    if (event instanceof NativeEvent) return nativeDispatch.call(g, event);
+    if (event instanceof NativeEvent) return windowDispatch(event);
     const native = new NativeEvent(event.type, { bubbles: !!event.bubbles, cancelable: event.cancelable !== false,
                                                  composed: !!event.composed });
     for (const key of Object.keys(event)) {
@@ -553,7 +607,7 @@ function install(html) {
     for (const key of ["state", "detail", "key", "code", "clientX", "clientY", "button", "data", "newURL", "oldURL", "persisted"]) {
       if (key in event && !(key in native)) { try { Object.defineProperty(native, key, { value: event[key], configurable: true }); } catch (_) {} }
     }
-    const result = nativeDispatch.call(g, native);
+    const result = windowDispatch(native);
     if (native.defaultPrevented) { try { event.preventDefault(); } catch (_) {} }
     return result;
   };
@@ -566,6 +620,8 @@ function install(html) {
     }, 0);
   };
   installFrames(g, made);
+  installWebExtras(g);
+  installSelects();
   // form.submit() and requestSubmit(), which the DOM had as nothing at all:
   // search boxes that send their form from a script (Google's, Ponder's) did
   // nothing on Enter. requestSubmit runs the page's submit handlers first.
@@ -575,13 +631,16 @@ function install(html) {
   {
     const elementProto = (g.HTMLElement || made.HTMLElement).prototype;
     const isFile = (el) => el.tagName === "INPUT" && (el.getAttribute("type") || "").toLowerCase() === "file";
+    // what the dialog is for: an input never put in the page is known only by this
+    const pickFile = (el) => ({ type: "pick_file", target: idOf(el), accept: el.getAttribute("accept") || "",
+                                multiple: el.hasAttribute("multiple") });
     const originalClick = elementProto.click;
     elementProto.click = function () {
-      if (isFile(this)) { if (!this.hasAttribute("disabled")) send({ type: "pick_file", target: idOf(this) }); return; }
+      if (isFile(this)) { if (!this.hasAttribute("disabled")) send(pickFile(this)); return; }
       if (typeof originalClick === "function") return originalClick.call(this);
       this.dispatchEvent(new g.MouseEvent("click", { bubbles: true, cancelable: true }));
     };
-    elementProto.showPicker = function () { if (isFile(this)) send({ type: "pick_file", target: idOf(this) }); };
+    elementProto.showPicker = function () { if (isFile(this)) send(pickFile(this)); };
   }
   // on the element class itself: the DOM does not make <form> an
   // HTMLFormElement, and methods put there never reached a form
@@ -826,27 +885,64 @@ function install(html) {
       } catch (_) {}
     }
   }
-  // Node's globals, which Deno has and no browser does, go: GitHub's code saw
+  // Node's globals, which no browser has, go: GitHub's code saw
   // process, took itself to be in Node, and failed reading process.env
   // An error in a timer or an unhandled promise, through Node's timers (as
   // scripts in node:vm use them), ended the whole process: reported instead,
   // and the page goes on, as in a browser. Then Node's globals go.
   try {
-    g.process?.on?.("uncaughtException", (error) => reportError(error));
-    g.process?.on?.("unhandledRejection", (reason) => reportError(reason));
+    // the page hears them as a browser's window does (window.onerror and
+    // listeners for "error" and "unhandledrejection"), and they are logged
+    const tell = (type, fields) => {
+      try {
+        const event = new NodeEvent(type, { cancelable: true });
+        for (const [key, value] of Object.entries(fields)) Object.defineProperty(event, key, { value, configurable: true });
+        windowDispatch(event);
+      } catch (_) {}
+    };
+    proc.on("uncaughtException", (error) => {
+      tell("error", { error, message: String(error && error.message || error), filename: "", lineno: 0, colno: 0 });
+      reportError(error);
+    });
+    proc.on("unhandledRejection", (reason, promise) => {
+      tell("unhandledrejection", { reason, promise });
+      reportError(reason);
+    });
   } catch (_) {}
   for (const name of ["setTimeout", "setInterval"]) {
     const original = g[name];
     if (typeof original !== "function" || original.__guarded) continue;
+    // a number, as a browser's timers give (Node's are objects; clearTimeout
+    // takes the number back once it has been asked for)
+    const numbered = (timer) => (timer && typeof timer[Symbol.toPrimitive] === "function" ? timer[Symbol.toPrimitive]() : timer);
     const guarded = function (callback, delay, ...rest) {
-      if (typeof callback !== "function") return original.call(this, callback, delay, ...rest);
-      return original.call(this, function () { try { return callback.apply(this, arguments); } catch (e) { reportError(e); } }, delay, ...rest);
+      if (typeof callback !== "function") return numbered(original.call(this, () => {}, delay));
+      return numbered(original.call(this, function () { try { return callback.apply(this, arguments); } catch (e) { reportError(e); } }, delay, ...rest));
     };
     guarded.__guarded = true;
     g[name] = guarded;
   }
-  for (const name of ["process", "Buffer", "global", "setImmediate", "clearImmediate"]) {
+  for (const name of ["process", "global", "setImmediate", "clearImmediate"]) {
     try { delete g[name]; } catch (_) {}
+  }
+  // Buffer, as Node's own fetch classes see it (Response.text() needs it),
+  // and as the page sees it: not there, unless the page puts one there itself
+  // (some bundles bring their own), as in a browser
+  {
+    const NodeBuffer = g.Buffer;
+    let pageBuffer;
+    try {
+      Object.defineProperty(g, "Buffer", { enumerable: false, configurable: true,
+        get() {
+          const limit = Error.stackTraceLimit, prepare = Error.prepareStackTrace;
+          Error.stackTraceLimit = 4; Error.prepareStackTrace = undefined;
+          const holder = {};
+          try { Error.captureStackTrace(holder); } finally { Error.stackTraceLimit = limit; Error.prepareStackTrace = prepare; }
+          const caller = String(holder.stack || "").split("\n")[2] || "";
+          return caller.includes("node:") ? NodeBuffer : pageBuffer;
+        },
+        set(value) { pageBuffer = value; } });
+    } catch (_) {}
   }
   g.CSS = {
     escape(value) {
@@ -988,10 +1084,8 @@ function install(html) {
     showWhere(error).catch(() => {});
   };
   // An uncaught error, in a timer or an event, is reported and the page goes
-  // on, as in a browser. Deno ends the process on one by default: one error in
-  // GitHub's scripts had ended all of them.
-  g.addEventListener("error", (event) => { event.preventDefault?.(); g.reportError(event.error ?? event.message); });
-  g.addEventListener("unhandledrejection", (event) => { event.preventDefault?.(); g.reportError(event.reason); });
+  // on, as in a browser (see the process's handlers in install): one error in
+  // GitHub's scripts had once ended all of them.
 }
 
 // Event handler properties (oninput, onclick...), as every browser has them on
@@ -1158,10 +1252,93 @@ async function showWhere(error) {
   send({ type: "console", level: "error", text: `  near ${url.split("/").pop()}:${line}:${column}: ${excerpt}` });
 }
 
-// import() in a plain script, or an inline module, is resolved against the
-// page's address, as in a browser. Deno resolved it against this file on the
-// disk: Hugging Face's import("/front/build/...") asked to read C:\front\...
-globalThis.__merlinImport = (specifier) => import(new URL(String(specifier), state.url).href);
+// ------------------------------------------------------------------ modules
+// A page's modules, fetched by Merlin (with the page's cookies, through the
+// content blocker, as Chrome connects) and made here, each with its address
+// as import.meta.url; addresses resolved as a browser does, by the page's
+// import map too. Deno had fetched them itself.
+const modules = new Map();          // an address -> the promise of its module
+let inlineModules = 0;
+function resolveSpecifier(specifier, base) {
+  specifier = String(specifier);
+  const map = state.importMap || {};
+  const bare = !/^(\/|\.\/|\.\.\/)/.test(specifier) && !/^[a-z][a-z0-9+.-]*:/i.test(specifier);
+  const lookup = (table) => {
+    if (!table) return null;
+    if (table[specifier]) return table[specifier];
+    let best = null;
+    for (const key of Object.keys(table)) {
+      if (key.endsWith("/") && specifier.startsWith(key) && (!best || key.length > best.length)) best = key;
+    }
+    return best ? table[best] + specifier.slice(best.length) : null;
+  };
+  if (bare || specifier.startsWith("/") || specifier.startsWith(".")) {
+    // scopes first, the nearest scope of the importing module, then imports
+    const scopes = Object.keys(map.scopes || {}).filter((scope) => String(base).startsWith(scope))
+      .sort((a, b) => b.length - a.length);
+    for (const scope of scopes) {
+      const found = lookup(map.scopes[scope]);
+      if (found) return new URL(found, base).href;
+    }
+    const found = lookup(map.imports);
+    if (found) return new URL(found, base).href;
+  }
+  if (bare) throw new TypeError(`Failed to resolve module specifier "${specifier}"`);
+  return new URL(specifier, base).href;
+}
+function makeModule(source, url) {
+  return new vm.SourceTextModule(source, {
+    identifier: url,
+    initializeImportMeta(meta) {
+      meta.url = url.replace(/#inline-module-\d+$/, "");
+      meta.resolve = (specifier) => resolveSpecifier(specifier, meta.url);
+    },
+    importModuleDynamically: (specifier) => moduleEvaluated(resolveSpecifier(specifier, url)),
+  });
+}
+function moduleLinked(url) {
+  if (modules.has(url)) return modules.get(url);
+  const made = (async () => {
+    let source;
+    if (url.startsWith("data:")) {
+      const comma = url.indexOf(",");
+      const head = url.slice(5, comma), body = url.slice(comma + 1);
+      source = head.endsWith(";base64") ? decoder.decode(fromBase64(body)) : decodeURIComponent(body);
+    } else if (/^https?:/i.test(url)) {
+      const response = await merlinFetch(url, { credentials: "same-origin", headers: { "sec-fetch-dest": "script" } });
+      if (!response.ok) throw new TypeError(`Failed to fetch dynamically imported module: ${url} (${response.status})`);
+      source = await response.text();
+      sources.set(url, source);
+    } else {
+      throw new TypeError(`Failed to fetch dynamically imported module: ${url}`);
+    }
+    const made = makeModule(source, url);
+    await made.link((specifier, referrer) => moduleLinked(resolveSpecifier(specifier, referrer.identifier)));
+    return made;
+  })();
+  modules.set(url, made);
+  return made;
+}
+async function moduleEvaluated(url) {
+  const made = await moduleLinked(url);
+  if (made.status === "linked") await made.evaluate();
+  else if (made.status === "evaluating" || made.status === "evaluated") await made.evaluate().catch(() => {});
+  if (made.status === "errored") throw made.error;
+  return made;
+}
+async function importModule(url) {
+  return (await moduleEvaluated(url)).namespace;
+}
+async function inlineModule(code) {
+  const url = `${state.url.split("#")[0]}#inline-module-${++inlineModules}`;
+  const made = makeModule(code, url);
+  await made.link((specifier, referrer) => moduleLinked(resolveSpecifier(specifier, state.url)));
+  await made.evaluate();
+  return made.namespace;
+}
+// import() in a plain script is resolved against the page's address, as in a
+// browser (Hugging Face's import("/front/build/...")), and fetched as above
+globalThis.__merlinImport = (specifier) => importModule(resolveSpecifier(specifier, state.url));
 // Rewrites import() to __merlinImport(), and in inline modules the addresses
 // of static imports, outside strings, comments, templates and regular
 // expressions: a plain pattern had changed the text of a page's own strings.
@@ -1231,7 +1408,7 @@ async function classic(script) {
   let code = script.textContent;
   if (src) {
     try {
-      const response = await merlinFetch(src, { credentials: "same-origin" });
+      const response = await merlinFetch(src, { credentials: "same-origin", headers: { "sec-fetch-dest": "script" } });
       if (!response.ok) { send({ type: "console", level: "warn", text: `script ${src}: ${response.status}` }); return; }
       code = await response.text();
       sources.set(new URL(src, state.url).href, code);
@@ -1242,7 +1419,10 @@ async function classic(script) {
   // a real script, as in a browser: its top-level const, let and class are
   // seen by the scripts and modules after it, as eval's were not
   const name = src ? new URL(src, state.url).href : `${state.url}#inline-script`;
-  try { new vm.Script(pageImports(code, false), { filename: name }).runInThisContext(); }
+  try {
+    new vm.Script(pageImports(code, false), { filename: name,
+      importModuleDynamically: (specifier) => moduleEvaluated(resolveSpecifier(specifier, state.url)) }).runInThisContext();
+  }
   catch (e) { reportError(e); }
   try { document_.currentScript = null; } catch (_) {}
   fire(script, "load");
@@ -1258,8 +1438,8 @@ function withinTime(promise, seconds, what) {
 async function moduleScript(script) {
   const src = script.getAttribute("src");
   try {
-    if (src) await withinTime(import(new URL(src, state.url).href), 20, src);
-    else await withinTime(import("data:text/javascript;charset=utf-8," + encodeURIComponent(pageImports(script.textContent, true))), 20, "inline module");
+    if (src) await withinTime(importModule(new URL(src, state.url).href), 20, src);
+    else await withinTime(inlineModule(script.textContent), 20, "inline module");
     fire(script, "load");
   } catch (e) {
     send({ type: "console", level: "warn", text: `module ${src || "(inline)"}: ${e.message}` });
@@ -1373,8 +1553,249 @@ function watchForScripts() {
 }
 
 
+
+// <select> and <option> as a browser has them: linkedom's select had a value
+// it could not be given, no selectedIndex, and remove(i) removed the whole
+// select (Ponder empties its background list with sel.remove(1) in a loop,
+// which then never ended); an option without a value attribute had none,
+// where a browser's is its text.
+function installSelects() {
+  const selectProto = Object.getPrototypeOf(document_.createElement("select"));
+  const optionProto = Object.getPrototypeOf(document_.createElement("option"));
+  const define = (proto, name, descriptor) => {
+    try { Object.defineProperty(proto, name, { configurable: true, ...descriptor }); } catch (_) {}
+  };
+  const optionsOf = (select) => [...select.querySelectorAll("option")];
+  const chosen = (select) => {
+    const options = optionsOf(select);
+    const marked = options.filter((o) => o.hasAttribute("selected"));
+    if (marked.length) return marked[marked.length - 1];
+    return select.hasAttribute("multiple") ? null : (options.find((o) => !o.hasAttribute("disabled")) || null);
+  };
+  const choose = (select, option) => {
+    for (const other of optionsOf(select)) if (other !== option && other.hasAttribute("selected")) other.removeAttribute("selected");
+    if (option && !option.hasAttribute("selected")) option.setAttribute("selected", "");
+  };
+  define(optionProto, "value", {
+    get() { return this.hasAttribute("value") ? this.getAttribute("value") : String(this.textContent || "").replace(/\s+/g, " ").trim(); },
+    set(v) { this.setAttribute("value", String(v)); },
+  });
+  define(optionProto, "text", {
+    get() { return String(this.textContent || "").replace(/\s+/g, " ").trim(); },
+    set(v) { this.textContent = String(v); },
+  });
+  define(optionProto, "selected", {
+    get() { const select = this.closest("select"); return select ? chosen(select) === this : this.hasAttribute("selected"); },
+    set(v) {
+      const select = this.closest("select");
+      if (v) { if (select && !select.hasAttribute("multiple")) choose(select, this); else this.setAttribute("selected", ""); }
+      else this.removeAttribute("selected");
+    },
+  });
+  define(optionProto, "index", { get() { const select = this.closest("select"); return select ? optionsOf(select).indexOf(this) : 0; } });
+  define(selectProto, "options", { get() {
+    const select = this, list = optionsOf(select);
+    return Object.assign(list, {
+      item(i) { return list[i] ?? null; }, namedItem(n) { return list.find((o) => o.id === n || o.getAttribute("name") === n) ?? null; },
+      add(option, before) { select.add(option, before); }, remove(i) { select.remove(i); },
+      get selectedIndex() { return select.selectedIndex; }, set selectedIndex(i) { select.selectedIndex = i; },
+    });
+  } });
+  define(selectProto, "length", { get() { return optionsOf(this).length; } });
+  define(selectProto, "value", {
+    get() { const option = chosen(this); return option ? option.value : ""; },
+    set(v) { choose(this, optionsOf(this).find((o) => o.value === String(v)) || null); },
+  });
+  define(selectProto, "selectedIndex", {
+    get() { const option = chosen(this); return option ? optionsOf(this).indexOf(option) : -1; },
+    set(i) { choose(this, optionsOf(this)[Number(i)] || null); },
+  });
+  define(selectProto, "selectedOptions", { get() { return optionsOf(this).filter((o) => o.selected); } });
+  define(selectProto, "type", { get() { return this.hasAttribute("multiple") ? "select-multiple" : "select-one"; } });
+  const removeNode = Object.getPrototypeOf(selectProto).remove || selectProto.remove;
+  define(selectProto, "remove", { writable: true, value: function (index) {
+    // remove() is the element's own; remove(i), its i-th option's
+    if (arguments.length === 0) return removeNode.call(this);
+    const option = optionsOf(this)[Number(index)];
+    if (option) option.parentNode.removeChild(option);
+  } });
+  define(selectProto, "add", { writable: true, value: function (option, before) {
+    const ref = typeof before === "number" ? optionsOf(this)[before] : before;
+    if (ref && ref.parentNode) ref.parentNode.insertBefore(option, ref); else this.appendChild(option);
+  } });
+  define(selectProto, "item", { writable: true, value: function (i) { return optionsOf(this)[i] ?? null; } });
+}
+
+
+// What a browser has, and Deno had, that Node lacks: FileReader (Ponder reads
+// a chosen picture with it), and the events ErrorEvent, ProgressEvent and
+// PromiseRejectionEvent.
+function installWebExtras(g) {
+  const Base = NodeEvent;
+  const withFields = (name, fields) => class extends Base {
+    constructor(type, init = {}) {
+      super(type, init);
+      for (const [key, value] of Object.entries(fields)) {
+        try { Object.defineProperty(this, key, { value: key in init ? init[key] : value, configurable: true, enumerable: true }); } catch (_) {}
+      }
+    }
+    static get name() { return name; }
+  };
+  if (typeof g.ErrorEvent !== "function") g.ErrorEvent = withFields("ErrorEvent", { message: "", filename: "", lineno: 0, colno: 0, error: null });
+  if (typeof g.ProgressEvent !== "function") g.ProgressEvent = withFields("ProgressEvent", { lengthComputable: false, loaded: 0, total: 0 });
+  if (typeof g.PromiseRejectionEvent !== "function") g.PromiseRejectionEvent = withFields("PromiseRejectionEvent", { promise: null, reason: undefined });
+  if (typeof g.FileReader === "function") return;
+  g.FileReader = class FileReader extends NodeEventTarget {
+    static EMPTY = 0; static LOADING = 1; static DONE = 2;
+    constructor() {
+      super();
+      this.readyState = 0; this.result = null; this.error = null;
+      this.onload = this.onloadend = this.onerror = this.onloadstart = this.onprogress = this.onabort = null;
+    }
+    _emit(type, extra = {}) {
+      const event = new g.ProgressEvent(type, { lengthComputable: true, ...extra });
+      try { Object.defineProperty(event, "target", { value: this, configurable: true }); } catch (_) {}
+      try { this["on" + type]?.call(this, event); } catch (e) { reportError(e); }
+      try { this.dispatchEvent(event); } catch (e) { reportError(e); }
+    }
+    _read(blob, how) {
+      if (this.readyState === 1) throw new DOMException("The object is already busy reading Blobs.", "InvalidStateError");
+      this.readyState = 1; this.result = null; this.error = null; this._aborted = false;
+      queueMicrotask(() => this._emit("loadstart"));
+      Promise.resolve(blob && typeof blob.arrayBuffer === "function" ? blob.arrayBuffer() : new ArrayBuffer(0)).then((buffer) => {
+        if (this._aborted) return;
+        const bytes = new Uint8Array(buffer);
+        if (how === "buffer") this.result = buffer;
+        else if (how === "text") this.result = new TextDecoder(this._encoding || "utf-8").decode(bytes);
+        else if (how === "binary") { let text = ""; for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); this.result = text; }
+        else this.result = `data:${(blob && blob.type) || "application/octet-stream"};base64,${toBase64(bytes)}`;
+        this.readyState = 2;
+        this._emit("progress", { loaded: bytes.length, total: bytes.length });
+        this._emit("load", { loaded: bytes.length, total: bytes.length });
+        this._emit("loadend", { loaded: bytes.length, total: bytes.length });
+      }, (error) => {
+        this.readyState = 2; this.error = error;
+        this._emit("error"); this._emit("loadend");
+      });
+    }
+    readAsArrayBuffer(blob) { this._read(blob, "buffer"); }
+    readAsText(blob, encoding) { this._encoding = encoding; this._read(blob, "text"); }
+    readAsDataURL(blob) { this._read(blob, "dataurl"); }
+    readAsBinaryString(blob) { this._read(blob, "binary"); }
+    abort() { if (this.readyState === 1) { this._aborted = true; this.readyState = 2; this.result = null; this._emit("abort"); this._emit("loadend"); } }
+  };
+}
+
+
+// ------------------------------------------------------------------ workers
+// A Web Worker: a Node worker thread of this process (worker-host.js), its
+// fetches made by Merlin through this host. Convert to it! does its work in
+// one: without workers its page was never built, and stayed white.
+const WORKER_HOST = new URL("./worker-host.js", import.meta.url);
+function makeWorkerClass() {
+  return class Worker extends NodeEventTarget {
+    constructor(scriptURL, options = {}) {
+      super();
+      const url = new URL(String(scriptURL), state.url).href;
+      this._queue = [];
+      this._thread = null;
+      this._ended = false;
+      for (const kind of ["message", "messageerror", "error"]) {
+        let handler = null;
+        Object.defineProperty(this, "on" + kind, { configurable: true, enumerable: true,
+          get: () => handler,
+          set: (fn) => {
+            if (handler) this.removeEventListener(kind, handler);
+            handler = typeof fn === "function" ? fn : null;
+            if (handler) this.addEventListener(kind, handler);
+          } });
+      }
+      const type = options && options.type === "module" ? "module" : "classic";
+      const name = options && options.name ? String(options.name) : "";
+      (async () => {
+        let source;
+        let base = url;
+        if (url.startsWith("blob:")) {
+          const blob = resolveObjectURL(url);
+          if (!blob) throw new Error(`the worker's script (${url}) is gone`);
+          source = await blob.text();
+          base = state.url;
+        } else if (url.startsWith("data:")) {
+          const comma = url.indexOf(",");
+          const head = url.slice(5, comma), body = url.slice(comma + 1);
+          source = head.endsWith(";base64") ? decoder.decode(fromBase64(body)) : decodeURIComponent(body);
+          base = state.url;
+        }
+        if (this._ended) return;
+        const thread = new NodeWorker(WORKER_HOST, {
+          workerData: { url: base, type, name, source, userAgent: state.userAgent, language: state.language },
+          resourceLimits: { maxOldGenerationSizeMb: 1024 },
+        });
+        this._thread = thread;
+        thread.on("message", (message) => this._fromThread(message));
+        thread.on("error", (error) => this._failed(String(error && error.message || error)));
+        for (const [data, transfer] of this._queue.splice(0)) this._send(data, transfer);
+      })().catch((error) => this._failed(String(error && error.message || error)));
+    }
+    _send(data, transfer) {
+      const list = Array.isArray(transfer) ? transfer : (transfer && transfer.transfer) || [];
+      const ports = list.filter((x) => x instanceof MessagePort);
+      try { this._thread.postMessage({ __merlin: "message", data, ports }, list); }
+      catch (error) { throw new DOMException(String(error && error.message || error), "DataCloneError"); }
+    }
+    postMessage(data, transfer) {
+      if (this._ended) return;
+      if (!this._thread) {
+        // cloned now, as a browser does, though sent once the thread is up
+        this._queue.push([transfer ? data : structuredClone(data), transfer]);
+        return;
+      }
+      this._send(data, transfer);
+    }
+    terminate() {
+      this._ended = true;
+      if (this._thread) this._thread.terminate().catch(() => {});
+    }
+    _failed(message) {
+      const event = new NodeEvent("error", { cancelable: true });
+      try { Object.defineProperty(event, "message", { value: message, configurable: true }); } catch (_) {}
+      send({ type: "console", level: "warn", text: `worker: ${message}` });
+      this.dispatchEvent(event);
+    }
+    async _fromThread(message) {
+      if (!message || typeof message !== "object") return;
+      const kind = message.__merlin;
+      if (kind === "message") {
+        this.dispatchEvent(new NodeMessageEvent("message", { data: message.data, ports: message.ports || [] }));
+      } else if (kind === "console") {
+        send({ type: "console", level: message.level || "log", text: message.text || "" });
+      } else if (kind === "failed") {
+        this._failed(message.message || "the worker's script failed");
+      } else if (kind === "closed") {
+        this.terminate();
+      } else if (kind === "ask" || kind === "ask_now") {
+        let answer;
+        try {
+          const reply = await ask({ type: "fetch", url: message.url, method: message.method || "GET",
+                                    headers: message.headers || {}, body: message.body ? toBase64(message.body) : null,
+                                    credentials: "same-origin" });
+          answer = reply.error ? { error: reply.error } : { status: reply.status, statusText: reply.statusText,
+                   headers: reply.headers, url: reply.url, body: fromBase64(reply.body) };
+        } catch (error) { answer = { error: String(error && error.message || error) }; }
+        if (kind === "ask") {
+          if (this._thread) this._thread.postMessage({ __merlin: "answer", id: message.id, ...answer });
+        } else {
+          message.port.postMessage(answer);
+          Atomics.store(message.flag, 0, 1);
+          Atomics.notify(message.flag, 0);
+        }
+      }
+    }
+  };
+}
+
 // ------------------------------------------------------------------ frames
-// Each frame's page runs in a Deno process of its own, as Chrome runs each
+// Each frame's page runs in a process of its own, as Chrome runs each
 // site's frames apart. Other windows (the parent, the top, a frame's
 // contentWindow) are stand-ins here: their postMessage goes through Merlin to
 // that window's process, and a message from one arrives as a MessageEvent
@@ -1523,7 +1944,7 @@ function importPorts(ids) {
     return channel.port1;
   });
 }
-// Deno's MessageEvent takes only a MessagePort as its source: a window is
+// The runtime's MessageEvent takes only a MessagePort as its source: a window is
 // given to it afterwards, as a browser's event has it
 function messageEvent(data, origin, source, ports) {
   const event = new MessageEvent("message", { data, origin, ports: ports || [] });
@@ -1647,6 +2068,9 @@ function dispatch(message) {
     const click = make("click", extra);
     target.dispatchEvent(click);
     prevented = click.defaultPrevented;
+    // a click in a <label> works its control, as browsers do: a toggle switch
+    // is a label holding a hidden checkbox (Ponder's settings had not moved)
+    if (!prevented && activateLabel(target)) prevented = true;
   } else if (message.type === "input") {
     // As typing does in a browser: under any setter a framework put on the
     // element itself. React replaces an input's value setter to track changes,
@@ -1670,12 +2094,39 @@ function dispatch(message) {
   send({ type: "handled", id: message.id, prevented });
 }
 
+function activateLabel(target) {
+  const label = target.closest ? target.closest("label") : null;
+  if (!label) return false;
+  const interactive = target.closest("a[href], button, input, select, textarea");
+  if (interactive && label.contains(interactive)) return false;
+  const control = label.hasAttribute("for") ? document_.getElementById(label.getAttribute("for"))
+    : label.querySelector("input, select, textarea, button");
+  if (!control || control.hasAttribute("disabled")) return false;
+  const type = (control.getAttribute("type") || "").toLowerCase();
+  if (control.tagName === "INPUT" && (type === "checkbox" || type === "radio")) {
+    const before = !!control.checked;
+    if (type === "checkbox") control.checked = !before; else control.checked = true;
+    const click = new globalThis.Event("click", { bubbles: true, cancelable: true });
+    control.dispatchEvent(click);
+    if (click.defaultPrevented) { control.checked = before; return true; }
+    if (control.checked !== before) {
+      control.dispatchEvent(new globalThis.Event("input", { bubbles: true }));
+      control.dispatchEvent(new globalThis.Event("change", { bubbles: true }));
+    }
+    changed();
+    return true;
+  }
+  if (control.tagName === "BUTTON" || (control.tagName === "INPUT" && ["submit", "button", "reset", "image"].includes(type))) {
+    control.click();
+    return true;
+  }
+  return false;                    // a text field: Merlin puts the cursor in it
+}
+
 // ------------------------------------------------------------------ the loop
 async function main() {
   let buffer = "";
-  for (;;) {
-    const { value, done } = await stdinReader.read();
-    if (done) break;
+  for await (const value of proc.stdin) {
     buffer += decoder.decode(value, { stream: true });
     let newline;
     while ((newline = buffer.indexOf("\n")) >= 0) {
@@ -1688,6 +2139,7 @@ async function main() {
         // a page given without a doctype is in quirks mode, as Merlin found it
         state.quirks = !/^\s*<!doctype\s+html/i.test(String(message.html || ""));
         install(message.html);
+        lockDown();
         // Merlin's numbering of the elements becomes the ids here, and the
         // attributes go, so the page's scripts never see them; with the layout
         // Merlin has already done, scripts' first measurements are real
@@ -1716,8 +2168,18 @@ async function main() {
   }
 }
 
-// nothing of Deno is left for the page to see
-const keep = { stdin: stdinReader };
-delete globalThis.Deno;
+// Nothing of Node is left for the page to see or reach: its process and the
+// globals no browser has go (install takes most), and nothing more is loaded
+// as Node loads modules. Merlin's merlin_fetch is the page's only way out,
+// besides what Node's permission model allows this process at all: reading
+// these files, nothing else.
+function lockDown() {
+  locked = true;
+  for (const name of ["process", "global", "setImmediate", "clearImmediate", "require", "module",
+                      "__filename", "__dirname", "WebSocket", "EventSource", "fetch"]) {
+    if (name === "fetch") continue;                 // the page's own, made by install
+    try { delete globalThis[name]; } catch (_) {}
+  }
+}
+proc.stdin.on("end", () => proc.exit(0));         // Merlin has gone: so does this
 main().catch(e => { try { send({ type: "console", level: "error", text: "host: " + safeString(e) }); } catch (_) {} });
-void keep;

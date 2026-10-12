@@ -5,6 +5,58 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.25
+  No Rust anywhere in Merlin. Pages' JavaScript had run in Deno, and Deno is
+  written in Rust (Merlin's own Rust audit finds it at once): it runs in
+  Node.js now, which is C++ (V8, libuv, OpenSSL). Node is fetched once from
+  nodejs.org, a pinned release, checked against the release's own SHA-256
+  sums and scanned by the Rust audit before it is kept: a Node with any Rust
+  in it is refused. The Deno an older Merlin fetched, and its cache, are
+  removed. yt-dlp is given Node for YouTube's challenge too. (yt-dlp itself:
+  the Windows build has no Rust in it; on Linux Merlin runs the plain Python
+  release with its own Python, as before, not the Linux binary, which carries
+  cryptography's Rust library. Ponder's parts were chosen Rust-free in
+  1.8.23.)
+  Each tab's scripts run under Node's permission model: they may read
+  Merlin's own script files and nothing else, start no processes and load no
+  add-ons; and nothing of Node is left for the page (no process, no require,
+  no Node modules, by any route). Everything a page loads comes through
+  Merlin: its scripts and modules too, which Deno had fetched itself, so the
+  content blocker, the page's cookies and Chrome's way of connecting apply to
+  them as to everything else. Scripts and modules are kept on disk between
+  visits for as long as their servers allow.
+  Web Workers: a page's workers run as threads of its scripts' process, their
+  fetches made through Merlin, with modules, importScripts, Blob and data
+  addresses. Convert to it! does its work in workers, and without them its
+  page was never built: it had stayed white.
+  FileReader, which Node lacks and Deno had (Ponder reads a chosen background
+  with it); FormData sent as multipart/form-data with its files (it had gone
+  as a plain form, the files lost: Ponder's background uploads).
+  Ponder:
+  - Its dialogs close. A style changed on its own (el.style.display = "none")
+    had not been seen as a change to the page at all, so the favourites panel
+    stayed open; and what is inside a box centred with translate(-50%, -50%)
+    is clicked where it is drawn (its Close buttons had been at its corner).
+  - Its settings panel scrolls when it is taller than the window: a panel
+    that scrolls inside a fixed box now scrolls, and overflow-y: auto beside
+    overflow-x: hidden scrolls rather than clipping.
+  - Its results stop at the end of their list: what is clipped inside a panel
+    no longer makes the page longer, so the page no longer scrolled on into
+    nothing at the bottom.
+  - Its background list fills and chooses: a <select>'s options and value
+    follow the page's scripts, a choice reaches them as a change, and
+    select.remove(i) removes an option (it had removed the select, and the
+    script emptying the list never finished). Browse... opens the file dialog
+    for an input the page never put in the page, and the picture is uploaded.
+  - Its toggle switches work: a click in a <label> works its hidden checkbox,
+    and a field made invisible on purpose no longer shows its widget.
+  - Range inputs are sliders; text-transform (its "SETTINGS" headings) and
+    -webkit-line-clamp (its two-line snippets) are drawn.
+  - Its favourites panel's first entry is narrower than the rest: that is
+    Ponder's own CSS (margin-left and margin-right of 5rem on web and wiki
+    cards), drawn the same in Chrome. So is the very narrow background list
+    in its settings, beside a wide Browse button.
+
 1.8.24
   Frames (<iframe>) in Merlin Engine. A frame's page is fetched, laid out and
   drawn in its box, 300 by 150 unless given a size, and runs its scripts in a

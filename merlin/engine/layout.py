@@ -85,6 +85,7 @@ class DisplayList:
         self.animated_boxes = []         # where: only those in view are drawn again
         self.sticky = []                 # position: sticky boxes, each a dict (see Layout)
         self.scrollers = []              # panels that scroll inside the page (overflow: auto)
+        self.clip_boxes = []             # (first box, last box, clip record): boxes clipped by an area
         self.panel_scroll = {}           # each panel's scroll, by its key: kept by the view
 
     def panel_offset(self, scroller: dict) -> float:
@@ -402,6 +403,15 @@ class Layout:
                 self.out = DisplayList()
                 self._place_absolute(element, style, page, static_x, static_y)
                 pieces.append(self.out.items)
+                # a panel that scrolls inside a fixed box (Ponder's settings,
+                # taller than the window) scrolls there too: it had been left
+                # behind, and the box was cut off at the window's bottom
+                box_base, link_base = len(fixed.boxes), len(fixed.links)
+                for panel in self.out.scrollers:
+                    panel["boxes"] = (panel["boxes"][0] + box_base, panel["boxes"][1] + box_base)
+                    panel["links"] = (panel["links"][0] + link_base, panel["links"][1] + link_base)
+                    panel["fixed"] = True
+                    fixed.scrollers.append(panel)
                 fixed.items.extend(self.out.items)
                 fixed.links.extend(self.out.links)
                 fixed.boxes.extend(self.out.boxes)
@@ -440,18 +450,39 @@ class Layout:
                 if not filled:
                     break
         self.out.simplified = self.simplified
+        # How far down the page goes. What is inside a box that clips (an
+        # overflow: hidden box, or a panel that scrolls) goes no further than
+        # it, as in a browser: Ponder's results, scrolled in their panel, had
+        # made the page twice the window's height, and at the panel's end the
+        # page itself scrolled on into nothing.
         bottom, pinned = 0.0, 0
+        clips = []
         for item in self.out.items:
             if item is not None and item[0] == "fixed_push":
                 pinned += 1
             elif item is not None and item[0] == "fixed_pop":
                 pinned -= 1
-            elif not pinned:
-                bottom = max(bottom, _bottom_edge(item))
+            elif pinned:
+                continue
+            elif item is not None and item[0] == "clip_push":
+                edge = item[1].bottom()
+                clips.append(min(edge, clips[-1]) if clips else edge)
+            elif item is not None and item[0] == "clip_pop":
+                if clips:
+                    clips.pop()
+            else:
+                edge = _bottom_edge(item)
+                bottom = max(bottom, min(edge, clips[-1]) if clips else edge)
         # boxes count whether or not anything is drawn in them, as in a browser:
         # an empty absolutely placed box below the rest had left it unreachable
-        for rect, _element in self.out.boxes:
-            bottom = max(bottom, rect.bottom())
+        limits = {}
+        for first, last, record in self.out.clip_boxes:
+            edge = record["area"].bottom()
+            for index in range(first, last):
+                limits[index] = min(edge, limits.get(index, edge))
+        for index, (rect, _element) in enumerate(self.out.boxes):
+            edge = rect.bottom()
+            bottom = max(bottom, min(edge, limits[index]) if index in limits else edge)
         self.out.height = max(height, bottom)
         self.out.width = self.width
         return self.out
@@ -643,6 +674,7 @@ class Layout:
         # the background goes under the children, so its place is kept now
         background_index = len(self.out.items)
         links_before = len(self.out.links)
+        boxes_before, scrollers_before = len(self.out.boxes), len(self.out.scrollers)
         self.out.items.append(None)
         overflow = style.get("overflow")
         clips = (overflow in ("hidden", "clip", "auto", "scroll") and not root_level
@@ -718,9 +750,16 @@ class Layout:
             inner_height = max(inner_height, min_height)
         if max_height is not None:
             inner_height = min(inner_height, max_height)
+        clamp = self._line_clamp(style)
+        if clamp:
+            # -webkit-line-clamp: so many lines shown, the rest cut off by its
+            # overflow: hidden. Ponder's snippets, clamped to two lines, had
+            # run on for five
+            inner_height = min(inner_height, clamp)
         if inner_height > content_height + 0.5 and forms.kind_of(element) in forms.BUTTON_KINDS:
             # a button's content sits in its middle, as browsers draw buttons
-            self._shift(background_index + 1, links_before, (inner_height - content_height) / 2)
+            self._shift(background_index + 1, links_before, (inner_height - content_height) / 2,
+                        boxes_from=boxes_before)
         self._link = enclosing_link
         if self._measuring and width_value is None and style.get("display") in ("block", "list-item", "flow-root"):
             # Measured, a block of auto width is as wide as what it holds, as
@@ -804,7 +843,7 @@ class Layout:
             dx += box_width * tx[1] / 100 if isinstance(tx, tuple) else tx * z
             dy += box_height * ty[1] / 100 if isinstance(ty, tuple) else ty * z
         if dx or dy:
-            self._shift(background_index, links_before, dy, dx=dx)
+            self._shift(background_index, links_before, dy, dx=dx, boxes_from=boxes_before)
             box = box.translated(dx, dy)
         if positioned:
             waiting = self._absolute.pop()
@@ -826,7 +865,11 @@ class Layout:
             area = QRectF(box.left() + border[3], box.top() + border[0],
                           max(0.0, box.width() - border[1] - border[3]),
                           max(0.0, box.height() - border[0] - border[2]))
-            self.out.items[clip_index] = ("clip_push", area, max(0.0, radius - max(border)))
+            # the clip's area, kept up to date as the box is moved (see _shift):
+            # what is inside it reaches no further down the page than it
+            record = {"area": area}
+            self.out.items[clip_index] = ("clip_push", area, max(0.0, radius - max(border)), record)
+            self.out.clip_boxes.append((clip_boxes, len(self.out.boxes) - 1, record))
             reach = content_height - inner_height
             if overflow in ("auto", "scroll") and reach > 0.5:
                 # A panel that scrolls inside the page: its content is drawn
@@ -871,6 +914,9 @@ class Layout:
             self.out.items.append(("xform_pop",))
             if animations:
                 self.out.animated_boxes.append(QRectF(box))
+            elif seen is None and transform_ops:
+                self._transform_targets(self.out.items[xform_index][1], xform_index, links_before,
+                                        boxes_before, scrollers_before)
         if opacity < 0.999 and not self._measuring and not (moving and animates_opacity):
             self.out.items.append(("opacity_pop",))
         if sticky is not None:
@@ -1123,6 +1169,56 @@ class Layout:
                 items.append((anonymous, inherited))
         # order, keeping document order among equals
         return sorted(items, key=lambda pair: pair[1].get("order", 0))
+
+    def _line_clamp(self, style: dict):
+        """The height -webkit-line-clamp (or line-clamp) allows, or None."""
+        value = style.get("-webkit-line-clamp") or style.get("line-clamp")
+        if not value or style.get("overflow") not in ("hidden", "clip"):
+            return None
+        try:
+            lines = int(str(value).strip())
+        except ValueError:
+            return None
+        if lines <= 0:
+            return None
+        size = style.get("font-size", 16.0) * self.zoom
+        lh = style.get("line-height", ("normal",))
+        if lh[0] == "factor":
+            line_height = lh[1] * size
+        elif lh[0] == "px":
+            line_height = lh[1] * self.zoom
+        else:
+            line_height = self.fonts.get(style)[1].lineSpacing()
+        return lines * line_height
+
+    def _transform_targets(self, spec: dict, items_from: int, links_from: int, boxes_from: int,
+                           scrollers_from: int) -> None:
+        """What can be clicked in a transformed box, where the transform puts it.
+
+        Paint draws a transform; clicks, fields, frames, panels and scripts'
+        measurements had stayed where the box was before it. A dialog centred
+        by translate(-50%, -50%), as most are (Ponder's favourites), was drawn
+        in the middle and clicked at its corner: its Close buttons did nothing."""
+        from .paint import _transform
+
+        try:
+            matrix, _opacity = _transform(spec)
+        except Exception:                                  # noqa: BLE001
+            return
+        if matrix.isIdentity():
+            return
+        for index in range(boxes_from, len(self.out.boxes)):
+            rect, element = self.out.boxes[index]
+            self.out.boxes[index] = (matrix.mapRect(rect), element)
+        for index in range(links_from, len(self.out.links)):
+            rect, href = self.out.links[index]
+            self.out.links[index] = (matrix.mapRect(rect), href)
+        for index in range(items_from, len(self.out.items)):
+            item = self.out.items[index]
+            if item is not None and item[0] in ("button", "control", "frame"):
+                self.out.items[index] = (item[0], matrix.mapRect(item[1])) + tuple(item[2:])
+        for panel in self.out.scrollers[scrollers_from:]:
+            panel["area"] = matrix.mapRect(panel["area"])
 
     def _natural_width(self, element: Element, style: dict, narrowest: bool) -> float:
         """An item's content width with no line breaks, or broken at every chance."""
@@ -1629,6 +1725,7 @@ class Layout:
                 _m, padding, border = self._edges(cell_style, cell_width)
                 inner_width = max(0.0, cell_width - padding[1] - padding[3] - border[1] - border[3])
                 items_before, links_before = len(self.out.items), len(self.out.links)
+                cell_boxes = len(self.out.boxes)
                 self.out.items.append(None)      # the cell's background and borders
                 outer_floats, self._floats = self._floats, []
                 inner, baseline = self._contents(
@@ -1647,7 +1744,7 @@ class Layout:
                     first_baseline = baseline
                 placed.append((cell_style, cell_x, cell_width, items_before, links_before,
                                height, inner, padding, border,
-                               len(self.out.items), len(self.out.links)))
+                               len(self.out.items), len(self.out.links), cell_boxes, len(self.out.boxes)))
                 column += span
             row_height = max((p[5] for p in placed), default=0.0)
             fixed_row = _px(row_style.get("height"), 0.0, auto=None) \
@@ -1655,7 +1752,7 @@ class Layout:
             if fixed_row is not None:
                 row_height = max(row_height, fixed_row * self.zoom)
             for (cell_style, cell_x, cell_width, items_before, links_before,
-                 height, inner, padding, border, items_after, links_after) in placed:
+                 height, inner, padding, border, items_after, links_after, boxes_from, boxes_to) in placed:
                 align = cell_style.get("vertical-align", "middle")
                 content_room = row_height - padding[0] - padding[2] - border[0] - border[2]
                 shift = {"top": 0.0, "bottom": content_room - inner,
@@ -1664,7 +1761,7 @@ class Layout:
                     # this cell's own content only: moving everything laid out
                     # since it began moved the later cells in the row too
                     self._shift(items_before + 1, links_before, shift,
-                                items_after, links_after)
+                                items_after, links_after, boxes_from=boxes_from, boxes_to=boxes_to)
                 box = QRectF(cell_x, cursor, cell_width, row_height)
                 paint = []
                 colour = cell_style.get("background-color")
@@ -1681,14 +1778,20 @@ class Layout:
 
     def _shift(self, items_from: int, links_from: int, dy: float,
                items_to: int | None = None, links_to: int | None = None,
-               dx: float = 0.0) -> None:
-        """Move a stretch of what was laid out by dx across and dy down."""
+               dx: float = 0.0, boxes_from: int | None = None, boxes_to: int | None = None) -> None:
+        """Move a stretch of what was laid out by dx across and dy down: what
+        is drawn, its links, and (given boxes_from) its boxes, which clicks and
+        scripts' measurements go by. Boxes had stayed behind: a dialog centred
+        by translate(-50%, -50%) was drawn in the middle and clicked at its
+        old corner (Ponder's favourites could not be closed)."""
         def moved(item):
             if item is None:
                 return None
             kind = item[0]
             if kind == "group":
                 return ("group", [moved(sub) for sub in item[1]])
+            if kind == "clip_push" and len(item) > 3:
+                item[3]["area"] = item[3]["area"].translated(dx, dy)
             if kind in ("rect", "image", "rrect", "rborder", "svg", "control", "button",
                         "gradient", "clip_push", "frame"):
                 return (kind, item[1].translated(dx, dy)) + tuple(item[2:])
@@ -1704,6 +1807,10 @@ class Layout:
         for index in range(links_from, len(self.out.links) if links_to is None else links_to):
             rect, href = self.out.links[index]
             self.out.links[index] = (rect.translated(dx, dy), href)
+        if boxes_from is not None:
+            for index in range(boxes_from, len(self.out.boxes) if boxes_to is None else boxes_to):
+                rect, element = self.out.boxes[index]
+                self.out.boxes[index] = (rect.translated(dx, dy), element)
 
     def _style_owner(self, style: dict):
         """The element whose style this is (each element has its own)."""
@@ -1717,7 +1824,7 @@ class Layout:
         """Flatten inline content into (kind, payload, style, link) items."""
         for node in nodes:
             if isinstance(node, Text):
-                out.append(("text", node.data, style, link))
+                out.append(("text", _transformed_text(node.data, style.get("text-transform")), style, link))
             elif isinstance(node, Element):
                 node_style = self.styles[node]
                 display = node_style.get("display")
@@ -2617,6 +2724,7 @@ class Layout:
             forced = max(0.0, block.height() - top - bottom - m_top - m_bottom)
         box_y = block.top() + top + m_top if top is not None else static_y + m_top
         items_before, links_before = len(self.out.items), len(self.out.links)
+        boxes_before = len(self.out.boxes)
         if element.tag == "img":
             if image_w <= 0 or image_h <= 0:
                 return
@@ -2629,7 +2737,7 @@ class Layout:
         if top is None and bottom is not None:
             # held by its bottom edge: now that its height is known, move it there
             target = block.bottom() - bottom - m_bottom - height
-            self._shift(items_before, links_before, target - box_y)
+            self._shift(items_before, links_before, target - box_y, boxes_from=boxes_before)
 
 class _Measure:
     """Lay something out into a scratch display list, to learn how wide it is."""
@@ -2806,6 +2914,23 @@ def _resolve_flexible(line: list, room: float, outer) -> None:
             for e in under:
                 e["size"] = min(e["size"], e["floor"]) if e["size"] < e["floor"] else e["floor"]
                 frozen.add(id(e))
+
+
+def _transformed_text(text: str, transform) -> str:
+    """text-transform: uppercase, lowercase or capitalize, as drawn (it had
+    been ignored: Ponder's "SETTINGS" headings showed as written)."""
+    if not transform or transform == "none":
+        return text
+    transform = str(transform).strip().lower()
+    if transform == "uppercase":
+        return text.upper()
+    if transform == "lowercase":
+        return text.lower()
+    if transform == "capitalize":
+        import re
+
+        return re.sub(r"(^|[^\w'’])(\w)", lambda m: m.group(1) + m.group(2).upper(), text)
+    return text
 
 
 def _bottom_edge(item) -> float:

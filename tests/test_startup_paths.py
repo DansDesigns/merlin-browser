@@ -230,7 +230,7 @@ check("Qt Multimedia is bundled into Merlin.exe",
       and "--hidden-import PyQt6.QtMultimediaWidgets" in bat_src)
 
 check("the runtime retry cannot loop",
-      "JS_RUNTIME_MISSING and not media.deno_path()" in browser_src2)
+      "JS_RUNTIME_MISSING and not media.node_path()" in browser_src2)
 
 # Merlin.exe only holds the standard modules it was built with, and the
 # package updates from disk. Every standard module the package imports must

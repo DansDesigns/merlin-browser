@@ -15537,8 +15537,12 @@ var handler2 = {
         element.setAttributeNode(attr);
         style.set(PRIVATE, attr);
       }
+      // Merlin: through the attribute's own setter, so a MutationObserver
+      // hears it as browsers' do; set quietly, el.style.display = "none"
+      // changed nothing Merlin saw (Ponder's dialogs could not be closed)
+      const text = style.toString();
+      if (attr[VALUE] !== text) attr.value = text;
       attr[CHANGED] = false;
-      attr[VALUE] = style.toString();
     }
     return true;
   }

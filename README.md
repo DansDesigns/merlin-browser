@@ -1,5 +1,5 @@
 # Merlin Browser
-![version](https://img.shields.io/badge/version-1.8.24-6f8ff0)
+![version](https://img.shields.io/badge/version-1.8.25-6f8ff0)
 
 ### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6 Requires a reinstall as there has been a fundamental change to the folder structure. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
 
@@ -136,8 +136,9 @@ FFmpeg, separate from the web engine's, and that one decodes H.264.
 The stream's address comes from YouTube's own player first. The page, running
 in Merlin, has already done everything YouTube asks of a client, so for a live
 stream its player holds an HLS address that plays as it is. Only if the page
-has none is yt-dlp asked, with Deno to solve YouTube's challenge; Merlin fetches
-both from GitHub on first use (yt-dlp about 3 MB, Deno about 40 MB). YouTube
+has none is yt-dlp asked, with Node.js to solve YouTube's challenge; Merlin
+fetches both on first use, from their own releases (yt-dlp about 3 MB, Node.js
+about 30 MB). YouTube
 works hard against yt-dlp, so when every way of asking fails, Merlin moves its
 own copy to yt-dlp's nightly build, where YouTube fixes usually land first, and
 tries once more. Ctrl+Shift+P plays any page in the player the same way.
@@ -164,9 +165,11 @@ stylesheets, with @media rules, CSS variables and modern selectors. Forms
 work: fields to type in, boxes, dropdowns, files, and sending by GET or POST,
 with cookies for the session and saved passwords. It also opens ftp:// and
 smb:// addresses, which Chromium cannot, and file:// folders, and saves
-downloads. It runs JavaScript in V8 (by way of Deno), each tab's scripts in a
-process of their own with no permissions; JavaScript is on by default, with a
-switch in Settings.
+downloads. It runs JavaScript in V8 (by way of Node.js), each tab's scripts in
+a process of their own under Node's permission model, with nothing of Node left
+for the page and everything it fetches (modules too) fetched by Merlin, through
+the content blocker, with Web Workers as threads of that process; JavaScript is
+on by default, with a switch in Settings.
 
 Frames (`<iframe>`) are pages of their own, each with its scripts in a process
 of its own as Chrome keeps them, talking to the page around them by
@@ -285,7 +288,7 @@ merlin-browser [URL ...]
 | History, filter lists | `~/.local/share/merlin` | `%LOCALAPPDATA%\Merlin\data` |
 | Cache | `~/.cache/merlin` | `%LOCALAPPDATA%\Merlin\cache` |
 | Log, `merlin-log.txt` | `~/.local/state/merlin` | `Documents\Merlin` |
-| yt-dlp and Deno | `~/.local/share/merlin/tools` | `%LOCALAPPDATA%\Merlin\tools` |
+| yt-dlp and Node.js | `~/.local/share/merlin/tools` | `%LOCALAPPDATA%\Merlin\tools` |
 | Codec engine updates | `~/.local/share/merlin/engine` | `%LOCALAPPDATA%\Merlin\engine` |
 
 Settings are a single `settings.json`; every option in the dialog is a key in
@@ -342,7 +345,7 @@ changelog.txt    what changed in each release
 - **[EasyList](https://easylist.to/)** — filter lists for the content blocker, CC BY-SA 3.0 / GPLv3
 - **[mpv](https://mpv.io/)**, **[VLC](https://www.videolan.org/)** and **[FFmpeg](https://ffmpeg.org/)** — optional media playback
 - **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** — fetched on first use, finds the stream on a page for the player
-- **[Deno](https://deno.com/)** — fetched on first use, the JavaScript runtime yt-dlp needs for YouTube, and the V8 engine Merlin Engine runs pages' JavaScript in
+- **[Node.js](https://nodejs.org/)** (MIT) — fetched on first use from nodejs.org, checked against its published checksums and scanned for Rust: the V8 engine Merlin Engine runs pages' JavaScript in, and the runtime yt-dlp needs for YouTube
 - **[linkedom](https://github.com/WebReflection/linkedom)** (ISC) — shipped in `merlin/engine/js`, the DOM that pages' scripts work on in Merlin Engine
 - **[GitHub Actions](https://github.com/features/actions)** — builds the Qt WebEngine with H.264 and AAC that the installers fetch
 

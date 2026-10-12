@@ -1960,34 +1960,34 @@ class BrowserWindow(QMainWindow):
         Settings > Merlin Engine > "Run JavaScript" is off."""
         return bool(self.settings.get("javascript", True))
 
-    def deno_for_scripts(self) -> str:
-        """Deno, which runs pages' JavaScript; fetched once, in the background,
-        the first time a page has scripts and it is not here yet."""
-        from .media import deno_path
+    def node_for_scripts(self) -> str:
+        """Node.js, which runs pages' JavaScript; fetched once, in the
+        background, the first time a page has scripts and it is not here yet."""
+        from .media import node_path
 
-        found = deno_path()
-        if found or getattr(self, "_fetching_deno", False):
+        found = node_path()
+        if found or getattr(self, "_fetching_node", False):
             return found
-        self._fetching_deno = True
-        self.status_label.setText("Fetching the JavaScript engine (Deno), once...")
+        self._fetching_node = True
+        self.status_label.setText("Fetching the JavaScript engine (Node.js), once...")
         import threading
 
-        from .media import fetch_deno
+        from .media import fetch_node
 
         done = {}
-        threading.Thread(target=lambda: done.setdefault("result", fetch_deno()), daemon=True).start()
+        threading.Thread(target=lambda: done.setdefault("result", fetch_node()), daemon=True).start()
 
         def check():
             if "result" not in done:
                 QTimer.singleShot(400, check)
                 return
-            self._fetching_deno = False
+            self._fetching_node = False
             ok, text = done["result"]
             self.status_label.setText(text)
             try:
                 from . import crashlog
 
-                crashlog.note(f"javascript: fetching Deno: {text}")
+                crashlog.note(f"javascript: fetching Node.js: {text}")
             except Exception:                              # noqa: BLE001
                 pass
             view = self.current()
@@ -1998,8 +1998,9 @@ class BrowserWindow(QMainWindow):
 
     def script_cache_dir(self) -> str:
         # in Merlin's own cache folder, beside the rest: under Qt's own it went
-        # to a second, capitalised "Merlin" folder
-        return os.path.join(cfg.CACHE_DIR, "js-modules")
+        # to a second, capitalised "Merlin" folder. "scripts", not the
+        # "js-modules" Deno kept its own cache in (see media.remove_deno)
+        return os.path.join(cfg.CACHE_DIR, "scripts")
 
     def local_storage(self):
         """Sites' localStorage: kept between sessions, except in private windows."""
@@ -2086,7 +2087,7 @@ class BrowserWindow(QMainWindow):
         """Find the stream on a page with yt-dlp, then play it here.
 
         Whatever is missing is fetched first, after one question: yt-dlp,
-        and for YouTube, Deno, the JavaScript runtime yt-dlp now needs to get
+        and for YouTube, Node.js, the JavaScript runtime yt-dlp now needs to get
         past YouTube's challenge. Fetching and the lookup both run off this
         thread and report back by signal.
         """
@@ -2095,21 +2096,21 @@ class BrowserWindow(QMainWindow):
         missing = []
         if not media.has_ytdlp():
             missing.append(("yt-dlp", "about 3 MB", media.fetch_ytdlp))
-        if media._needs_js_runtime(page) and not media.deno_path():
-            missing.append(("Deno", "about 40 MB", media.fetch_deno))
+        if media._needs_js_runtime(page) and not media.node_path():
+            missing.append(("Node.js", "about 30 MB", media.fetch_node))
 
         if missing:
             listing = "\n".join(f"  \u2022 {name}, {size}"
                                  for name, size, _fetch in missing)
             why = ("yt-dlp finds the stream on the page"
-                   + (", and Deno is the JavaScript runtime it needs to solve "
+                   + (", and Node.js is the JavaScript runtime it needs to solve "
                       "YouTube's challenge, without which YouTube offers no "
-                      "video at all" if any(n == "Deno" for n, _s, _f in missing)
+                      "video at all" if any(n == "Node.js" for n, _s, _f in missing)
                       else "") + ".")
             answer = QMessageBox.question(
                 self, "Fetch what the player needs",
                 f"To play this, Merlin needs:\n\n{listing}\n\n{why}\n\n"
-                "Both come from their projects' own GitHub releases and are "
+                "Both come from their projects' own releases and are "
                 "kept in Merlin's folder. Nothing else on the system is "
                 "changed. Fetch them now?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -2154,9 +2155,9 @@ class BrowserWindow(QMainWindow):
     def _on_stream_resolved(self, page: str, ok: bool, result: str) -> None:
         self.notice_bar.setVisible(False)
         self._notice_page = ""
-        if not ok and result == media.JS_RUNTIME_MISSING and not media.deno_path():
-            # nothing to find until Deno is there: fetch it and try again.
-            # Only when it is really missing; a Deno that is present and still
+        if not ok and result == media.JS_RUNTIME_MISSING and not media.node_path():
+            # nothing to find until Node is there: fetch it and try again.
+            # Only when it is really missing; a Node that is present and still
             # fails, one too old on the PATH, would otherwise loop for ever.
             self._play_with_ytdlp(page)
             return

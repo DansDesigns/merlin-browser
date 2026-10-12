@@ -523,11 +523,11 @@ RETRIES = 2                        # further tries for a connection that failed
 RETRY_PAUSES = (1.0, 2.5)          # seconds before each
 
 
-def _bundle_scripts(bundle, bodies: dict, cache: str, hosts: list) -> None:
+def _bundle_scripts(bundle, bodies: dict, cache: str = "", hosts: list | None = None) -> None:
     """The scripts the page ran, so it can be run again elsewhere, offline,
-    as it ran here: plain scripts as Merlin fetched them for it, and the
-    page's modules from Deno's cache. Scripts only, not what the page
-    fetched as data."""
+    as it ran here: its plain scripts and its modules, as Merlin fetched them
+    for it (all of them come through Merlin now). Scripts only, not what the
+    page fetched as data."""
     import json
 
     index = []
@@ -536,22 +536,6 @@ def _bundle_scripts(bundle, bodies: dict, cache: str, hosts: list) -> None:
         bundle.writestr(name, body)
         index.append({"url": url, "file": name})
     bundle.writestr("scripts/index.json", json.dumps(index, indent=1))
-    remote = os.path.join(cache, "remote") if cache else ""
-    if not remote or not os.path.isdir(remote):
-        return
-    for host in hosts:
-        for scheme in ("https", "http"):
-            folder = os.path.join(remote, scheme, host.replace(":", "_port_"))   # as Deno names them
-            if not os.path.isdir(folder):
-                continue
-            for base, _dirs, files in os.walk(folder):
-                for file in files:
-                    full = os.path.join(base, file)
-                    try:
-                        if os.path.getsize(full) <= 20 * 1024 * 1024:
-                            bundle.write(full, "deno-cache/" + os.path.relpath(full, cache).replace(os.sep, "/"))
-                    except OSError:
-                        pass
 
 
 def without_noscript(markup: str) -> str:
@@ -565,6 +549,15 @@ def _scripts_user_agent(fallback: str) -> str:
     from . import chromelike
 
     return (chromelike.user_agent() if chromelike.usable() else "") or fallback
+
+
+def _runtime_for(host) -> str:
+    """Node.js, which runs pages' scripts, as the window has it (fetched once)."""
+    finder = getattr(host, "node_for_scripts", None)
+    try:
+        return (finder() if finder is not None else "") or ""
+    except Exception:                                      # noqa: BLE001
+        return ""
 
 
 def _scripts_brands() -> list:
@@ -806,7 +799,7 @@ class MerlinView(QWidget, FramesMixin):
         self._fell_back.connect(self._on_fell_back)
         self._laid_out.connect(self._on_laid_out)
         self._script_prepared.connect(self._apply_script_dom)
-        # JavaScript: a Deno process for the page, where the site is allowed
+        # JavaScript: a Node process for the page, where the site is allowed
         self._script = None
         self._script_waiting: dict = {}
         self._script_next = 0
@@ -1007,7 +1000,7 @@ class MerlinView(QWidget, FramesMixin):
         scripting = False
         allowed = getattr(self._host, "javascript_allowed", None)
         if allowed is not None and scheme in ("http", "https") and allowed(_registrable(url.host())):
-            scripting = bool(getattr(self._host, "deno_for_scripts", lambda: "")())
+            scripting = bool(_runtime_for(self._host))
         if scheme == "merlin":
             # Merlin's own addresses, handled by the window as for Chromium's tabs
             if url.host() == "allow-certificate":
@@ -1766,7 +1759,7 @@ class MerlinView(QWidget, FramesMixin):
 
     # ------------------------------------------------------ JavaScript
     def _start_script(self) -> None:
-        """Run the page's scripts, if its site may, in a Deno process of its own."""
+        """Run the page's scripts, if its site may, in a Node process of its own."""
         from .script import LocalStorage, ScriptHost, cookie_string, import_hosts, import_map
 
         if self._url.scheme() not in ("http", "https") or "<script" not in (self._markup or "").lower():
@@ -1777,22 +1770,22 @@ class MerlinView(QWidget, FramesMixin):
         if allowed is None or not allowed(site):
             self.script_status = "JavaScript is off in Settings"
             return
-        deno = getattr(self._host, "deno_for_scripts", lambda: "")()
-        if not deno:
-            self.script_status = "Deno, which runs JavaScript, is not here yet (being fetched)"
+        runtime = _runtime_for(self._host)
+        if not runtime:
+            self.script_status = "Node.js, which runs JavaScript, is not here yet (being fetched)"
             return
         cache = getattr(self._host, "script_cache_dir", lambda: "")() or os.path.join(
             QStandardPaths.writableLocation(QStandardPaths.StandardLocation.CacheLocation), "merlin-js")
         # (with no window to ask, as in tests, Qt's cache folder is used)
         try:
-            host = ScriptHost(deno, import_hosts(self._markup, self._url.toString()), cache, self,
+            host = ScriptHost(runtime, import_hosts(self._markup, self._url.toString()), cache, self,
                               mapping=import_map(self._markup, self._url.toString()))
         except Exception as exc:                            # noqa: BLE001
             self.script_status = f"JavaScript could not start: {exc}"
             self.console_lines.append(("error", self.script_status))
             _note(f"javascript: {self._url.host()}: {self.script_status}")
             return
-        self.script_status = f"started with {deno}"
+        self.script_status = f"started with {runtime}"
         self._script = host
         self.network_lines.clear()
         self._script_bodies = {}
@@ -1821,7 +1814,7 @@ class MerlinView(QWidget, FramesMixin):
         host.send({"type": "load", "html": whole, "geometry": self._geometry_now(), "state": {
             "url": self._url.toString(), "width": self._page_width(), "height": float(self.height()),
             "userAgent": _scripts_user_agent(headers.get("User-Agent", "")), "language": "en-GB",
-            "brands": _scripts_brands(), **self._frame_script_state(),
+            "brands": _scripts_brands(), "importMap": host.mapping or {}, **self._frame_script_state(),
             "cookie": cookie_string(self._cookies(), self._url.toString()),
             "storage": storage.load(self._origin()),
             "scheme": "dark" if getattr(self._host, "dark", False) else "light"}})
@@ -2026,8 +2019,17 @@ class MerlinView(QWidget, FramesMixin):
                     pass
             return True
         candidates = []
-        if self._display.fixed is not None:
-            candidates += [(r, e) for r, e in self._display.fixed.boxes if r.contains(point) and hittable(e, True)]
+        fixed = self._display.fixed
+        if fixed is not None:
+            for index, (r, e) in enumerate(fixed.boxes):
+                if fixed.scrollers:
+                    dy, through = fixed.shift_of("box", index)
+                    if dy or through:
+                        if not all(area.contains(point) for area in through):
+                            continue
+                        r = r.translated(0, -dy)
+                if r.contains(point) and hittable(e, True):
+                    candidates.append((r, e))
         if not candidates:
             page_point = point.__class__(point.x(), point.y() + self._scroll)
             display = self._display
@@ -2077,6 +2079,17 @@ class MerlinView(QWidget, FramesMixin):
         elif kind == "pick_file":
             # the page's own button asked for its file input's dialog
             element = self._by_script_id.get(str(message.get("target")))
+            if element is None and message.get("target"):
+                # an input the page made and never put in the page, clicked
+                # by its own button (Ponder's Browse... for a background):
+                # the dialog all the same, its files to that input
+                from .dom import Element
+
+                attrs = {"type": "file", "data-mjs": str(message.get("target")),
+                         "accept": str(message.get("accept") or "")}
+                if message.get("multiple"):
+                    attrs["multiple"] = ""
+                element = Element("input", attrs)
             if element is not None:
                 widget = self._widgets.get(element)
                 QTimer.singleShot(0, lambda e=element, w=widget: self._choose_files(e, w))
@@ -2138,10 +2151,23 @@ class MerlinView(QWidget, FramesMixin):
         headers = dict(base, **(message.get("headers") or {}))
         headers.setdefault("Referer", self._url.toString())
 
+        # a script or module, kept from an earlier visit while its server allows
+        cache = None
+        if (message.get("method", "GET") == "GET" and not blocked
+                and str((message.get("headers") or {}).get("sec-fetch-dest", "")).lower() == "script"):
+            from .script import ScriptCache
+
+            folder = getattr(self._host, "script_cache_dir", lambda: "")() if self._host is not None else ""
+            cache = ScriptCache(folder) if folder else None
+
         def work():
             started = time.monotonic()
+            kept = cache.get(url) if cache is not None else None
             answer = ({"error": "blocked by the content blocker"} if blocked else
+                      dict(kept) if kept is not None else
                       page_fetch(url, message.get("method", "GET"), headers, message.get("body"), opener))
+            if cache is not None and kept is None:
+                cache.put(url, answer)
             # the network log, for the debugging zip: a data request failing
             # quietly is how a page stays empty with nothing in its console
             size = len(answer.get("body") or "") * 3 // 4
@@ -2342,6 +2368,8 @@ class MerlinView(QWidget, FramesMixin):
     def _shown_laid_out(self) -> None:
         if self._display is not None:
             self._display.panel_scroll = self._panel_scroll     # positions kept across layouts
+            if self._display.fixed is not None:
+                self._display.fixed.panel_scroll = self._panel_scroll
         self._update_scrollbar()
         self._sync_controls()
         self.update()
@@ -2483,6 +2511,8 @@ class MerlinView(QWidget, FramesMixin):
                 if widget is None:
                     continue
                 self._widgets[element] = widget
+            else:
+                self._refresh_control(element, widget)
             self._style_control(widget, font, colour)
         self._places = {e: (r, f) for e, (r, f, _font, _colour) in found.items()}
         self._buttons = buttons
@@ -2529,6 +2559,15 @@ class MerlinView(QWidget, FramesMixin):
                     "visibility") in ("hidden", "collapse")
                 widget.setVisible(top + height > 0 and top < bottom and rect.left() < right
                                   and inside_panel and not hidden)
+                continue
+            style = (self._styles.get(element) or {}) if self._styles is not None else {}
+            opacity = style.get("opacity", 1.0)
+            if (rect.width() < 1 and rect.height() < 1) or (isinstance(opacity, float) and opacity <= 0.01) \
+                    or style.get("visibility") in ("hidden", "collapse"):
+                # a field made invisible on purpose, as a toggle switch's own
+                # checkbox is (opacity: 0, no size), its label drawn instead:
+                # its widget had shown over the switch
+                widget.hide()
                 continue
             height = max(rect.height(), 8.0)
             widget.setGeometry(round(rect.left()), round(top), max(8, round(rect.width())),
@@ -2608,6 +2647,12 @@ class MerlinView(QWidget, FramesMixin):
             chosen = [i for i, o in enumerate(options) if "selected" in o.attrs]
             if chosen:
                 widget.setCurrentIndex(chosen[0])
+            widget.setProperty("merlin_options", self._options_of(element))
+            self._refresh_control(element, widget)         # the value a script gave it
+            # a choice goes to the page's scripts, as its change event: Ponder's
+            # background list had changed nothing
+            widget.activated.connect(lambda index, e=element, w=widget: self._script_input(
+                e, str(w.itemData(index) if w.itemData(index) is not None else w.itemText(index))))
         elif kind == "textarea":
             widget = QPlainTextEdit(self)
             widget.setPlainText(str(value))
@@ -2620,6 +2665,8 @@ class MerlinView(QWidget, FramesMixin):
             widget.setProperty("merlin_element", element)
             widget.installEventFilter(self)
             widget.textChanged.connect(lambda w=widget, e=element: self._script_input(e, w.toPlainText()))
+        elif element.tag == "input" and element.attrs.get("type", "").strip().lower() == "range":
+            widget = self._make_slider(element, value)
         elif kind == "file":
             from PyQt6.QtWidgets import QPushButton
 
@@ -2649,6 +2696,111 @@ class MerlinView(QWidget, FramesMixin):
             widget.setEnabled(False)
         widget.setProperty("merlin_control", True)
         return widget
+
+    def _make_slider(self, element, value):
+        """<input type=range>: a slider, its value to the page's scripts as it
+        moves (it had been a text field showing the number)."""
+        from PyQt6.QtWidgets import QSlider
+
+        def number(name, default):
+            try:
+                return float(element.attrs.get(name, default))
+            except (TypeError, ValueError):
+                return float(default)
+        low, high = number("min", 0), number("max", 100)
+        step = number("step", 1) if str(element.attrs.get("step", "1")).lower() != "any" else (high - low) / 1000
+        step = step if step > 0 else 1.0
+        high = max(high, low)
+        widget = QSlider(Qt.Orientation.Horizontal, self)
+        widget.setRange(0, max(0, round((high - low) / step)))
+        widget.setProperty("merlin_range", (low, step))
+        self._set_slider(widget, value if value not in ("", None) else (low + high) / 2)
+        accent = (self._styles.get(element) or {}).get("accent-color") if self._styles else None
+        accent = accent if isinstance(accent, tuple) else (26, 115, 232, 255)
+        widget.setStyleSheet(
+            "QSlider { background: transparent; }"
+            "QSlider::groove:horizontal { height: 4px; border-radius: 2px; background: #c4c4c4; }"
+            f"QSlider::sub-page:horizontal {{ height: 4px; border-radius: 2px; background: rgba({accent[0]},{accent[1]},{accent[2]},1); }}"
+            f"QSlider::handle:horizontal {{ width: 14px; height: 14px; margin: -5px 0; border-radius: 7px; background: rgba({accent[0]},{accent[1]},{accent[2]},1); }}")
+        widget.valueChanged.connect(lambda _i, e=element, w=widget: self._script_input(e, self._slider_text(w)))
+        return widget
+
+    @staticmethod
+    def _set_slider(widget, value) -> None:
+        low, step = widget.property("merlin_range")
+        try:
+            index = round((float(value) - low) / step)
+        except (TypeError, ValueError):
+            return
+        widget.blockSignals(True)
+        widget.setValue(max(widget.minimum(), min(widget.maximum(), index)))
+        widget.blockSignals(False)
+
+    @staticmethod
+    def _slider_text(widget) -> str:
+        low, step = widget.property("merlin_range")
+        value = low + widget.value() * step
+        return str(int(round(value))) if abs(value - round(value)) < 1e-9 else f"{value:.6g}"
+
+    @staticmethod
+    def _options_of(element) -> list:
+        from . import forms
+
+        return [(" ".join(o.text().split()), forms.option_value(o))
+                for o in element.elements() if o.tag == "option"]
+
+    def _refresh_control(self, element, widget) -> None:
+        """A field kept while scripts changed the page, made to match it: a
+        list's options as the script left them (Ponder fills its background
+        list after the page is shown, and the list had stayed with "None"
+        alone), and a value the script set, where the field is not being
+        typed in."""
+        from PyQt6.QtWidgets import QComboBox, QLineEdit, QPlainTextEdit
+
+        if isinstance(widget, QComboBox):
+            options = self._options_of(element)
+            if options != widget.property("merlin_options"):
+                widget.blockSignals(True)
+                widget.clear()
+                for text, value in options:
+                    widget.addItem(text, value)
+                widget.setProperty("merlin_options", options)
+                widget.blockSignals(False)
+            wanted = element.attrs.get("data-mjs-value")
+            if wanted is None:
+                chosen = [i for i, o in enumerate(e for e in element.elements() if e.tag == "option")
+                          if "selected" in o.attrs]
+                index = chosen[0] if chosen else -1
+            else:
+                index = next((i for i, (_t, v) in enumerate(options) if v == wanted), -1)
+            if index >= 0 and index != widget.currentIndex() and not widget.view().isVisible():
+                widget.blockSignals(True)
+                widget.setCurrentIndex(index)
+                widget.blockSignals(False)
+            return
+        from PyQt6.QtWidgets import QCheckBox, QRadioButton
+
+        if isinstance(widget, (QCheckBox, QRadioButton)):
+            # ticked or not as the script left it (a label's click, a script)
+            checked = "data-mjs-checked" in element.attrs
+            if "data-mjs" in element.attrs and widget.isChecked() != checked:
+                widget.blockSignals(True)
+                widget.setChecked(checked)
+                widget.blockSignals(False)
+            return
+        wanted = element.attrs.get("data-mjs-value")
+        if wanted is None or widget.hasFocus():
+            return
+        if widget.property("merlin_range") is not None:
+            if not widget.isSliderDown() and self._slider_text(widget) != wanted:
+                self._set_slider(widget, wanted)
+            return
+        if isinstance(widget, QLineEdit) and widget.text() != wanted:
+            widget.setText(wanted)
+        elif isinstance(widget, QPlainTextEdit) and widget.toPlainText() != wanted:
+            widget.blockSignals(True)
+            widget.setPlainText(wanted)
+            widget.blockSignals(False)
 
     @staticmethod
     def _style_control(widget, font, colour) -> None:
@@ -2746,6 +2898,8 @@ class MerlinView(QWidget, FramesMixin):
                 values[element] = widget.toPlainText()
             elif widget.property("merlin_file_button"):
                 values[element] = list(widget.property("merlin_files") or [])
+            elif widget.property("merlin_range") is not None:
+                values[element] = self._slider_text(widget)
             else:
                 values[element] = widget.text()
         return values
@@ -3247,17 +3401,22 @@ class MerlinView(QWidget, FramesMixin):
         innermost first, as far as each can go; returns what is left over for
         the page, as browsers hand a scroll on at a panel's end."""
         display = self._display
-        if display is None or not display.scrollers or not delta:
+        fixed = display.fixed if display is not None else None
+        if display is None or not delta or not (display.scrollers or (fixed is not None and fixed.scrollers)):
             return delta
         point = position.toPointF() if hasattr(position, "toPointF") else position
         page_point = point.__class__(point.x(), point.y() + self._scroll)
         chain = []
-        for panel in display.scrollers:             # outermost first
-            first, last = panel["boxes"]
-            outer = sum(display.panel_offset(other) for other in chain
-                        if other["boxes"][0] <= first and last <= other["boxes"][1])
-            if panel["area"].translated(0, -outer).contains(page_point):
-                chain.append(panel)
+        # panels in fixed boxes first, in the window's terms: they are over the page
+        for source, spot in ((fixed, point), (display, page_point)):
+            if source is None or chain:
+                continue
+            for panel in source.scrollers:          # outermost first
+                first, last = panel["boxes"]
+                outer = sum(display.panel_offset(other) for other in chain
+                            if other["boxes"][0] <= first and last <= other["boxes"][1])
+                if panel["area"].translated(0, -outer).contains(spot):
+                    chain.append(panel)
         moved_any = False
         for panel in reversed(chain):               # innermost first
             if not delta:
@@ -3440,7 +3599,14 @@ class MerlinView(QWidget, FramesMixin):
             # on top; one at 0 or below (GitHub's opening section) lies under
             # what scrolls over it, whose own links come first
             levels = getattr(self._display.fixed, "link_z", [])
-            for number, (rect, href) in enumerate(self._display.fixed.links):
+            fixed = self._display.fixed
+            for number, (rect, href) in enumerate(fixed.links):
+                if fixed.scrollers:
+                    dy, through = fixed.shift_of("link", number)
+                    if dy or through:
+                        if not all(area.contains(point) for area in through):
+                            continue
+                        rect = rect.translated(0, -dy)
                 if rect.contains(point):
                     if (levels[number] if number < len(levels) else 1) > 0:
                         return href

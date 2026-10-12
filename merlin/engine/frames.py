@@ -3,7 +3,7 @@
 A frame is another page, shown in a box of the page that holds it. Here each
 is a MerlinView of its own, a child widget placed over the frame's box, as a
 form field is: it fetches its page, styles, lays out and draws it, and runs its
-scripts in a Deno process of its own, as Chrome runs each site's frames apart.
+scripts in a process of its own, as Chrome runs each site's frames apart.
 So everything a page can do, a frame's page can do.
 
 What joins a frame to its parent is here:

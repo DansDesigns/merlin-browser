@@ -356,7 +356,7 @@ FONT_KEYWORDS = {
 INHERITED = {
     "color", "font-family", "font-size", "font-weight", "font-style",
     "line-height", "text-align", "white-space", "text-decoration",
-    "list-style-type", "visibility", "cursor",
+    "list-style-type", "visibility", "cursor", "text-transform",
 }
 
 # ---------------------------------------------------------------- selectors
@@ -1137,6 +1137,7 @@ button, input[type="submit"], input[type="button"], input[type="reset"] {
 input[type="checkbox"], input[type="radio"] { border: none; padding: 0; background-color: transparent;
   margin: 3px 3px 3px 4px }
 input[type="hidden"] { display: none }
+input[type="range"] { border: none; padding: 0; background-color: transparent; width: 129px; height: 16px; margin: 2px }
 summary { display: block; cursor: pointer }
 details:not([open]) > :not(summary) { display: none }
 """
@@ -1353,6 +1354,7 @@ class Styler:
         style.setdefault("text-decoration", "none")
         style.setdefault("list-style-type", "disc")
         self._motion(style, font, root_size)
+        _overflow(style)
         self.styles[element] = style
         if not getattr(element, "pseudo", None):
             self._pseudo_elements(element, style, root_size)
@@ -1751,8 +1753,19 @@ def expand_shorthand(name: str, value: str) -> list:
         if not values:
             return []
         return [(side, v) for side, v in zip(("top", "right", "bottom", "left"), _sides(values))]
-    if name == "overflow-x" or name == "overflow-y":
-        return [("overflow", value)] if value.strip().lower() not in ("visible", "") else []
+    if name == "overflow":
+        # each axis kept (see _overflow): overflow-y: auto with overflow-x:
+        # hidden had come out hidden, as the last written, and Ponder's
+        # settings panel, taller than the window, could not be scrolled
+        parts = value.strip().lower().split()
+        if not parts:
+            return []
+        across, down = parts[0], parts[1] if len(parts) > 1 else parts[0]
+        return [("-merlin-overflow-x", across), ("-merlin-overflow-y", down)]
+    if name == "overflow-x":
+        return [("-merlin-overflow-x", value.strip().lower())] if value.strip() else []
+    if name == "overflow-y":
+        return [("-merlin-overflow-y", value.strip().lower())] if value.strip() else []
     if name == "gap" or name == "grid-gap":
         values = [v for v in value.split() if v]
         if not values:
@@ -1839,6 +1852,24 @@ def _enclosing(element: Element, tag: str):
             return node
         node = node.parent
     return None
+
+
+def _overflow(style: dict) -> None:
+    """overflow, as layout reads it, from the two axes as CSS has them: the
+    vertical axis decides (pages scroll down); visible beside a clipped or
+    scrolling axis is auto, as CSS makes it; overflow-x: hidden alone clips."""
+    across = style.pop("-merlin-overflow-x", None)
+    down = style.pop("-merlin-overflow-y", None)
+    if across is None and down is None:
+        return
+    across = across or "visible"
+    down = down or "visible"
+    if down in ("visible", "") and across not in ("visible", ""):
+        down = "hidden" if across in ("hidden", "clip") else "auto"
+    if down in ("visible", ""):
+        style.pop("overflow", None)
+    else:
+        style["overflow"] = down
 
 
 def presentational_hints(element: Element) -> list:

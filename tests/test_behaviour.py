@@ -382,21 +382,21 @@ def test_builtin_player_decodes_h264(app) -> None:
 
 
 def test_youtube_needs_a_runtime(app) -> None:
-    """Without Deno, a YouTube lookup says why instead of failing oddly."""
+    """Without Node.js, a YouTube lookup says why instead of failing oddly."""
     from merlin import media as _media
 
-    original = _media.deno_path
-    _media.deno_path = lambda: ""
+    original = _media.node_path
+    _media.node_path = lambda: ""
     original_ytdlp = _media.ytdlp_path
     _media.ytdlp_path = lambda: "/bin/true"
     try:
         ok, why = _media.resolve_stream("https://www.youtube.com/watch?v=x")
-        check("a YouTube lookup without Deno names the missing runtime",
+        check("a YouTube lookup without Node.js names the missing runtime",
               not ok and why == _media.JS_RUNTIME_MISSING)
         check("other sites are not held back by it",
               _media._needs_js_runtime("https://example.com/a") is False)
     finally:
-        _media.deno_path = original
+        _media.node_path = original
         _media.ytdlp_path = original_ytdlp
 
 
@@ -520,9 +520,9 @@ def test_youtube_asks_for_hls_first(app) -> None:
             "sys.stderr.write('ERROR: Requested format is not available\\n')\n"
             "sys.exit(1)\n")
     os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
-    saved = (_media.ytdlp_path, _media.deno_path, _media._ytdlp_argv)
+    saved = (_media.ytdlp_path, _media.node_path, _media._ytdlp_argv)
     _media.ytdlp_path = lambda: fake
-    _media.deno_path = lambda: "/bin/true"
+    _media.node_path = lambda: "/bin/true"
     _media._ytdlp_argv = lambda p: [p]
     try:
         ok, found = _media.resolve_stream("https://www.youtube.com/watch?v=x")
@@ -531,7 +531,7 @@ def test_youtube_asks_for_hls_first(app) -> None:
         check("HLS through the Safari client is asked for first",
               "web_safari" in " ".join(_media.YOUTUBE_ATTEMPTS[0][1]))
     finally:
-        _media.ytdlp_path, _media.deno_path, _media._ytdlp_argv = saved
+        _media.ytdlp_path, _media.node_path, _media._ytdlp_argv = saved
 
 
 def test_released_views_are_dead(app) -> None:
@@ -934,9 +934,9 @@ def test_stream_lookup_is_quick(app) -> None:
             "    time.sleep(1); print('https://example.invalid/s.m3u8'); sys.exit(0)\n"
             "time.sleep(5); sys.exit(1)\n")
     os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
-    saved = (_media.ytdlp_path, _media.deno_path, _media._ytdlp_argv)
+    saved = (_media.ytdlp_path, _media.node_path, _media._ytdlp_argv)
     _media.ytdlp_path = lambda: fake
-    _media.deno_path = lambda: "/bin/true"
+    _media.node_path = lambda: "/bin/true"
     _media._ytdlp_argv = lambda p: [p]
     try:
         began = _time.monotonic()
@@ -945,7 +945,7 @@ def test_stream_lookup_is_quick(app) -> None:
         check("the way that works answers without waiting for the ones that fail",
               ok and took < 3.5, f"{took:.1f}s")
     finally:
-        _media.ytdlp_path, _media.deno_path, _media._ytdlp_argv = saved
+        _media.ytdlp_path, _media.node_path, _media._ytdlp_argv = saved
 
     window, _, _ = make_window(app, "t-late")
     page_url = "https://www.youtube.com/watch?v=LATE"
@@ -1092,9 +1092,9 @@ def test_youtube_cookies_for_ytdlp(app) -> None:
             "    print('https://example.invalid/c.m3u8'); sys.exit(0)\n"
             "sys.stderr.write('ERROR: The page needs to be reloaded.\\n'); sys.exit(1)\n")
     os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
-    saved = (_media.ytdlp_path, _media.deno_path, _media._ytdlp_argv)
+    saved = (_media.ytdlp_path, _media.node_path, _media._ytdlp_argv)
     _media.ytdlp_path = lambda: fake
-    _media.deno_path = lambda: "/bin/true"
+    _media.node_path = lambda: "/bin/true"
     _media._ytdlp_argv = lambda p: [p]
     before = set(glob.glob(os.path.join(tempfile.gettempdir(), "merlin-yt-*")))
     try:
@@ -1103,7 +1103,7 @@ def test_youtube_cookies_for_ytdlp(app) -> None:
         left = set(glob.glob(os.path.join(tempfile.gettempdir(), "merlin-yt-*"))) - before
         check("and the cookie file is deleted afterwards", not left, str(left))
     finally:
-        _media.ytdlp_path, _media.deno_path, _media._ytdlp_argv = saved
+        _media.ytdlp_path, _media.node_path, _media._ytdlp_argv = saved
     window.close()
 
 
@@ -1737,7 +1737,7 @@ def test_javascript_permission(app) -> None:
 
     from PyQt6.QtGui import QAction
 
-    from merlin.media import deno_path
+    from merlin.media import node_path
 
     fresh = cfg.Settings.__new__(cfg.Settings)
     fresh._data = dict(cfg.DEFAULTS)
@@ -1763,9 +1763,9 @@ def test_javascript_permission(app) -> None:
           [t["title"] for t in fresh.get("start_tiles")][0] == "Convert Files"
           and fresh.get("start_tiles")[0]["url"] == "http://convert.to.it/",
           str([t["title"] for t in fresh.get("start_tiles")]))
-    deno = os.environ.get("MERLIN_DENO") or deno_path()
-    if not deno or not os.path.exists(deno):
-        print("  skip  JavaScript: Deno is not here (set MERLIN_DENO)")
+    runtime = os.environ.get("MERLIN_NODE") or node_path()
+    if not runtime or not os.path.exists(runtime):
+        print("  skip  JavaScript: Node.js is not here (set MERLIN_NODE)")
         return
     folder = tempfile.mkdtemp(prefix="merlin-js-default-")
     open(os.path.join(folder, "index.html"), "w").write(
@@ -1783,7 +1783,7 @@ def test_javascript_permission(app) -> None:
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     window, settings, _ = make_window(app, "t-js-default", merlin_engine=True)
-    window.deno_for_scripts = lambda: deno
+    window.node_for_scripts = lambda: runtime
     window.script_cache_dir = lambda: os.path.join(folder, "cache")
     address = f"http://127.0.0.1:{server.server_address[1]}/index.html"
 
@@ -1829,7 +1829,7 @@ def test_javascript_permission(app) -> None:
                   False, "no zip saved")
         process = view._script.process if view._script is not None else None
         window.close_tab(window.tabs.indexOf(view))
-        check("closing a tab ends its Deno process",
+        check("closing a tab ends its Node process",
               process is not None and until(lambda: process.poll() is not None, 5))
         settings.set("javascript", False, save=False)
         view = window.new_tab(address)
@@ -2150,6 +2150,81 @@ def test_ponder_built_in(app) -> None:
           kept == b"mine" and logo == b"new")
 
 
+def test_node_runtime_fetched_without_rust(app) -> None:
+    """Node.js, which runs pages' JavaScript and YouTube's challenge, fetched
+    from its own release: checked against the published checksum, and refused
+    if it has any Rust in it; Deno, which an older Merlin fetched, goes."""
+    import hashlib
+    import http.server
+    import io
+    import tarfile
+    import threading as _threading
+
+    from merlin import media
+
+    if os.name == "nt":
+        return
+    home = tempfile.mkdtemp(prefix="merlin-node-")
+    saved = (os.environ.get("XDG_DATA_HOME"), media.NODE_DIST, os.environ.get("PATH"))
+    os.environ["XDG_DATA_HOME"] = home
+    os.environ["PATH"] = "/usr/bin:/bin"              # no node of the system's
+    files = {}
+
+    class Dist(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = files.get(self.path.lstrip("/"))
+            self.send_response(200 if body is not None else 404)
+            self.send_header("Content-Length", str(len(body or b"")))
+            self.end_headers()
+            self.wfile.write(body or b"")
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Dist)
+    _threading.Thread(target=server.serve_forever, daemon=True).start()
+    media.NODE_DIST = f"http://127.0.0.1:{server.server_address[1]}/"
+    asset = media._node_asset()
+
+    def publish(program: bytes, wrong_sum: bool = False):
+        data = io.BytesIO()
+        with tarfile.open(fileobj=data, mode="w:xz") as bundle:
+            info = tarfile.TarInfo(f"node-{media.NODE_VERSION}-x/bin/node")
+            info.size = len(program)
+            info.mode = 0o755
+            bundle.addfile(info, io.BytesIO(program))
+        files[asset] = data.getvalue()
+        digest = hashlib.sha256(b"other" if wrong_sum else files[asset]).hexdigest()
+        files["SHASUMS256.txt"] = f"{digest}  {asset}\n".encode()
+
+    try:
+        os.makedirs(media.ytdlp_folder(), exist_ok=True)
+        open(os.path.join(media.ytdlp_folder(), "deno"), "w").write("old")
+        script = b"#!/bin/sh\necho v24.19.0\n"
+        publish(script, wrong_sum=True)
+        ok, text = media.fetch_node()
+        check("a Node.js download that does not match its published checksum is refused", not ok and "checksum" in text, text)
+        publish(script + b"# called `Option::unwrap()` on a `None` value /rustc/0123/library/core/src\n")
+        ok, text = media.fetch_node()
+        check("a Node.js with Rust in it is refused, and not kept", not ok and "Rust" in text and not media.node_path(), text)
+        publish(script)
+        ok, text = media.fetch_node()
+        check("Node.js is fetched, checked and kept in Merlin's tools folder",
+              ok and media.node_path().startswith(home), text)
+        check("and the Deno an older Merlin fetched is gone (it is Rust)",
+              not os.path.exists(os.path.join(media.ytdlp_folder(), "deno")))
+        check("yt-dlp is told to use Node for YouTube's challenge",
+              "node:" in open(media.__file__, encoding="utf-8").read() and "deno:" not in open(media.__file__, encoding="utf-8").read())
+    finally:
+        server.shutdown()
+        media.NODE_DIST = saved[1]
+        for key, value in (("XDG_DATA_HOME", saved[0]), ("PATH", saved[2])):
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 # ------------------------------------------------------------------- run
 def wait(app, seconds: float) -> None:
     end = time.monotonic() + seconds
@@ -2184,7 +2259,8 @@ def main() -> int:
                  test_certificate_padlock, test_interface_too_large,
                  test_loading_bar_and_save_names, test_javascript_permission,
                  test_download_popup, test_hand_over_needs_an_answer, test_linux_uninstaller,
-                 test_corner_layer, test_ponder_built_in):
+                 test_corner_layer, test_ponder_built_in,
+                 test_node_runtime_fetched_without_rust):
         print(f"\n{test.__name__}")
         try:
             test(app)
