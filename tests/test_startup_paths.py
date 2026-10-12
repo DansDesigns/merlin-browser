@@ -68,6 +68,24 @@ from merlin.brand import icon_path
 path = icon_path()
 check("logo file ships with the package", bool(path), path)
 
+# Dan's own icons (1.8.27), kept exactly as he made them; nothing in the
+# source tree draws a logo of its own over them any more
+import hashlib
+_here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+
+def _sha(name):
+    return hashlib.sha256(open(os.path.join(_here, "merlin", name), "rb").read()).hexdigest()
+
+check("merlin.ico is Dan's icon",
+      _sha("merlin.ico") == "e03c369ca5b2599461f838b93701b392df9d3cddc3e16b339c9ae0e4fa127326")
+check("merlin.svg is Dan's icon",
+      _sha("merlin.svg") == "350bb387bf7772e97ac601a3b5ded7ecbcbb10b65c46937bc52b540398037010")
+check("no logo generator left to draw over them",
+      not os.path.exists(os.path.join(_here, "tools", "make-logo.py")))
+_png = open(os.path.join(_here, "merlin", "merlin.png"), "rb").read()
+check("merlin.png is a 256 x 256 picture (made from merlin.ico)",
+      _png[:8] == b"\x89PNG\r\n\x1a\n" and _png[16:24] == (256).to_bytes(4, "big") * 2)
+
 # --- winicon under a simulated Windows ---
 real_name, real_windll = os.name, getattr(ctypes, "windll", None)
 fake, calls = fake_windows_api()

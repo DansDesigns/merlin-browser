@@ -33,12 +33,13 @@ class Text(Node):
 
 
 class Element(Node):
-    __slots__ = ("tag", "attrs", "_class_cache", "pseudo", "comments")
+    __slots__ = ("tag", "attrs", "_class_cache", "pseudo", "comments", "hover")
 
     def __init__(self, tag: str, attrs: dict | None = None):
         super().__init__()
         self.tag = tag
         self.attrs = attrs or {}
+        self.hover = False          # under the pointer, or holding what is: :hover
         self.pseudo = None          # "before" or "after": a pseudo-element's box, made by the cascade
         self.comments = None        # [(child index, text)]: kept for the page's scripts, not drawn
 

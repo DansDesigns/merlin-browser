@@ -5,6 +5,76 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.29
+  Installed web apps leave the browser's tabs alone. A web app's window
+  saved its one page as the browser's last session when it closed, so the
+  next Merlin opened on the app's page with the browser's own tabs gone; it
+  saves no session now (nor its window's size as the browser's). And the
+  settings file, which the browser and every web app share, is written
+  merged: each Merlin writes only what it changed itself and takes on what
+  the others changed. A Merlin closed last had written back everything as
+  it was when it started, the old list of tabs among it.
+  Merlin Engine: a page's style objects know the CSS properties a browser's
+  do ('textAlign' in el.style is true, as in Chrome) and name them as CSS
+  does (-webkit-transform, float). Vue, which Square's sites are built
+  with, asks so which name to use; told none was known, it wrote
+  style="undefined:center", and the centring, colours and spacing a site
+  set on its sections were lost: AlterniTech's home page heading and
+  buttons, centred in Square, had been on the left. Anything else set on a
+  style object is kept as an ordinary property, as in browsers.
+
+1.8.28
+  Merlin Engine, for AlterniTech's site (Square) and Convert to it!:
+  - Menus that drop down on hover open: :hover is understood. The pointer
+    over an item marks it and what holds it as hovered, and what a :hover
+    rule changes is styled again; the menu stays open as the pointer moves
+    down into it and closes when it leaves. (A page with no :hover rules
+    does no extra work.)
+  - Text is the size the site gives it. calc() is worked out in full:
+    nested calc(), * and /, min(), max() and clamp() inside it, numbers as
+    well as lengths. Square sizes all its text with a fluid type scale built
+    of such calc()s, and only one length plus another had been understood:
+    every heading and title came out 16px.
+  - Space between buttons and columns: grid-column-gap and grid-row-gap, the
+    old names of column-gap and row-gap, which browsers still read for flex
+    boxes too. The home page's two buttons had touched, and the products'
+    columns too.
+  - The home page's heading sits where it should: a line holding only a
+    <br> is as tall as the line-height, as in browsers (it had been the
+    font's own height, so the heading, spaced with <br>s, sat too high and
+    the buttons with it).
+  - box-shadow is drawn: outer shadows, blurred and spread, under the box;
+    inset ones inside it. Square outlines its buttons with an inset shadow
+    (the Patreon button had no outline); a shadow list with an empty entry
+    is invalid and draws nothing, as in Chrome.
+  - A custom property set to nothing (--font-size:;) is a value: it puts
+    nothing in, and the fallback is not used; a value that comes out invalid
+    after var() is unset, not whatever was declared before it. Square's
+    buttons had taken 14px from the fallback.
+  - Logical properties: margin-inline, padding-block, inset-inline,
+    border-inline, inline-size and the rest, as their left, right, top and
+    bottom sides.
+  - In a column flexbox, margin: auto takes the room left (Convert to it!'s
+    card is in the middle of the window again), and an item's width with
+    box-sizing: border-box holds its padding (its footer had run "Source"
+    off the side).
+  - Dashed and dotted borders are drawn so (Convert to it!'s drop area).
+  - A <dialog> is hidden until it is open (Convert to it!'s showed a
+    shadow at the bottom of the page).
+  - The DOM's objects say what they are to Object.prototype.toString, as in
+    browsers ([object HTMLButtonElement]): libraries tell an element from a
+    selector so, and Convert to it!'s help tooltip had stopped its script
+    with "Unmatched selector".
+  - A translated box's background picture moves with it.
+
+1.8.27
+  Merlin's new icon, Dan's own artwork: the wizard in the purple hat, in
+  the window, the taskbar, Merlin.exe and the shortcuts on Windows
+  (merlin.ico, every size from 16 to 256), and Linux's desktop icon
+  (merlin.svg, and merlin.png made from the .ico). The script that drew the
+  old logo (tools/make-logo.py) is gone, so nothing can draw over it;
+  tools/png-from-ico.py remakes merlin.png from a new merlin.ico.
+
 1.8.26
   Updating works again on Windows. Going from 1.8.24 to 1.8.25 stopped with
   "Could not replace the files: [WinError 5] Access is denied": Ponder's

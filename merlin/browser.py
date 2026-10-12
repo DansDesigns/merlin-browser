@@ -3095,7 +3095,11 @@ class BrowserWindow(QMainWindow):
         Reading only url() meant that quitting without visiting the restored
         tabs saved just the one that had loaded, and the rest were lost.
         """
-        if self.private:
+        if self.private or self.app_mode:
+            # an installed web app is not the browser: its page is not the
+            # browser's session, nor its window the browser's size (a web app
+            # closed last had left Merlin opening on the app's page, the
+            # browser's own tabs lost)
             return
         from PyQt6 import sip
 

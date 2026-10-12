@@ -4,7 +4,7 @@ Covers what ordinary documents lean on: type, class, id and attribute
 selectors with the descendant, child and sibling combinators; specificity and
 !important; the default stylesheet every browser has; inheritance; and values
 in px, em, rem, pt and percentages. Selectors this engine cannot evaluate yet,
-such as :hover or ::before, never match, so a rule meant only for a moment of
+such as :focus or ::selection, never match, so a rule meant only for a moment of
 interaction is not applied all the time.
 """
 from __future__ import annotations
@@ -293,12 +293,224 @@ def viewport_unit(unit: str, viewport):
             "vmin": min(width, height), "vmax": max(width, height)}.get(base)
 
 
+_CALC_NUMBER = re.compile(r"(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?", re.I)
+_CALC_UNIT = re.compile(r"[a-z]+|%", re.I)
+_CALC_FUNCS = ("calc", "min", "max", "clamp", "abs")
+
+
+def _calc_tokens(text: str):
+    """calc()'s pieces: numbers with their units, functions, ( ) , + - * /.
+    A - or + is a sign when it starts a number where a value is due (as in
+    calc(var(--space)*-1)); between values it is the operator."""
+    tokens = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch.isspace():
+            i += 1
+            continue
+        due = not tokens or tokens[-1][0] in ("op", "(", ",", "func")
+        if ch in "+-" and due and i + 1 < n and (text[i + 1].isdigit() or text[i + 1] == "."):
+            match = _CALC_NUMBER.match(text, i + 1)
+            sign = -1.0 if ch == "-" else 1.0
+            unit = _CALC_UNIT.match(text, match.end())
+            tokens.append(("value", sign * float(match.group(0)), (unit.group(0) if unit else "").lower()))
+            i = unit.end() if unit else match.end()
+            continue
+        if ch.isdigit() or (ch == "." and i + 1 < n and text[i + 1].isdigit()):
+            match = _CALC_NUMBER.match(text, i)
+            unit = _CALC_UNIT.match(text, match.end())
+            tokens.append(("value", float(match.group(0)), (unit.group(0) if unit else "").lower()))
+            i = unit.end() if unit else match.end()
+            continue
+        if ch.isalpha():
+            match = re.match(r"[a-z-]+", text[i:], re.I)
+            word = match.group(0).lower()
+            after = i + len(word)
+            if after < n and text[after] == "(" and word in _CALC_FUNCS:
+                tokens.append(("func", word))
+                i = after + 1
+                continue
+            return None                    # a keyword or function calc() cannot use here
+        if ch in "()":
+            tokens.append((ch,))
+        elif ch == ",":
+            tokens.append((",",))
+        elif ch in "+-*/":
+            tokens.append(("op", ch))
+        else:
+            return None
+        i += 1
+    return tokens
+
+
+def calc_value(value: str, font_size: float = 16.0, root_size: float = 16.0, viewport=(1024, 768)):
+    """A calc(), min(), max() or clamp() worked out: {"": number} for a plain
+    number, {"px": n} for a length, {"%": n} for a percentage, both for a
+    mix of the two; None if it cannot be (an angle, a keyword, a unit
+    multiplied by a unit).
+
+    Fluid type scales are built this way: Square's sites size their text with
+    calc(var(--min-fs-2)*1px + var(--range-fs-2)*var(--interpolate-by)), each
+    of those a calc() of calc()s. Only one length plus or minus another had
+    been understood, so their headings were all 16 px."""
+    tokens = _calc_tokens(value.strip())
+    if not tokens:
+        return None
+    position = [0]
+
+    def peek():
+        return tokens[position[0]] if position[0] < len(tokens) else None
+
+    def take():
+        token = peek()
+        position[0] += 1
+        return token
+
+    def unit_value(number, unit):
+        if unit == "":
+            return {"": number}
+        if unit == "%":
+            return {"%": number}
+        whole = viewport_unit(unit, viewport)
+        if whole is not None:
+            return {"px": number * whole / 100}
+        px = {"px": 1.0, "em": font_size, "rem": root_size, "pt": 4 / 3, "pc": 16.0,
+              "cm": 96 / 2.54, "mm": 96 / 25.4, "q": 96 / 101.6, "in": 96.0,
+              "ex": font_size / 2, "ch": font_size / 2, "lh": font_size * 1.2,
+              "rlh": root_size * 1.2}.get(unit)
+        if px is None:
+            raise ValueError(unit)
+        return {"px": number * px}
+
+    def add(a, b, sign):
+        kinds_a, kinds_b = set(a), set(b)
+        if ("" in kinds_a) != ("" in kinds_b):
+            # a number and a length cannot be added, except a zero length
+            raise ValueError("mixed")
+        out = dict(a)
+        for key, amount in b.items():
+            out[key] = out.get(key, 0.0) + sign * amount
+        return out
+
+    def scaled(a, factor):
+        return {key: amount * factor for key, amount in a.items()}
+
+    def plain(a):
+        return set(a) == {""}
+
+    def compare(values, pick):
+        kinds = {frozenset(v) for v in values}
+        if len(kinds) != 1 or len(next(iter(kinds))) != 1:
+            raise ValueError("mixed")          # min(100%, 600px): known only at layout
+        key = next(iter(next(iter(kinds))))
+        return {key: pick(v[key] for v in values)}
+
+    def primary():
+        token = take()
+        if token is None:
+            raise ValueError("end")
+        if token[0] == "value":
+            return unit_value(token[1], token[2])
+        if token[0] == "(":
+            found = total()
+            if take() != (")",):
+                raise ValueError(")")
+            return found
+        if token[0] == "func":
+            args = [total()]
+            while peek() == (",",):
+                take()
+                args.append(total())
+            if take() != (")",):
+                raise ValueError(")")
+            name = token[1]
+            if name == "calc":
+                if len(args) != 1:
+                    raise ValueError("calc")
+                return args[0]
+            if name == "abs":
+                return {k: abs(v) for k, v in args[0].items()}
+            if name == "min":
+                return compare(args, min)
+            if name == "max":
+                return compare(args, max)
+            if name == "clamp" and len(args) == 3:
+                low, middle, high = args
+                return compare([compare([middle, high], min), low], max)
+            raise ValueError(name)
+        if token == ("op", "-"):
+            return scaled(primary(), -1.0)
+        if token == ("op", "+"):
+            return primary()
+        raise ValueError(str(token))
+
+    def product():
+        result = primary()
+        while peek() in (("op", "*"), ("op", "/")):
+            operator = take()[1]
+            other = primary()
+            if operator == "*":
+                if plain(other):
+                    result = scaled(result, other[""])
+                elif plain(result):
+                    result = scaled(other, result[""])
+                else:
+                    raise ValueError("unit*unit")
+            else:
+                if not plain(other) or other[""] == 0:
+                    raise ValueError("divide")
+                result = scaled(result, 1.0 / other[""])
+        return result
+
+    def total():
+        result = product()
+        while peek() in (("op", "+"), ("op", "-")):
+            sign = 1.0 if take()[1] == "+" else -1.0
+            result = add(result, product(), sign)
+        return result
+
+    try:
+        result = total()
+    except (ValueError, IndexError, TypeError, ZeroDivisionError, OverflowError):
+        return None
+    if peek() is not None:
+        return None
+    # a zero percentage or zero length beside the other kind is no part of it
+    if len(result) > 1:
+        result = {k: v for k, v in result.items() if v != 0.0} or {"px": 0.0}
+    return result
+
+
+def calc_number(value: str):
+    """A plain number from calc() and its kind (line-height: calc(1.5 * .95)),
+    or None if value is not one."""
+    text = (value or "").strip().lower()
+    if not text.startswith(_CALC_FUNCS) or "(" not in text:
+        return None
+    found = calc_value(text)
+    if found is not None and set(found) == {""}:
+        return found[""]
+    return None
+
+
 def parse_length(value: str, font_size: float, root_size: float, viewport=(1024, 768)):
     """A length as px, or ("%", n) for a percentage, "auto", or None."""
     value = value.strip().lower()
+    maths = re.match(r"^(calc|min|max|clamp|abs)\((.*)\)$", value)
+    if maths:
+        found = calc_value(value, font_size, root_size, viewport)
+        if found is not None:
+            if set(found) == {"px"}:
+                return float(found["px"])
+            if set(found) == {"%"}:
+                return ("%", found["%"])
+            if set(found) == {""}:
+                return 0.0 if found[""] == 0 else None
+            return None                    # percent and pixels: _mixed_length's
     maths = re.match(r"^(min|max|clamp)\((.*)\)$", value)
     if maths:
-        # min(), max() and clamp() over lengths that resolve now. A percentage
+        # min(), max() and clamp() of a percentage and lengths: a percentage
         # needs the containing block, known only at layout, so it is set
         # aside; the rest still give a sensible answer, as with
         # width: min(620px, 86vw).
@@ -315,15 +527,7 @@ def parse_length(value: str, font_size: float, root_size: float, viewport=(1024,
             low, preferred, high = resolved
             return max(low, min(preferred, high))
         return numbers[len(numbers) // 2]
-    calc = re.match(r"^calc\((.*)\)$", value)
-    if calc:
-        # the simplest calc(): one length plus or minus another
-        found = re.match(r"^\s*([^\s]+)\s*([+-])\s*([^\s]+)\s*$", calc.group(1))
-        if found:
-            left = parse_length(found.group(1), font_size, root_size, viewport)
-            right = parse_length(found.group(3), font_size, root_size, viewport)
-            if isinstance(left, float) and isinstance(right, float):
-                return left + right if found.group(2) == "+" else left - right
+    if value.startswith("calc("):
         return None
     if value in ("auto", "none", "normal"):
         return "auto"
@@ -511,8 +715,12 @@ def _compound(text: str):
                     compound["pseudo"].append((pseudo, formula))
             elif pseudo in _STRUCTURAL:
                 compound["pseudo"].append(pseudo)
+            elif pseudo == "hover":
+                # the element under the pointer and those holding it (the view
+                # sets Element.hover): Square's menus open on :hover
+                compound["pseudo"].append("hover")
             else:
-                matchable = False            # :hover, :focus, :target and the like
+                matchable = False            # :focus, :target and the like
             position = end
             continue
         position = match.end()
@@ -654,6 +862,8 @@ def _matches_compound(compound, element: Element) -> bool:
                 return False
         control = element.tag in ("input", "button", "select", "textarea", "option",
                                   "optgroup", "fieldset")
+        if pseudo == "hover" and not getattr(element, "hover", False):
+            return False
         if pseudo == "disabled" and not (control and "disabled" in element.attrs):
             return False
         if pseudo == "enabled" and not (control and "disabled" not in element.attrs):
@@ -812,7 +1022,9 @@ def parse_declarations(text: str) -> list:
         if value.lower().endswith("!important"):
             important = True
             value = value[: -len("!important")].strip()
-        if name and value:
+        # a custom property set to nothing (--font-size:;) is kept: it is a
+        # value, which var() puts in as nothing
+        if name and (value or name.startswith("--")):
             found.append((name, value, important))
     return found
 
@@ -1065,12 +1277,17 @@ def _var(value: str, custom: dict, depth: int = 0):
         name, comma, fallback = inside.partition(",")
         name = name.strip()
         found = custom.get(name)
-        if found is not None and found.strip():
+        if found is not None and found.strip().lower() == "initial":
+            found = None                   # the guaranteed-invalid value: as if unset
+        elif found is not None and not found.strip():
+            # set to nothing (--font-size:;), which is a value: it puts
+            # nothing in, and the fallback is not used. Square's buttons set
+            # it so, and their text had taken the fallback's 14px
+            found = ""
+        elif found is not None:
             # a variable that cannot itself be resolved, as in a loop, counts as
             # missing: the fallback, if there is one, stands in
             found = _var(found, custom, depth + 1)
-        else:
-            found = None
         if found is None:
             if not comma:
                 return None
@@ -1146,6 +1363,9 @@ details:not([open]) > :not(summary) { display: none }
 # as browsers' own -webkit-center does: Hacker News' 85% table sits in the
 # middle of the page so
 DEFAULT_STYLESHEET += """
+dialog { display: block; position: absolute; left: 0; right: 0; margin: auto; border: solid;
+         padding: 1em; background-color: white; color: black }
+dialog:not([open]) { display: none }
 center > *, div[align=center] > table, td[align=center] > table, th[align=center] > table,
 table[align=center] { margin-left: auto; margin-right: auto }
 """
@@ -1313,8 +1533,11 @@ class Styler:
                 continue
             if "var(" in value:
                 value = _var(value, custom)
-                if value is None:
-                    continue           # invalid once substituted: as if not set
+                if value is None or not value.strip():
+                    # invalid once substituted: unset, as the standard has it
+                    # (inherited, or the initial value), not whatever was
+                    # declared before it
+                    value = "unset"
             for real_name, real_value in expand_shorthand(name, value):
                 declared[real_name] = real_value
                 from_default[real_name] = is_default
@@ -1521,6 +1744,9 @@ class Styler:
         if name == "line-height":
             if lowered == "normal":
                 return ("normal",)
+            number = calc_number(lowered)
+            if number is not None:
+                return ("factor", number)
             try:
                 return ("factor", float(lowered))
             except ValueError:
@@ -1533,6 +1759,9 @@ class Styler:
         if name == "font-family":
             return value.strip()
         if name in ("flex-grow", "flex-shrink"):
+            number = calc_number(lowered)
+            if number is not None:
+                return max(0.0, number)
             try:
                 return max(0.0, float(lowered))
             except ValueError:
@@ -1564,6 +1793,9 @@ class Styler:
                 return TransformOps(ops)
             return None if ops == [] else _translation(lowered, font, root_size, self.viewport)
         if name == "opacity":
+            number = calc_number(lowered)
+            if number is not None:
+                return max(0.0, min(1.0, number))
             try:
                 number = float(lowered[:-1]) / 100 if lowered.endswith("%") else float(lowered)
                 return max(0.0, min(1.0, number))
@@ -1645,9 +1877,70 @@ def _border_parts(value: str):
     return width, style, colour
 
 
+_LOGICAL = {}
+for _kind in ("margin", "padding"):
+    _LOGICAL.update({f"{_kind}-inline-start": f"{_kind}-left", f"{_kind}-inline-end": f"{_kind}-right",
+                     f"{_kind}-block-start": f"{_kind}-top", f"{_kind}-block-end": f"{_kind}-bottom"})
+for _part in ("", "-width", "-style", "-color"):
+    _LOGICAL.update({f"border-inline-start{_part}": f"border-left{_part}",
+                     f"border-inline-end{_part}": f"border-right{_part}",
+                     f"border-block-start{_part}": f"border-top{_part}",
+                     f"border-block-end{_part}": f"border-bottom{_part}"})
+_LOGICAL.update({
+    "inset-inline-start": "left", "inset-inline-end": "right",
+    "inset-block-start": "top", "inset-block-end": "bottom",
+    "inline-size": "width", "block-size": "height",
+    "min-inline-size": "min-width", "max-inline-size": "max-width",
+    "min-block-size": "min-height", "max-block-size": "max-height",
+    "border-start-start-radius": "border-top-left-radius",
+    "border-start-end-radius": "border-top-right-radius",
+    "border-end-start-radius": "border-bottom-left-radius",
+    "border-end-end-radius": "border-bottom-right-radius",
+})
+_LOGICAL_PAIRS = {
+    "margin-inline": ("margin-left", "margin-right"), "margin-block": ("margin-top", "margin-bottom"),
+    "padding-inline": ("padding-left", "padding-right"), "padding-block": ("padding-top", "padding-bottom"),
+    "inset-inline": ("left", "right"), "inset-block": ("top", "bottom"),
+}
+for _part in ("", "-width", "-style", "-color"):
+    _LOGICAL_PAIRS[f"border-inline{_part}"] = (f"border-left{_part}", f"border-right{_part}")
+    _LOGICAL_PAIRS[f"border-block{_part}"] = (f"border-top{_part}", f"border-bottom{_part}")
+
+
 def expand_shorthand(name: str, value: str) -> list:
     """A shorthand property as the longhand properties it sets."""
     sides = ("top", "right", "bottom", "left")
+    keyword = value.strip().lower()
+    if keyword in ("inherit", "initial", "unset", "revert", "revert-layer"):
+        # a CSS-wide keyword sets every longhand of the shorthand to itself
+        # (flex: unset had read as flex: 1)
+        whole = {
+            "flex": ("flex-grow", "flex-shrink", "flex-basis"),
+            "font": ("font-family", "font-size", "font-weight", "font-style", "line-height"),
+            "border": tuple(f"border-{side}-{part}" for side in sides for part in ("width", "style", "color")),
+        }
+        for side in sides:
+            whole[f"border-{side}"] = tuple(f"border-{side}-{part}" for part in ("width", "style", "color"))
+        if name in whole:
+            return [(longhand, keyword) for longhand in whole[name]]
+    if name in _LOGICAL_PAIRS:
+        # margin-inline: 4px 8px, padding-block, inset-inline...: the two
+        # sides they stand for, in left-to-right, top-to-bottom text
+        first, second = _LOGICAL_PAIRS[name]
+        if name in ("border-inline", "border-block"):
+            # one border, for both sides
+            return expand_shorthand(first, value) + expand_shorthand(second, value)
+        values = [v for v in _split_outside(value.strip(), " ") if v.strip()]
+        if not values:
+            return []
+        out = []
+        for side, part in ((first, values[0]), (second, values[1] if len(values) > 1 else values[0])):
+            out.extend(expand_shorthand(side, part))
+        return out
+    if name in _LOGICAL:
+        # margin-inline-end and the like: Convert to it! pushes its footer's
+        # copyright to the left with margin-inline-end: auto
+        return expand_shorthand(_LOGICAL[name], value)
     if name in ("margin", "padding"):
         values = [v for v in _split_outside(value, " ") if v.strip()]
         if not values:
@@ -1767,10 +2060,15 @@ def expand_shorthand(name: str, value: str) -> list:
     if name == "overflow-y":
         return [("-merlin-overflow-y", value.strip().lower())] if value.strip() else []
     if name == "gap" or name == "grid-gap":
-        values = [v for v in value.split() if v]
+        # split outside brackets: gap: calc(var(--a) + 4px) 8px is two values
+        values = [v for v in _split_top(value.strip(), " ") if v.strip()]
         if not values:
             return []
         return [("row-gap", values[0]), ("column-gap", values[1] if len(values) > 1 else values[0])]
+    if name in ("grid-row-gap", "grid-column-gap"):
+        # the old names, which browsers still read, for flex boxes as well as
+        # grids: Square's sites space their buttons with grid-column-gap
+        return [(name[5:], value)]
     if name == "flex-flow":
         found = []
         for token in value.lower().split():
@@ -2036,6 +2334,9 @@ def parse_transform_ops(value: str, font: float, root_size: float, viewport):
 def _mixed_length(expression: str, font: float, root_size: float, viewport):
     """A calc() of a percentage and lengths, as ("mix", percent, px): so much
     of the box, which only paint knows, and so many pixels."""
+    found = calc_value(f"calc({expression})", font, root_size, viewport)
+    if found is not None and "" not in found:
+        return ("mix", found.get("%", 0.0), found.get("px", 0.0))
     percent = pixels = 0.0
     terms = re.split(r"\s+([+-])\s+", " " + expression.strip())
     sign = 1.0

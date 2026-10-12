@@ -1752,6 +1752,12 @@ class MerlinView(QWidget, FramesMixin):
                 self._styles = {e: st for e, st in zip(elements, styles) if st is not None}
                 self._media = answer.get("media", self._media)
                 self._viewport_units = answer.get("viewport_units", self._viewport_units)
+                chain = getattr(self, "_hover_chain", [])
+                if chain and getattr(self, "_hover_document", None) is self._document:
+                    # styled from the page's markup, which knows nothing of
+                    # the pointer: what is hovered is styled so again
+                    self._hover_pending = list(chain)
+                    QTimer.singleShot(0, self._restyle_hover)
                 self._layout()
         if self._restyle_again:
             self._restyle_again = False
@@ -1991,10 +1997,11 @@ class MerlinView(QWidget, FramesMixin):
         known = element.attrs.get("data-mjs")
         return self._by_script_id.get(known, element) if known else element
 
-    def _element_at(self, position):
-        """The script id of the element a click at position lands on, or None."""
+    def _elements_at(self, position) -> list:
+        """The elements at position that a click could land on, the
+        smallest (the innermost, as a rule) first."""
         if self._display is None:
-            return None
+            return []
         point = position.toPointF() if hasattr(position, "toPointF") else position
         styles = self._styles or {}
 
@@ -2050,7 +2057,11 @@ class MerlinView(QWidget, FramesMixin):
                         r = r.translated(0, -dy)
                 if r.contains(page_point) and hittable(e, False):
                     candidates.append((r, e))
-        for rect, element in sorted(candidates, key=lambda c: c[0].width() * c[0].height()):
+        return [element for _rect, element in sorted(candidates, key=lambda c: c[0].width() * c[0].height())]
+
+    def _element_at(self, position):
+        """The script id of the element a click at position lands on, or None."""
+        for element in self._elements_at(position):
             if element.attrs.get("data-mjs"):
                 return int(element.attrs["data-mjs"])
         return None
@@ -3639,9 +3650,133 @@ class MerlinView(QWidget, FramesMixin):
                 return href
         return below
 
+    # ------------------------------------------------------------ :hover
+    def _hover_selectors(self):
+        """The compounds of the page's :hover rules, without the :hover, with
+        a Styler to style again by; None if the page has none. Made once per
+        page and set of sheets."""
+        key = (id(self._document), id(self._sheets), len(self._sheets or []), self._styled_at)
+        if getattr(self, "_hover_key", None) == key:
+            return self._hover_kit
+        self._hover_key = key
+        self._hover_kit = None
+        sheets = self._sheets or []
+        if self._document is None or not any(":hover" in (text or "") for text in sheets):
+            return None
+        from .css import Styler
+
+        try:
+            styler = Styler(self._document, author_css=sheets,
+                            viewport=self._styled_at or (self._page_width(), float(self.height())),
+                            extra_css=self._hiding_css())
+        except Exception:                                  # noqa: BLE001
+            return None
+        compounds, seen = [], set()
+        for index in styler._index.values():
+            for entries in index.values():
+                for rule, _base in entries:
+                    if id(rule) in seen:
+                        continue
+                    seen.add(id(rule))
+                    for compound, _combinator in rule.selector.parts:
+                        if "hover" in compound.get("pseudo", ()):
+                            bare = dict(compound)
+                            bare["pseudo"] = [p for p in compound["pseudo"] if p != "hover"]
+                            compounds.append(bare)
+        self._hover_kit = (styler, compounds) if compounds else None
+        return self._hover_kit
+
+    def _update_hover(self, position) -> None:
+        """Mark the element under the pointer and those holding it as hovered,
+        and style again what a :hover rule changes: Square's menus drop down
+        on .nav__item:hover, and had stayed shut."""
+        kit = self._hover_selectors() if self._display is not None else None
+        chain = []
+        if kit is not None and position is not None:
+            found = self._elements_at(position)
+            node = found[0] if found else None
+            while node is not None and getattr(node, "pseudo", None):
+                node = node.parent
+            while node is not None and hasattr(node, "attrs"):
+                chain.append(node)
+                node = node.parent
+        self._set_hover(chain, kit)
+
+    def _set_hover(self, chain: list, kit) -> None:
+        old = getattr(self, "_hover_chain", [])
+        if getattr(self, "_hover_document", None) is not self._document:
+            old = []                             # a new page: its elements are new
+        if [id(e) for e in old] == [id(e) for e in chain]:
+            return
+        old_ids, new_ids = {id(e) for e in old}, {id(e) for e in chain}
+        changed = [e for e in old if id(e) not in new_ids] + [e for e in chain if id(e) not in old_ids]
+        for element in old:
+            element.hover = False
+        for element in chain:
+            element.hover = True
+        self._hover_chain = chain
+        self._hover_document = self._document
+        if kit is None or self._styles is None:
+            return
+        from .css import _matches_compound
+
+        styler, compounds = kit
+        relevant = [e for e in changed if any(_matches_compound(c, e) for c in compounds)]
+        if relevant:
+            self._hover_pending = (getattr(self, "_hover_pending", None) or []) + relevant
+            # a pointer crossing several boxes at once is styled once
+            if not getattr(self, "_hover_timer_on", False):
+                self._hover_timer_on = True
+                QTimer.singleShot(16, self._restyle_hover)
+
+    def _restyle_hover(self) -> None:
+        self._hover_timer_on = False
+        relevant, self._hover_pending = getattr(self, "_hover_pending", None) or [], []
+        kit = self._hover_selectors()
+        if not relevant or kit is None or self._document is None or not self._styles:
+            return
+        styler = kit[0]
+        # a :hover rule styles the element, what it holds, and (with + or ~)
+        # what follows it: its parent's whole box is styled again
+        tops = []
+        for element in relevant:
+            top = element.parent if hasattr(element.parent, "attrs") else element
+            if all(top is not t for t in tops):
+                tops.append(top)
+        top_ids = {id(t) for t in tops}
+
+        def held(element) -> bool:          # inside another top, styled with it
+            node = element.parent
+            while node is not None:
+                if id(node) in top_ids:
+                    return True
+                node = node.parent
+            return False
+
+        styles = dict(self._styles)
+        styler.styles = styles
+        root = self._document.root
+        root_size = (styles.get(root) or {}).get("font-size", 16.0)
+        try:
+            for top in tops:
+                if held(top):
+                    continue
+                parent = top.parent if hasattr(top.parent, "attrs") else None
+                styler._compute(top, styles.get(parent) if parent is not None else None, root_size)
+        except Exception:                                  # noqa: BLE001
+            return
+        self._styles = styles
+        self._layout()
+        self.update()
+
+    def leaveEvent(self, event) -> None:                      # noqa: N802
+        self._set_hover([], self._hover_selectors() if self._display is not None else None)
+        super().leaveEvent(event)
+
     def mouseMoveEvent(self, event) -> None:                  # noqa: N802
         from .layout import LabelTarget
 
+        self._update_hover(event.position())
         href = self._link_at(event.position())
         button = self._button_at(event.position())
         state = (href, button)

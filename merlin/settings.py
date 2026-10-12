@@ -193,6 +193,9 @@ class Settings(QObject):
         super().__init__(parent)
         ensure_dirs()
         self._data = copy.deepcopy(DEFAULTS)
+        # the settings as the file had them when last read or written: what
+        # differs from it now is what this Merlin changed (see save)
+        self._on_disk = copy.deepcopy(DEFAULTS)
         self.load()
 
     # ------------------------------------------------------------------ io
@@ -204,6 +207,7 @@ class Settings(QObject):
                 for key, value in stored.items():
                     if key in DEFAULTS:
                         self._data[key] = value
+                        self._on_disk[key] = copy.deepcopy(value)
                 # Merlin Engine became the engine for every page in 1.8.1:
                 # settings saved before then are moved over once, and after
                 # that the choice in Settings stands
@@ -230,12 +234,39 @@ class Settings(QObject):
             pass
 
     def save(self) -> None:
+        """Write the settings, merged with what is on disk now.
+
+        Several Merlins share the file: the browser, and each installed web
+        app, which is a Merlin of its own. Each had written all of its
+        settings, so whichever saved last put back what it had read when it
+        started: a web app closed after the browser wrote back its old list
+        of tabs, and the browser's were lost. Now each writes only what it
+        changed itself (set, or a list changed in place), and takes on what
+        the others changed."""
         ensure_dirs()
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as fh:
+                current = json.load(fh)
+            if not isinstance(current, dict):
+                current = {}
+        except (OSError, ValueError):
+            current = {}
+        merged = dict(current)
+        for key, value in self._data.items():
+            mine = value != self._on_disk.get(key, DEFAULTS.get(key))
+            if mine or key not in current:
+                merged[key] = value
+            elif key in DEFAULTS:
+                # another Merlin's change: taken on here too
+                self._data[key] = copy.deepcopy(current[key])
         tmp = SETTINGS_FILE + ".tmp"
         try:
             with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(self._data, fh, indent=2, sort_keys=True)
+                json.dump(merged, fh, indent=2, sort_keys=True)
             os.replace(tmp, SETTINGS_FILE)
+            self._on_disk = copy.deepcopy({k: v for k, v in merged.items() if k in DEFAULTS})
+            for key in DEFAULTS:
+                self._on_disk.setdefault(key, copy.deepcopy(DEFAULTS[key]))
         except OSError:
             pass
 

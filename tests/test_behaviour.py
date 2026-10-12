@@ -2379,6 +2379,49 @@ def test_behavioural_biometrics(app) -> None:
     server.shutdown()
 
 
+def test_web_apps_leave_the_session_alone(app) -> None:
+    """An installed web app never touches the browser's tabs: closing it
+    saves no session, and the settings file, shared by the browser and every
+    web app (each a Merlin of its own), keeps what each changed. A web app
+    closed after the browser had put back its old list of tabs, and Merlin
+    opened on the app's page with the browser's tabs gone."""
+    import json as _json
+
+    os.makedirs(os.path.dirname(cfg.SETTINGS_FILE), exist_ok=True)
+    with open(cfg.SETTINGS_FILE, "w", encoding="utf-8") as handle:
+        _json.dump({"last_session": ["https://one.example/", "https://two.example/"],
+                    "tiles_convert": True, "ponder_default": True, "engine_switched": True}, handle)
+    # two Merlins, as two processes would be: the browser, and a web app
+    browser = cfg.Settings()
+    web_app = cfg.Settings()
+    browser.set("last_session", ["https://one.example/", "https://two.example/", "https://three.example/"])
+    web_app.set("dark_ui", not web_app.get("dark_ui"))
+    on_disk = _json.load(open(cfg.SETTINGS_FILE, encoding="utf-8"))
+    check("a web app saving its settings keeps the browser's tabs, saved after it started",
+          on_disk.get("last_session", [])[-1:] == ["https://three.example/"] and on_disk.get("dark_ui") == web_app.get("dark_ui"),
+          str(on_disk.get("last_session")))
+    check("and it takes on the browser's change", web_app.get("last_session")[-1:] == ["https://three.example/"])
+    exceptions = browser.get("shields_exceptions")
+    exceptions.append("changed.example")                 # changed in place, then saved
+    browser.save()
+    on_disk = _json.load(open(cfg.SETTINGS_FILE, encoding="utf-8"))
+    check("a list changed in place is saved, and the other Merlin's change kept",
+          "changed.example" in on_disk.get("shields_exceptions", []) and on_disk.get("dark_ui") == web_app.get("dark_ui"))
+
+    # a web app's window, closed: no session saved from it
+    window, settings, _ = make_window(app, "t-webapp-session")
+    settings.set("last_session", ["https://keep.example/"])
+    window.apply_app_mode()
+    window.new_tab(page("the app"))
+    wait(app, 1.0)
+    window.close()
+    wait(app, 0.5)
+    on_disk = _json.load(open(cfg.SETTINGS_FILE, encoding="utf-8"))
+    check("closing a web app's window leaves the browser's last session as it was",
+          settings.get("last_session") == ["https://keep.example/"]
+          and on_disk.get("last_session") == ["https://keep.example/"], str(on_disk.get("last_session")))
+
+
 def main() -> int:
     app = QApplication([sys.argv[0]])
     for test in (test_session, test_placeholders, test_tab_churn,
@@ -2407,7 +2450,7 @@ def main() -> int:
                  test_download_popup, test_hand_over_needs_an_answer, test_linux_uninstaller,
                  test_corner_layer, test_ponder_built_in,
                  test_node_runtime_fetched_without_rust, test_update_with_the_folder_in_use,
-                 test_behavioural_biometrics):
+                 test_behavioural_biometrics, test_web_apps_leave_the_session_alone):
         print(f"\n{test.__name__}")
         try:
             test(app)

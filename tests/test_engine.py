@@ -25,7 +25,7 @@ os.environ["MERLIN_NO_PONDER"] = "1"           # Ponder's server is not started 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from PyQt6.QtCore import QPoint, Qt, QTimer, QUrl             # noqa: E402
+from PyQt6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, QUrl  # noqa: E402
 from PyQt6.QtWidgets import QApplication                      # noqa: E402
 
 FAILED: list = []
@@ -3909,6 +3909,10 @@ def test_frames(app) -> None:
     try:
         view.setUrl(QUrl(top + "/parent.html"))
         until(lambda: "world" in text_of(view, "got") and "port:" in text_of(view, "port"), 25)
+        # the frame's own page shows what it got a moment later, as its
+        # scripts' changes come back: waited for too, or a busy machine fails it
+        until(lambda: frame_of(view, "f") is not None
+              and "got a port" in text_of(frame_of(view, "f"), "c"), 10)
         child = frame_of(view, "f")
         check("the page's iframe is a view of its own, placed over its box",
               child is not None and child.isVisible() and child.width() == 320 and child.height() == 90,
@@ -4174,8 +4178,14 @@ def test_worker_features(app) -> None:
     folder = tempfile.mkdtemp(prefix="merlin-workers-")
     files = {
         "index.html": "<!DOCTYPE html><html><body><p id=nested>waiting</p><p id=xhr>waiting</p><p id=shared>waiting</p>"
-                      "<p id=cache>waiting</p><p id=sw>waiting</p><p id=pagexhr>waiting</p><script>"
+                      "<p id=cache>waiting</p><p id=sw>waiting</p><p id=pagexhr>waiting</p><p id=tag>waiting</p><p id=style>waiting</p><script>"
                       "const out = (id, t) => document.getElementById(id).textContent = t;"
+                      "out('tag', [document.createElement('button'), document.querySelectorAll('p'), new Event('x')]"
+                      ".map((x) => Object.prototype.toString.call(x)).join(' '));"
+                      "{ const st = document.createElement('div').style; const r = ['textAlign' in st, 'text-align' in st,"
+                      " 'fooBar' in st, typeof st.fooBar]; const el = document.getElementById('style');"
+                      " el.style.textAlign = 'center'; el.style.webkitTransform = 'none'; el.style.cssFloat = 'left';"
+                      " el.style[undefined] = 'x'; r.push(el.getAttribute('style')); el.textContent = r.join(' '); }"
                       "const w = new Worker('/outer.js'); w.onmessage = (e) => out(e.data[0], e.data[1]); w.postMessage('go');"
                       "const s1 = new SharedWorker('/shared.js', 'one'), s2 = new SharedWorker('/shared.js', 'one'); let got = [];"
                       "for (const s of [s1, s2]) { s.port.onmessage = (e) => { got.push(e.data); out('shared', got.sort().join(',')); };"
@@ -4254,6 +4264,12 @@ def test_worker_features(app) -> None:
               text_of("sw") == "serviceWorker false", text_of("sw"))
         check("the page's own XMLHttpRequest still works", text_of("pagexhr") == "page xhr 200 export const n = 42;",
               text_of("pagexhr"))
+        check("a style object knows the properties a browser's does, and names them as CSS does "
+              "(Vue had written style=\"undefined:center\" on Square's sites, and the centring was lost)",
+              text_of("style") == "true true false undefined text-align:center;-webkit-transform:none;float:left",
+              text_of("style"))
+        check("the DOM's objects say what they are, as in browsers (Tippy tells an element from a selector so)",
+              text_of("tag") == "[object HTMLButtonElement] [object NodeList] [object Event]", text_of("tag"))
     finally:
         view.shutdown()
         view.deleteLater()
@@ -4334,6 +4350,230 @@ def test_blur_timing(app) -> None:
             QTest.keyClicks(field, "merlin")
         check("Blur timing: what is typed reaches the page, late but in order",
               until(lambda: text_of("typed") == "merlin", 8), text_of("typed"))
+    finally:
+        view.shutdown()
+        view.deleteLater()
+        server.shutdown()
+
+
+def test_square_and_convert_layout(app) -> None:
+    """What AlterniTech's Square site and Convert to it! needed: calc() with
+    * and / (Square's fluid type scale), empty custom properties, the old
+    grid-column-gap name, <br> lines as tall as the line-height, box-shadow
+    (Square outlines buttons with one), logical properties, margin: auto in
+    a column flexbox, border-box widths of column items, dashed borders, and
+    a closed <dialog> hidden."""
+    from PyQt6.QtGui import QColor, QImage, QPainter
+
+    from merlin.engine import paint as paint_module
+    from merlin.engine.css import Styler, calc_number, calc_value, expand_shorthand, parse_length
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+
+    def laid(markup, width=800, height=600):
+        document = parse("<!DOCTYPE html><style>body{margin:0}</style>" + markup)
+        styles = Styler(document, viewport=(width, height)).compute()
+        return document, styles, Layout(document, styles, width, viewport_height=height).run()
+
+    def box(out, eid):
+        for source in (out, out.fixed):
+            if source is None:
+                continue
+            for rect, element in source.boxes:
+                if element.id == eid:
+                    return rect
+        return None
+
+    def style_of(document, styles, eid):
+        return styles[next(e for e in document.root.elements() if e.id == eid)]
+
+    # calc()
+    square = ("calc(calc(calc(16*1.197)*1.197)*1px + calc(calc(calc(16*calc(1.197 + 0.11))*calc(1.197 + 0.11))"
+              " - calc(calc(16*1.197)*1.197))*calc(calc(1200px - 320*1px)/calc(1280 - 320)))")
+    check("calc() with nested calc(), * and / (Square's heading size)",
+          abs(parse_length(square, 16, 16) - 26.9647) < 0.01, str(parse_length(square, 16, 16)))
+    check("calc() keeps what it did: a length plus a length, a percentage minus a length for layout",
+          parse_length("calc(2em + 3px)", 10, 16) == 23.0 and parse_length("calc(100% - 20px)", 16, 16) is None
+          and calc_value("calc(100% - 2 * 8px)") == {"%": 100.0, "px": -16.0})
+    check("calc(var(--space)*-1) is negative, min()/clamp() work inside it",
+          parse_length("calc(10px*-1)", 16, 16) == -10.0
+          and parse_length("calc(min(10px, 2em) + clamp(1px, 50px, 4px))", 16, 16) == 14.0)
+    check("a unitless calc() for line-height", abs(calc_number("calc(calc(1.5*0.95)*0.95)") - 1.35375) < 1e-9)
+    document, styles, out = laid(
+        "<style>:root{--base:16;--scale:1.2;--fs:calc(var(--base)*var(--scale)*1px);--lh:calc(1.5*0.9)}"
+        "h1{font-size:var(--fs);line-height:var(--lh);margin:0}</style><h1 id=h>Title</h1>")
+    st = style_of(document, styles, "h")
+    check("a font size from custom properties and calc() is used, not the default",
+          abs(st["font-size"] - 19.2) < 0.01 and st["line-height"] == ("factor", 1.35), f"{st['font-size']} {st['line-height']}")
+    # empty custom properties
+    document, styles, out = laid(
+        "<style>.b{--font-size:12px;font-size:var(--font-size,30px)} .w{font-size:20px}</style>"
+        "<div class=w><a id=a class=b style='--font-size:;'>x</a><a id=c class=b>y</a></div>")
+    check("a custom property set to nothing puts nothing in: the property is unset (inherited), the fallback unused",
+          style_of(document, styles, "a")["font-size"] == 20.0 and style_of(document, styles, "c")["font-size"] == 12.0,
+          f"{style_of(document, styles, 'a')['font-size']} {style_of(document, styles, 'c')['font-size']}")
+    # grid-column-gap on a flex box
+    document, styles, out = laid("<div style='display:flex;grid-column-gap:16px'>"
+                                 "<div id=one style='width:100px'>a</div><div id=two style='width:100px'>b</div></div>")
+    check("grid-column-gap, the old name, spaces flex items too (Square's two buttons had touched)",
+          abs(box(out, "two").x() - box(out, "one").right() - 16) < 0.5, f"{box(out, 'two').x()}")
+    # <br> lines
+    document, styles, out = laid("<h1 id=h style='font-size:20px;line-height:30px;margin:0'><br><br><br>Text<br><br><br><br></h1>"
+                                 "<div id=e style='line-height:30px'><br></div>")
+    check("lines that are only a <br> are as tall as the line-height (AlterniTech's heading is spaced with them)",
+          box(out, "h").height() == 210 and box(out, "e").height() == 30, f"{box(out, 'h').height()} {box(out, 'e').height()}")
+    # box-shadow
+    document, styles, out = laid("<div id=s style='margin:40px;width:100px;height:40px;box-shadow:inset 0 0 0 2px #ff0000'></div>"
+                                 "<div id=t style='margin:40px;width:100px;height:40px;box-shadow:0 0 0 6px #0000ff'></div>"
+                                 "<div id=u style='margin:40px;width:100px;height:40px;box-shadow:inset 0 0 0 2px #ff0000,,0 0'></div>")
+    image = QImage(800, 400, QImage.Format.Format_ARGB32)
+    image.fill(QColor("white"))
+    painter = QPainter(image)
+    paint_module.paint(painter, out, QRectF(0, 0, 800, 400), {})
+    painter.end()
+    s_box, t_box, u_box = box(out, "s"), box(out, "t"), box(out, "u")
+    edge = image.pixelColor(int(s_box.x()) + 1, int(s_box.center().y()))
+    inside = image.pixelColor(int(s_box.center().x()), int(s_box.center().y()))
+    ring = image.pixelColor(int(t_box.x()) - 3, int(t_box.center().y()))
+    none = image.pixelColor(int(u_box.x()) + 1, int(u_box.center().y()))
+    check("an inset box-shadow outlines the box inside its edge (Square's outlined buttons)",
+          edge.red() > 200 and edge.green() < 60 and inside.green() > 200, f"{edge.name()} {inside.name()}")
+    check("an outer box-shadow's spread draws round the box",
+          ring.blue() > 200 and ring.red() < 60, ring.name())
+    check("a box-shadow with an empty shadow in its list is invalid, and draws nothing (as Chrome)",
+          none.green() > 200, none.name())
+    # logical properties
+    check("logical properties are their sides, left to right",
+          expand_shorthand("margin-inline-end", "auto") == [("margin-right", "auto")]
+          and expand_shorthand("padding-block", "1px 2px") == [("padding-top", "1px"), ("padding-bottom", "2px")]
+          and expand_shorthand("max-inline-size", "40ch") == [("max-width", "40ch")])
+    document, styles, out = laid("<footer style='display:flex;width:100%;box-sizing:border-box;padding:0 16px'>"
+                                 "<span id=l style='margin-inline-end:auto'>left</span><span id=r>right</span></footer>")
+    check("margin-inline-end: auto pushes what follows to the far end (Convert to it!'s footer)",
+          box(out, "l").x() < 20 and box(out, "r").right() > 770, f"{box(out, 'l')} {box(out, 'r')}")
+    # column flexbox: margin auto, border-box width
+    document, styles, out = laid("<div style='display:flex;flex-direction:column;min-height:600px'>"
+                                 "<div id=card style='width:200px;height:100px;margin:auto'>card</div>"
+                                 "<footer id=f style='width:100%;box-sizing:border-box;padding:0 16px;flex-shrink:0'>f</footer></div>")
+    card, foot = box(out, "card"), box(out, "f")
+    check("margin: auto centres an item in a column flexbox, both ways (Convert to it!'s card had sat at the top)",
+          abs(card.x() - 300) < 1 and card.y() > 200, f"{card}")
+    check("a border-box item of width 100% in a column flexbox is as wide as it, padding inside",
+          abs(foot.width() - 800) < 0.5 and foot.bottom() > 590, f"{foot}")
+    # dashed
+    document, styles, out = laid("<div id=d style='width:100px;height:50px;border:2px dashed #000'></div>")
+    kinds = []
+
+    def walk(items):
+        for item in items:
+            if item and item[0] == "group":
+                walk(item[1])
+            elif item:
+                kinds.append(item[0])
+    walk(out.items)
+    check("a dashed border is drawn dashed", kinds.count("dashed") == 4, str(kinds))
+    # dialog
+    document, styles, out = laid("<dialog id=closed>hidden</dialog><dialog id=opened open>shown</dialog>")
+    check("a <dialog> is hidden until open (Convert to it!'s had shown its shadow)",
+          style_of(document, styles, "closed").get("display") == "none"
+          and style_of(document, styles, "opened").get("display") == "block")
+
+
+def test_hover(app) -> None:
+    """:hover: a menu that drops down on .item:hover > .menu (AlterniTech's),
+    opening as the pointer comes over it, staying open as it moves into the
+    menu, and closing when it leaves."""
+    from merlin.engine import MerlinView
+    from merlin.engine.css import matches, parse_selector
+    from merlin.engine.html import parse
+
+    document = parse("<style>a:hover{color:red}</style><a id=a>x</a>")
+    element = next(e for e in document.root.elements() if e.id == "a")
+    selector = parse_selector("a:hover")
+    check(":hover is a selector Merlin matches, and only when the element is hovered",
+          selector.matchable and not matches(selector, element))
+    element.hover = True
+    check("... and then it does", matches(selector, element))
+    resting = next(e for e in parse("<a id=r>x</a>").root.elements() if e.id == "r")
+    check(":not(:hover) is true at rest", matches(parse_selector("a:not(:hover)"), resting))
+
+    folder = tempfile.mkdtemp(prefix="merlin-hover-")
+    open(os.path.join(folder, "index.html"), "w").write(
+        "<!DOCTYPE html><html><head><style>body{margin:0;font:16px sans-serif}"
+        "nav ul{list-style:none;margin:0;padding:0;display:flex}"
+        ".item{position:relative;padding:10px 20px}"
+        ".menu{position:absolute;left:0;top:100%;opacity:0;transform:scaleY(0);background:#eee;width:150px}"
+        ".item:hover>.menu{opacity:1;transform:scaleY(1)}"
+        ".menu a{display:block;padding:8px}</style></head><body>"
+        "<nav><ul><li class=item id=software><a id=top href='/software'>Software</a>"
+        "<div class=menu id=menu><a id=first href='/one'>One</a><a id=second href='/two'>Two</a></div></li>"
+        "<li class=item><a href='/about'>About</a></li></ul></nav>"
+        "<p id=far style='margin-top:300px'>far below</p></body></html>")
+
+    class Pages(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Pages)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    class Host:
+        settings = {}
+
+        def javascript_allowed(self, site):
+            return False
+
+    def until(test, seconds):
+        end = time.time() + seconds
+        while time.time() < end and not test():
+            app.processEvents()
+            time.sleep(0.02)
+        return test()
+
+    view = MerlinView()
+    view._host = Host()
+    view.resize(800, 600)
+    view.show()
+    try:
+        view.setUrl(QUrl(f"http://127.0.0.1:{server.server_address[1]}/index.html"))
+        until(lambda: view._display is not None and view._document is not None, 10)
+        menu = next(e for e in view._document.root.elements() if e.id == "menu")
+
+        def opacity():
+            return view._styles.get(menu, {}).get("opacity", 1.0)
+
+        def where(eid):
+            for rect, element in view._display.boxes:
+                if element.id == eid:
+                    return rect
+            return None
+        from PyQt6.QtCore import QEvent
+        from PyQt6.QtGui import QMouseEvent
+
+        def move(x, y):
+            # straight to the view: windows other tests left open may be over
+            # it, where the system's pointer would be
+            point = QPointF(x, y)
+            app.sendEvent(view, QMouseEvent(QEvent.Type.MouseMove, point, view.mapToGlobal(point),
+                                            Qt.MouseButton.NoButton, Qt.MouseButton.NoButton,
+                                            Qt.KeyboardModifier.NoModifier))
+        check("at rest the menu is hidden", opacity() == 0.0, str(opacity()))
+        top = where("top")
+        move(top.center().x(), top.center().y())
+        check("the pointer over the menu's item opens it (.item:hover > .menu)", until(lambda: opacity() == 1.0, 3),
+              str(opacity()))
+        second = where("second")
+        move(second.center().x(), second.center().y())
+        until(lambda: False, 0.4)
+        check("moving down into the menu keeps it open, and its links are there to click",
+              opacity() == 1.0 and view._link_at(QPointF(second.center().x(), second.center().y())) == "/two",
+              str(opacity()))
+        far = where("far")
+        move(far.center().x(), far.center().y())
+        check("moving away closes it", until(lambda: opacity() == 0.0, 3), str(opacity()))
     finally:
         view.shutdown()
         view.deleteLater()
@@ -4427,6 +4667,10 @@ def main() -> int:
     test_worker_features(app)
     print("test_blur_timing")
     test_blur_timing(app)
+    print("test_square_and_convert_layout")
+    test_square_and_convert_layout(app)
+    print("test_hover")
+    test_hover(app)
     print("test_view")
     test_view(app)
     if FAILED:

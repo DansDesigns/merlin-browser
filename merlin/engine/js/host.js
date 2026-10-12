@@ -336,6 +336,18 @@ function install(html) {
     try { Object.defineProperty(found, "name", { value: name }); } catch (_) {}
     if (!(name in g) || typeof g[name] !== "function") g[name] = found;
   }
+  // what Object.prototype.toString says of the DOM's objects, as in browsers:
+  // "[object HTMLButtonElement]". Libraries tell an element from a selector
+  // so (Tippy, Convert to it!'s help button): linkedom's said "[object
+  // Object]", and the button was taken for a selector and the page stopped
+  for (const name of [...INTERFACES, "Node", "Element", "HTMLElement", "SVGElement", "Text", "Comment",
+                      "DocumentFragment", "Document", "NodeList", "HTMLCollection", "Event", "CustomEvent"]) {
+    const cls = g[name];
+    const proto = typeof cls === "function" ? cls.prototype : null;
+    if (proto && !Object.prototype.hasOwnProperty.call(proto, Symbol.toStringTag)) {
+      try { Object.defineProperty(proto, Symbol.toStringTag, { value: name, configurable: true }); } catch (_) {}
+    }
+  }
   if (g.HTMLImageElement?.prototype) {
     const imageProto = g.HTMLImageElement.prototype;
     const srcOwner = (() => { let p = imageProto; while (p && !Object.getOwnPropertyDescriptor(p, "src")) p = Object.getPrototypeOf(p); return p; })();

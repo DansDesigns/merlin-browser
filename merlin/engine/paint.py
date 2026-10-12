@@ -6,7 +6,7 @@ no more to scroll through than a short one.
 from __future__ import annotations
 
 from PyQt6.QtCore import QPointF, QRectF, Qt
-from PyQt6.QtGui import QColor, QFontMetricsF, QPen
+from PyQt6.QtGui import QColor, QFontMetricsF, QPainterPath, QPen
 
 from .layout import DisplayList
 
@@ -316,12 +316,37 @@ def _draw(painter, item, visible: QRectF, images) -> None:
             painter.setBrush(_colour(rgba))
             painter.drawRoundedRect(rect, radius, radius)
             painter.restore()
+    elif kind == "shadow":
+        box, shadows, radius, inset = item[1], item[2], item[3], item[4]
+        reach = max((abs(dx) + abs(dy) + blur + abs(spread) for dx, dy, blur, spread, _c in shadows),
+                    default=0.0)
+        if box.adjusted(-reach, -reach, reach, reach).intersects(visible):
+            draw_shadows(painter, box, shadows, radius, inset)
+    elif kind == "dashed":
+        rect, rgba, style = item[1], item[2], item[3]
+        if rect.intersects(visible) and rgba:
+            painter.save()
+            across = rect.width() >= rect.height()
+            thickness = rect.height() if across else rect.width()
+            pen = QPen(_colour(rgba), thickness)
+            _pattern(pen, style)
+            painter.setPen(pen)
+            if across:
+                y = rect.center().y()
+                painter.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y))
+            else:
+                x = rect.center().x()
+                painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
+            painter.restore()
     elif kind == "rborder":
         rect, rgba, width, radius = item[1], item[2], item[3], item[4]
         if rect.intersects(visible) and rgba:
             painter.save()
             painter.setRenderHint(painter.RenderHint.Antialiasing, True)
-            painter.setPen(QPen(_colour(rgba), width))
+            pen = QPen(_colour(rgba), width)
+            if len(item) > 5:
+                _pattern(pen, item[5])
+            painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             half = width / 2
             painter.drawRoundedRect(rect.adjusted(half, half, -half, -half),
@@ -370,6 +395,73 @@ def _draw(painter, item, visible: QRectF, images) -> None:
             painter.drawText(rect.adjusted(4, 2, -4, -2),
                              Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
                              | Qt.TextFlag.TextWordWrap, alt)
+
+
+def _pattern(pen: QPen, style) -> None:
+    """A dashed or dotted border's pen: dashes three times as long as the
+    border is thick, dots round, as browsers draw them."""
+    if style == "dashed":
+        pen.setDashPattern([3.0, 2.0])
+        pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+    elif style == "dotted":
+        pen.setDashPattern([0.01, 2.0])
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+
+
+def _shape(rect: QRectF, radius: float) -> QPainterPath:
+    path = QPainterPath()
+    if radius > 0.5:
+        path.addRoundedRect(rect, radius, radius)
+    else:
+        path.addRect(rect)
+    return path
+
+
+def draw_shadows(painter, box: QRectF, shadows, radius: float, inset: bool) -> None:
+    """box-shadow: each shadow (dx, dy, blur, spread, rgba), the first on top.
+
+    An outer shadow is drawn outside the box only, as browsers do (a box with
+    no background shows none inside it); an inset one inside it only. A blur
+    is drawn as layers, each a little larger and fainter, which comes close
+    to the browsers' Gaussian at a fraction of the work."""
+    painter.save()
+    painter.setRenderHint(painter.RenderHint.Antialiasing, True)
+    painter.setPen(Qt.PenStyle.NoPen)
+    outline = _shape(box, radius)
+    for dx, dy, blur, spread, rgba in reversed(shadows):
+        if not rgba or rgba[3] == 0:
+            continue
+        reach = abs(dx) + abs(dy) + blur * 2 + abs(spread) + 2
+        everything = QPainterPath()
+        everything.addRect(box.adjusted(-reach, -reach, reach, reach))
+        painter.save()
+        painter.setClipPath(outline if inset else everything.subtracted(outline),
+                            Qt.ClipOperation.IntersectClip)
+        steps = 1 if blur < 1.0 else max(3, min(12, int(blur / 2)))
+        alpha = rgba[3] / 255
+        # each of n layers this faint, so that where all overlap it is the
+        # shadow's own colour
+        each = alpha if steps == 1 else 1 - (1 - alpha) ** (1 / steps)
+        colour = QColor(rgba[0], rgba[1], rgba[2], max(1, round(each * 255)))
+        for step in range(steps):
+            # from the blur's far edge to its near one
+            grow = 0.0 if steps == 1 else blur * (1 - 2 * (step + 0.5) / steps)
+            if inset:
+                hole = box.translated(dx, dy).adjusted(spread - grow, spread - grow,
+                                                       -spread + grow, -spread + grow)
+                path = QPainterPath()
+                path.addRect(box.adjusted(-reach, -reach, reach, reach))
+                if hole.width() > 0 and hole.height() > 0:
+                    path = path.subtracted(_shape(hole, max(0.0, radius - spread + grow)))
+            else:
+                grown = box.translated(dx, dy).adjusted(-spread - grow, -spread - grow,
+                                                        spread + grow, spread + grow)
+                if grown.width() <= 0 or grown.height() <= 0:
+                    continue
+                path = _shape(grown, max(0.0, radius + spread + grow) if radius > 0.5 else 0.0)
+            painter.fillPath(path, colour)
+        painter.restore()
+    painter.restore()
 
 
 def _background_length(word: str, room: float):

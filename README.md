@@ -1,5 +1,5 @@
 # Merlin Browser
-![version](https://img.shields.io/badge/version-1.8.26-6f8ff0)
+![version](https://img.shields.io/badge/version-1.8.29-6f8ff0)
 
 ### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6 Requires a reinstall as there has been a fundamental change to the folder structure. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
 
@@ -337,7 +337,7 @@ merlin/
   stdlib_anchor.py  standard modules Merlin.exe carries for future updates
 tests/           start-up path checks, and behaviour tests that run the
                  real window against the real engine
-tools/           the logo generator, the installer build script, the codec
+tools/           merlin.png made from merlin.ico, the installer build script, the codec
                  engine tool the installers use, and the stdlib anchor generator
 .github/workflows/
                  builds and publishes the codec engine on GitHub

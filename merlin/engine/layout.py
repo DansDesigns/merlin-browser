@@ -362,6 +362,7 @@ class Layout:
         # the root's background, or else the body's, paints the whole canvas,
         # colour and gradients both, and that element no longer paints its own
         self._canvas_owner = None
+        self._shadow_cache = {}            # box-shadow as written -> as drawn
         for element in (root, body):
             element_style = self.styles.get(element, {})
             colour = element_style.get("background-color")
@@ -798,6 +799,9 @@ class Layout:
         if hidden:
             colour = None                       # keeps its space, draws nothing
         owns_canvas = element is getattr(self, "_canvas_owner", None)
+        shadows = None if hidden or self._measuring else self._box_shadows(style)
+        if shadows and shadows[0]:
+            paint.append(("shadow", box, shadows[0], radius, False))     # under the box
         if colour and colour[3] > 0 and not owns_canvas \
                 and not (root_level and self.out.canvas == colour):
             paint.append(("rrect", box, colour, radius) if radius > 0.5 else ("rect", box, colour))
@@ -812,12 +816,15 @@ class Layout:
                                   _layer_of(style.get("background-repeat"), index), radius))
                 else:
                     paint.append(("gradient", box, gradient, radius))
+        if shadows and shadows[1]:
+            # inset shadows: over the background, inside the border
+            paint.append(("shadow", box, shadows[1], radius, True))
         if hidden:
             border = [0.0, 0.0, 0.0, 0.0]
         if radius > 0.5 and len(set(border)) == 1 and border[0] > 0:
             # one border all round, drawn along the rounded edge
             paint.append(("rborder", box, style.get("border-top-color") or style.get("color"),
-                          border[0], radius))
+                          border[0], radius, style.get("border-top-style")))
         else:
             paint.extend(self._borders(style, box, border))
         self.out.items[background_index] = ("group", paint)
@@ -935,19 +942,84 @@ class Layout:
             self._marker(element, style, content_x, first_baseline)
         return (margin[0] or 0.0) + box_height + (margin[2] or 0.0)
 
+    def _box_shadows(self, style: dict):
+        """box-shadow as (outer, inset), each a list of (dx, dy, blur, spread,
+        rgba) in page pixels, the first shadow first; None for none.
+
+        Square's outlined buttons (Patreon, on AlterniTech's header) are
+        outlined with an inset shadow, box-shadow: inset 0 0 0 2px; Merlin had
+        drawn no shadows at all, so they had no outline."""
+        raw = style.get("box-shadow")
+        if not raw or not isinstance(raw, str) or raw.strip().lower() in ("none", "initial", "unset"):
+            return None
+        cached = self._shadow_cache.get((raw, style.get("font-size"), style.get("color")))
+        if cached is not None:
+            return cached
+        from .css import _split_outside, _split_top, parse_colour, parse_length
+
+        font = style.get("font-size", 16.0)
+        current = style.get("color", (0, 0, 0, 255))
+        root_font = self.styles.get(self.document.root, {}).get("font-size", 16.0)
+        viewport = (self.width / (self.zoom or 1.0), self.viewport_height / (self.zoom or 1.0))
+        outer, inset = [], []
+        layers = _split_outside(raw.strip(), ",")
+        if any(not layer.strip() for layer in layers):
+            # an empty shadow in the list (a var() set to nothing, between
+            # commas) makes the whole value invalid: none, as browsers draw it
+            self._shadow_cache[(raw, style.get("font-size"), style.get("color"))] = ((), ())
+            return None
+        for layer in layers:
+            words = [w for w in _split_top(layer.strip(), " ") if w.strip()]
+            is_inset, lengths, colour = False, [], None
+            for word in words:
+                lowered = word.lower()
+                if lowered == "inset":
+                    is_inset = True
+                    continue
+                length = parse_length(lowered, font, root_font, viewport) \
+                    if not lowered.startswith(("#", "rgb", "hsl", "color", "oklch", "oklab", "hwb", "light-dark")) else None
+                if isinstance(length, (int, float)) and length != "auto":
+                    lengths.append(float(length))
+                    continue
+                found = parse_colour(lowered, current)
+                if found is not None:
+                    colour = found
+            if len(lengths) < 2:
+                continue
+            dx, dy = lengths[0], lengths[1]
+            blur = max(0.0, lengths[2]) if len(lengths) > 2 else 0.0
+            spread = lengths[3] if len(lengths) > 3 else 0.0
+            colour = colour or current
+            if colour[3] == 0 or (not is_inset and blur == 0 and spread <= 0 and dx == 0 and dy == 0) \
+                    or (is_inset and blur == 0 and spread == 0 and dx == 0 and dy == 0):
+                continue                        # nothing would show
+            z = self.zoom
+            (inset if is_inset else outer).append((dx * z, dy * z, blur * z, spread * z, colour))
+        found = (outer, inset) if (outer or inset) else None
+        self._shadow_cache[(raw, style.get("font-size"), style.get("color"))] = found or ((), ())
+        return found
+
     def _borders(self, style: dict, box: QRectF, border: list) -> list:
         found = []
         top, right, bottom, left = border
         def colour(side):
             return style.get(f"border-{side}-color") or style.get("color", (0, 0, 0, 255))
+        def side(name, rect):
+            # dashed and dotted are drawn so (Convert to it!'s drop area);
+            # the other styles as solid
+            kind = style.get(f"border-{name}-style")
+            if kind in ("dashed", "dotted"):
+                found.append(("dashed", rect, colour(name), kind))
+            else:
+                found.append(("rect", rect, colour(name)))
         if top:
-            found.append(("rect", QRectF(box.left(), box.top(), box.width(), top), colour("top")))
+            side("top", QRectF(box.left(), box.top(), box.width(), top))
         if bottom:
-            found.append(("rect", QRectF(box.left(), box.bottom() - bottom, box.width(), bottom), colour("bottom")))
+            side("bottom", QRectF(box.left(), box.bottom() - bottom, box.width(), bottom))
         if left:
-            found.append(("rect", QRectF(box.left(), box.top(), left, box.height()), colour("left")))
+            side("left", QRectF(box.left(), box.top(), left, box.height()))
         if right:
-            found.append(("rect", QRectF(box.right() - right, box.top(), right, box.height()), colour("right")))
+            side("right", QRectF(box.right() - right, box.top(), right, box.height()))
         return found
 
     def _marker(self, element: Element, style: dict, content_x: float, baseline: float) -> None:
@@ -1472,9 +1544,13 @@ class Layout:
             if align in ("auto", "normal", ""):
                 align = align_items
             left, right = margin[3] or 0.0, margin[1] or 0.0
+            # with box-sizing: border-box a width already holds the padding
+            # and border: Convert to it!'s footer, width: 100% with padding,
+            # had run its "Source" link off the side of the window
+            sized = 0.0 if item_style.get("box-sizing") == "border-box" else edges
             fixed = self._length(item_style.get("width"), width)
             if fixed is not None:
-                border_width = fixed + edges
+                border_width = max(fixed + sized, edges)
             elif align in ("stretch", "normal") and not (margin[3] is None and margin[1] is None):
                 border_width = width - left - right
             else:
@@ -1483,9 +1559,9 @@ class Layout:
             low = self._length(item_style.get("min-width"), width)
             high = self._length(item_style.get("max-width"), width)
             if high is not None:
-                border_width = min(border_width, high + edges)
+                border_width = min(border_width, max(high + sized, edges))
             if low is not None:
-                border_width = max(border_width, low + edges)
+                border_width = max(border_width, low + sized)
             basis_value = item_style.get("flex-basis", "auto")
             basis = self._length(basis_value, room or 0.0, vertical=True) \
                 if basis_value not in (None, "auto") else None
@@ -1528,6 +1604,13 @@ class Layout:
             spare = available - sum(outer(e) for e in entries) - gaps
         else:
             spare = 0.0
+        # auto margins down the column take the room left, before
+        # justify-content does: margin: auto centres an item in a column as
+        # high as the window (Convert to it!'s card had sat at the top)
+        autos = sum((e["margin"][0] is None) + (e["margin"][2] is None) for e in entries)
+        share = 0.0
+        if spare > 0 and autos:
+            share, spare = spare / autos, 0.0
         start, between = self._justify(justify, spare, len(entries), reverse)
         cursor = y + start
         first_baseline = None
@@ -1544,14 +1627,15 @@ class Layout:
                 offset = spare_across
             else:
                 offset = 0.0
-            cursor += m[0] or 0.0
+            cursor += m[0] if m[0] is not None else share
             self._last_baseline = None
             forced = entry["height"] if index in grown else None
             used = self._item_box(entry["element"], entry["style"], x + (left or 0.0) + offset,
                                   cursor, entry["width"], forced)
             if first_baseline is None:
                 first_baseline = self._last_baseline
-            cursor += max(used, entry["height"] if forced is not None else used) + (m[2] or 0.0)
+            cursor += max(used, entry["height"] if forced is not None else used) + \
+                (m[2] if m[2] is not None else share)
             if index < len(entries) - 1:
                 cursor += row_gap + between
         return cursor - y, first_baseline
@@ -1793,7 +1877,7 @@ class Layout:
             if kind == "clip_push" and len(item) > 3:
                 item[3]["area"] = item[3]["area"].translated(dx, dy)
             if kind in ("rect", "image", "rrect", "rborder", "svg", "control", "button",
-                        "gradient", "clip_push", "frame"):
+                        "gradient", "bgimage", "shadow", "dashed", "clip_push", "frame"):
                 return (kind, item[1].translated(dx, dy)) + tuple(item[2:])
             if kind == "text":
                 return (kind, item[1] + dx, item[2] + dy) + item[3:]
@@ -1912,6 +1996,16 @@ class Layout:
 
         _font, block_metrics = self.fonts.get(block_style)
         guess = block_metrics.lineSpacing()
+        # a line with nothing on it but a <br> is as tall as the block's own
+        # line-height (its strut), as in browsers: it had been the font's
+        # height, and AlterniTech's heading, spaced with <br>s, came out short
+        block_lh = block_style.get("line-height", ("normal",))
+        if block_lh[0] == "factor":
+            strut = block_lh[1] * block_style.get("font-size", 16.0) * self.zoom
+        elif block_lh[0] == "px":
+            strut = block_lh[1] * self.zoom
+        else:
+            strut = guess
         align = block_style.get("text-align", "left")
         state = {"cursor": y, "first": None}
         line: list = []
@@ -2004,10 +2098,10 @@ class Layout:
                             self.out.boxes.append((QRectF(start_x, cursor, advance, line_height), owner))
                 cursor += line_height
             elif force:
-                # an empty line from a <br>: as tall as the block's font
+                # an empty line from a <br>: as tall as the block's line-height
                 for anchor in anchors_here:
                     self.out.anchors.setdefault(anchor, cursor)
-                cursor += guess
+                cursor += strut
             else:
                 for anchor in anchors_here:
                     self.out.anchors.setdefault(anchor, cursor)
@@ -2938,7 +3032,7 @@ def _bottom_edge(item) -> float:
         return 0.0
     if item[0] == "group":
         return max((_bottom_edge(sub) for sub in item[1]), default=0.0)
-    if item[0] in ("rect", "image", "rrect", "rborder", "svg", "gradient", "frame"):
+    if item[0] in ("rect", "image", "rrect", "rborder", "svg", "gradient", "dashed", "frame"):
         return item[1].bottom()
     if item[0] == "text":
         return item[2] + QFontMetricsF(item[4]).descent()
@@ -2950,7 +3044,7 @@ def _right_edge(item) -> float:
         return 0.0
     if item[0] == "group":
         return max((_right_edge(sub) for sub in item[1]), default=0.0)
-    if item[0] in ("rect", "image", "rrect", "rborder", "svg", "gradient", "bgimage", "frame"):
+    if item[0] in ("rect", "image", "rrect", "rborder", "svg", "gradient", "bgimage", "dashed", "frame"):
         return item[1].right()
     if item[0] == "extent":
         return item[1]

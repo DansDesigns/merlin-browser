@@ -5,6 +5,7 @@ var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 import { createRequire as __deno_internal_createRequire } from "node:module";
+import { cssName as __merlin_cssName, knownProperty as __merlin_knownProperty } from "./css-properties.js";
 var __require = __deno_internal_createRequire(import.meta.url);
 
 var __commonJS = (cb, mod) => function __require2() {
@@ -15517,20 +15518,34 @@ var updateKeys = (style) => {
   }
   return attr;
 };
+// Merlin: the style object knows the properties a browser's does ('textAlign'
+// in el.style is true), and names them as CSS does (-webkit-transform, float);
+// anything else set on it is an ordinary property, not a style. Vue had found
+// no property known, and written style="undefined:center" (Square's sites).
 var handler2 = {
+  has(style, name) {
+    if (name in prototype || name === "length") return true;
+    if (typeof name === "string" && __merlin_knownProperty(name)) return true;
+    return Reflect.has(style, name);
+  },
   get(style, name) {
     if (name in prototype) return style[name];
+    if (typeof name !== "string") return style[name];
     updateKeys(style);
     if (name === "length") return getKeys(style).length;
     if (/^\d+$/.test(name)) return getKeys(style)[name];
-    return style.get(esm_default2(name)) ?? "";
+    if (!name.startsWith("--") && !__merlin_knownProperty(name)) return style[name];   // undefined, as browsers
+    return style.get(__merlin_cssName(name)) ?? "";
   },
   set(style, name, value) {
     if (name === "cssText") style[name] = value;
+    else if (typeof name !== "string" || (!name.startsWith("--") && !__merlin_knownProperty(name))) {
+      style[name] = value;               // not a CSS property: kept as it is
+    }
     else {
       let attr = updateKeys(style);
-      if (value == null) style.delete(esm_default2(name));
-      else style.set(esm_default2(name), value);
+      if (value == null || value === "") style.delete(__merlin_cssName(name));
+      else style.set(__merlin_cssName(name), value);
       if (!attr) {
         const element = refs2.get(style);
         attr = element.ownerDocument.createAttribute("style");
