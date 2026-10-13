@@ -665,7 +665,7 @@ _SIMPLE = re.compile(
 _STRUCTURAL = {"first-child", "last-child", "only-child", "root", "link", "any-link",
                "empty", "first-of-type", "last-of-type", "only-of-type", "disabled",
                "enabled", "checked", "required", "optional", "read-only", "read-write",
-               "defined", "scope"}
+               "defined", "scope", "modal", "popover-open", "open"}
 
 
 def _compound(text: str):
@@ -887,6 +887,15 @@ def _matches_compound(compound, element: Element) -> bool:
             return False
         if pseudo == "checked" and not (("checked" in element.attrs and element.tag == "input")
                                         or ("selected" in element.attrs and element.tag == "option")):
+            return False
+        # a dialog shown modally, an open popover (host.js marks them), an open
+        # <details> or <dialog>
+        if pseudo == "modal" and "data-merlin-modal" not in element.attrs:
+            return False
+        if pseudo == "popover-open" and "data-merlin-popover-open" not in element.attrs:
+            return False
+        if pseudo == "open" and not ("open" in element.attrs and element.tag in ("details", "dialog")
+                                     or "data-merlin-popover-open" in element.attrs):
             return False
         if pseudo == "required" and "required" not in element.attrs:
             return False
@@ -1383,9 +1392,15 @@ details:not([open]) > :not(summary) { display: none }
 # as browsers' own -webkit-center does: Hacker News' 85% table sits in the
 # middle of the page so
 DEFAULT_STYLESHEET += """
-dialog { display: block; position: absolute; left: 0; right: 0; margin: auto; border: solid;
+dialog { display: block; position: absolute; left: 0; right: 0; width: fit-content; height: fit-content;
+         margin: auto; border: solid;
          padding: 1em; background-color: white; color: black }
 dialog:not([open]) { display: none }
+dialog[data-merlin-modal] { position: fixed; top: 0; bottom: 0; overflow: auto; z-index: 2147483647 }
+[popover]:not([data-merlin-popover-open]):not(dialog[open]) { display: none }
+[popover][data-merlin-popover-open] { position: fixed; top: 0; right: 0; bottom: 0; left: 0; width: fit-content;
+         height: fit-content; margin: auto; border: solid; padding: 0.25em; overflow: auto;
+         background-color: white; color: black; z-index: 2147483647 }
 center > *, div[align=center] > table, td[align=center] > table, th[align=center] > table,
 table[align=center] { margin-left: auto; margin-right: auto }
 """
@@ -1882,7 +1897,7 @@ class Styler:
                 return max(0.0, min(1.0, number))
             except ValueError:
                 return 1.0
-        if name == "background-image":
+        if name in ("background-image", "mask-image"):
             return parse_gradients(value, font, root_size, self.viewport, style.get("color"))
         if name in ("grid-template-columns", "grid-template-rows",
                     "grid-auto-columns", "grid-auto-rows"):
@@ -1988,6 +2003,10 @@ for _part in ("", "-width", "-style", "-color"):
     _LOGICAL_PAIRS[f"border-block{_part}"] = (f"border-top{_part}", f"border-bottom{_part}")
 
 
+_SIZED_KEYWORDS = {"fit-content", "-webkit-fit-content", "-moz-fit-content", "max-content", "min-content",
+                   "-webkit-max-content", "-webkit-min-content"}
+
+
 def expand_shorthand(name: str, value: str) -> list:
     """A shorthand property as the longhand properties it sets."""
     sides = ("top", "right", "bottom", "left")
@@ -2004,6 +2023,12 @@ def expand_shorthand(name: str, value: str) -> list:
             whole[f"border-{side}"] = tuple(f"border-{side}-{part}" for part in ("width", "style", "color"))
         if name in whole:
             return [(longhand, keyword) for longhand in whole[name]]
+    if name in ("width", "height"):
+        # fit-content (and max- and min-content): auto, marked so that a box
+        # held at both sides (a modal dialog, a popover) shrinks to what it
+        # holds rather than stretching
+        fit = keyword in _SIZED_KEYWORDS
+        return [(name, "auto" if fit else value), (f"-merlin-{name}-fit", "1" if fit else "0")]
     if name in _LOGICAL_PAIRS:
         # margin-inline: 4px 8px, padding-block, inset-inline...: the two
         # sides they stand for, in left-to-right, top-to-bottom text
@@ -2042,6 +2067,33 @@ def expand_shorthand(name: str, value: str) -> list:
         kind = name.split("-")[1]
         values = [v for v in _split_outside(value, " ") if v.strip()]
         return [(f"border-{side}-{kind}", v) for side, v in zip(sides, _sides(values))]
+    if name.startswith("-webkit-mask"):
+        # -webkit-mask and its parts are mask's, as browsers take them now
+        return expand_shorthand(name[len("-webkit-"):], value)
+    if name == "mask":
+        # mask: an image (an icon's shape, usually), its position, size and
+        # repeat, as background has them. YouTube draws its icons so: a box of
+        # the text's colour, masked by the icon's SVG
+        if keyword in ("none", ""):
+            return [("mask-image", "none")]
+        images, sizes, positions, repeats = [], [], [], []
+        image_pattern = r"""(?:url\((?:[^()]|\([^()]*\))*\)|[a-z-]*gradient\((?:[^()]|\([^()]*\))*\))"""
+        for layer in _split_outside(value, ","):
+            found = re.search(image_pattern, layer, re.I)
+            images.append(found.group(0) if found else "none")
+            rest = re.sub(image_pattern, " ", layer, flags=re.I)
+            words = [w for w in _split_outside(rest, " ") if w.strip()]
+            repeats.append(next((w for w in words if w.lower() in ("repeat", "no-repeat", "repeat-x", "repeat-y",
+                                                                    "space", "round")), "repeat"))
+            spot = " ".join(w for w in words if w.lower() not in (
+                "repeat", "no-repeat", "repeat-x", "repeat-y", "space", "round", "border-box", "padding-box",
+                "content-box", "fill-box", "stroke-box", "view-box", "no-clip", "add", "subtract", "intersect",
+                "exclude", "alpha", "luminance", "match-source"))
+            where, _slash, size = spot.partition("/")
+            positions.append(where.strip() or "0% 0%")
+            sizes.append(size.strip() or "auto")
+        return [("mask-image", ", ".join(images)), ("mask-size", ", ".join(sizes)),
+                ("mask-position", ", ".join(positions)), ("mask-repeat", ", ".join(repeats))]
     if name == "background" and "url(" in value.lower():
         images, sizes, positions, repeats = [], [], [], []
         layers = _split_outside(value, ",")

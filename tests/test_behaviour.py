@@ -98,6 +98,29 @@ def test_session(app) -> None:
           bool(window._closed_tabs))
     window.close()
 
+    # the tab that was open when Merlin closed is the one it opens on
+    window, settings, _ = make_window(app, "t-session-active", restore_session=True)
+    for position, url in enumerate(sites):
+        window.new_tab(url, background=True, defer=position > 0)
+    window.tabs.setCurrentIndex(2)
+    wait(app, 0.5)
+    window.save_session()
+    check("the open tab is remembered", settings.get("last_session_active") == 2,
+          str(settings.get("last_session_active")))
+    saved, active = settings.get("last_session"), settings.get("last_session_active")
+    window.close()
+    window, settings, _ = make_window(app, "t-session-reopen", restore_session=True)
+    while window.tabs.count():
+        window.tabs.removeTab(0)
+    window.restore_session_tabs(saved, active)
+    wait(app, 0.5)
+    current = window.tabs.currentIndex()
+    waiting = [bool(window.tabs.widget(i).property("pending_url")) for i in range(window.tabs.count())]
+    check("Merlin opens on the tab that was open, loading it, the rest waiting",
+          window.tabs.count() == 3 and current == 2 and waiting == [True, True, False],
+          f"current {current}, waiting {waiting}")
+    window.close()
+
 
 def test_placeholders(app) -> None:
     window, _, _ = make_window(app, "t-placeholder")
@@ -2470,4 +2493,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    code = main()
+    # every check has run and been reported: leave without Python tearing
+    # down Chromium's objects in whatever order it finds them, which now and
+    # then crashed the process after the summary was printed
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)

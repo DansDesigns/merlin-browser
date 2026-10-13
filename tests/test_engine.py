@@ -4929,6 +4929,217 @@ def test_video_and_audio(app) -> None:
     wait(app, 0.3)
 
 
+def test_dom_for_polyfills_dialogs_and_cssom(app) -> None:
+    """What YouTube's and Google's pages needed of the DOM: the node classes
+    and Window, Node.prototype's own members for polyfills to keep, text
+    changes heard by observers, the ES5 custom elements adapter, dialogs and
+    popovers, the CSS object model, and clicks that are trusted MouseEvents."""
+    from PyQt6.QtTest import QTest
+
+    from merlin.engine import MerlinView
+    from merlin.engine.script import LocalStorage
+
+    runtime = _node_for_tests()
+    if not runtime:
+        print("  skip  DOM for polyfills: Node.js is not here")
+        return
+    folder = tempfile.mkdtemp(prefix="merlin-dom-")
+    open(os.path.join(folder, "page.html"), "w").write("""<!DOCTYPE html><html><head>
+<style id=s>.a { color: red } @media (min-width: 10px) { .b { color: blue } } .sentinel {}</style></head>
+<body style="margin:0"><button id=open style="width:120px;height:30px">Open</button><p id=log>waiting</p>
+<dialog id=d><p>Hi</p><form method=dialog><button id=ok value=yes>OK</button></form></dialog>
+<div id=pop popover>Popover</div><div id=host><span>old</span></div>
+<input name=under style="position:absolute;top:290px;left:340px;width:120px">
+<script>
+const out = []; const say = (k, v) => out.push(k + '=' + v);
+say('classes', [typeof ProcessingInstruction, typeof CDATASection, typeof XMLSerializer, typeof Window].join('/'));
+say('window', window instanceof Window);
+// a polyfill's copies of Node.prototype's own: they work on any node
+const first = Object.getOwnPropertyDescriptor(Node.prototype, 'firstChild').get;
+const append = Node.prototype.appendChild, remove = Node.prototype.removeChild;
+const host = document.getElementById('host');
+say('nativeFirst', first.call(host).tagName);
+remove.call(host, first.call(host));
+const frag = document.createDocumentFragment(); frag.appendChild(document.createElement('i')); frag.appendChild(document.createElement('b'));
+Object.setPrototypeOf(frag, Object.create(DocumentFragment.prototype, { firstChild: { get() { return null; } } }));
+append.call(host, frag);
+say('moved', host.children.length + ':' + host.firstElementChild.tagName);
+// the ES5 adapter's get, which knows a name before it is defined
+const realGet = customElements.get.bind(customElements); const names = new Set();
+customElements.get = (n) => names.has(n) ? class {} : realGet(n);
+const define = customElements.define.bind(customElements);
+names.add('x-one'); try { define('x-one', class extends HTMLElement {}); say('define', 'ok'); } catch (e) { say('define', e.name); }
+customElements.get = realGet;
+// text changes heard
+const t = document.createTextNode(''); let heard = 0;
+new MutationObserver((r) => { heard = r.length + ':' + r[0].type; }).observe(t, { characterData: true });
+t.data = '1';
+// the CSS object model
+const sheet = document.styleSheets[0];
+say('rule', (sheet.cssRules[0] instanceof CSSStyleRule) + ':' + sheet.cssRules[0].selectorText + ':' + sheet.cssRules[0].style.color);
+say('media', sheet.cssRules[1] instanceof CSSMediaRule && sheet.cssRules[1].cssRules[0].selectorText);
+say('sentinel', sheet.cssRules[sheet.cssRules.length - 1].selectorText);
+const made = new CSSStyleSheet(); made.replaceSync('#log { font-weight: bold }');
+document.adoptedStyleSheets = [made];
+say('adopted', document.adoptedStyleSheets.length + ':' + made.cssRules[0].selectorText);
+say('xml', new XMLSerializer().serializeToString(document.getElementById('open')).slice(0, 7));
+const d = document.getElementById('d');
+document.getElementById('open').addEventListener('click', (e) => {
+  say('click', [e.isTrusted, e instanceof MouseEvent, e.which, e.button].join('/'));
+  d.showModal(); say('modal', d.open + ':' + d.matches(':modal'));
+});
+d.addEventListener('close', () => { say('closed', d.returnValue); report(); });
+document.getElementById('pop').addEventListener('toggle', (e) => { say('toggle', e.newState); report(); });
+function report() { document.getElementById('log').textContent = out.join(' ') + ' heard=' + heard; }
+setTimeout(report, 50);
+</script></body></html>""")
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    class Host:
+        settings = {}
+
+        def javascript_allowed(self, site):
+            return True
+
+        def node_for_scripts(self):
+            return runtime
+
+        def script_cache_dir(self):
+            return os.path.join(folder, "cache")
+
+        def local_storage(self):
+            return LocalStorage(None)
+
+    view = MerlinView()
+    view._host = Host()
+    view.resize(800, 600)
+    view.show()
+
+    def log():
+        found = next((x for x in view._document.root.elements() if x.id == "log"), None) if view._document else None
+        return " ".join(found.text().split()) if found is not None else ""
+
+    def until(test, seconds):
+        end = time.time() + seconds
+        while time.time() < end and not test():
+            app.processEvents()
+            time.sleep(0.01)
+        return test()
+
+    def element(name):
+        return next((x for x in view._document.root.elements() if x.id == name), None)
+
+    try:
+        view.setUrl(QUrl(f"http://127.0.0.1:{server.server_address[1]}/page.html"))
+        until(lambda: "heard=" in log(), 10)
+        text = log()
+        check("ProcessingInstruction, CDATASection, XMLSerializer and Window are there",
+              "classes=function/function/function/function" in text and "window=true" in text, text)
+        check("Node.prototype's own firstChild and appendChild work on any node, as polyfills keep them",
+              "nativeFirst=SPAN" in text and "moved=2:I" in text, text)
+        check("a name the ES5 adapter's get already knows is still defined", "define=ok" in text, text)
+        check("a text node's change is heard as a characterData record", "heard=1:characterData" in text, text)
+        check("cssRules are CSSStyleRules with their selector and style",
+              "rule=true:.a:red" in text and "media=.b" in text and "sentinel=.sentinel" in text, text)
+        check("constructed stylesheets, adopted", "adopted=1:#log" in text and "xml=<button" in text, text)
+        check("an adopted sheet styles the page",
+              any(e.tag == "style" and "data-merlin-adopted" in e.attrs for e in view._document.root.elements()))
+        QTest.mouseClick(view, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(60, 15))
+        until(lambda: element("d") is not None and "data-merlin-modal" in element("d").attrs, 5)
+        wait(app, 0.4)
+        text = log() if "click=" in log() else text
+        dialog = element("d")
+        check("showModal() opens a dialog, modal", dialog is not None and "open" in dialog.attrs
+              and "data-merlin-modal" in dialog.attrs)
+        under = next((w for e, w in view._widgets.items() if e.attrs.get("name") == "under"), None)
+        check("a field under a modal dialog is hidden by it", under is not None and not under.isVisible())
+        ok = next((e for e in view._document.root.elements() if e.id == "ok"), None)
+        ok_place = next((it[1] for it in view._display.items if it and it[0] == "button" and it[2] is ok), None)
+        check("a modal dialog sits in the middle of the window",
+              ok_place is not None and 250 < ok_place.center().x() < 550 and 150 < ok_place.center().y() < 450,
+              str(ok_place))
+        if ok_place is not None:
+            QTest.mouseClick(view, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                             QPoint(int(ok_place.center().x()), int(ok_place.center().y() - view._scroll)))
+        until(lambda: "closed=" in log(), 5)
+        text = log()
+        check("a click is a trusted MouseEvent, which 1", "click=true/true/1/0" in text, text)
+        check("<form method=dialog> closes its dialog with the button's value",
+              "modal=true:true" in text and "closed=yes" in text, text)
+        wait(app, 0.4)
+        check("and shows again once the dialog has closed", under is not None and under.isVisible())
+    finally:
+        view.shutdown()
+    wait(app, 0.3)
+
+
+def test_border_box_heights_and_centring(app) -> None:
+    """box-sizing: border-box for every kind of box; percentage heights of
+    definite containers (the window's, for html and body); vertical-align:
+    middle; right floats measured inside flex items; masks."""
+    from merlin.engine.css import Styler
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+
+    def boxes(markup, width=1000, height=700):
+        doc = parse(markup)
+        out = Layout(doc, Styler(doc).compute(), width, viewport_height=height).run()
+        found = {}
+        for rect, element in out.boxes:
+            name = element.attrs.get("id")
+            if name and name not in found:
+                found[name] = (round(rect.x()), round(rect.y()), round(rect.width()), round(rect.height()))
+        return found, out
+
+    sized = "box-sizing:border-box;width:100px;height:50px;padding:10px;border:5px solid"
+    found, _ = boxes(f"<body style='margin:0'><div style='position:relative'>"
+                     f"<span id=i style='display:inline-block;{sized}'></span>"
+                     f"<span id=f style='float:left;{sized}'></span>"
+                     f"<span id=a style='position:absolute;top:0;left:300px;{sized}'></span></div>"
+                     f"<div style='display:flex'><span id=x style='{sized}'></span></div></body>")
+    check("border-box sizes inline-blocks, floats, positioned boxes and flex items as Chrome does",
+          all(found.get(k, (0, 0, 0, 0))[2:] == (100, 50) for k in "ifax"), str(found))
+    found, _ = boxes("<html><head><style>html,body{height:100%;margin:0}</style></head><body>"
+                     "<div id=w style='display:flex;flex-direction:column;height:100%'>"
+                     "<div id=m style='flex:1 0 auto'>main</div><div id=foot>footer</div></div></body></html>")
+    check("height: 100% on html, body and a wrapper is the window's height: the footer at its foot",
+          found.get("w", (0, 0, 0, 0))[3] == 700 and found.get("foot", (0, 0, 0, 0))[1] > 650, str(found))
+    found, _ = boxes("<html><head><style>html,body{height:100%;margin:0}"
+                     ".wrap{position:absolute;top:0;bottom:0;left:0;right:0;text-align:center;white-space:nowrap}"
+                     ".wrap::after{content:'';display:inline-block;height:100%;vertical-align:middle}"
+                     ".box{display:inline-block;vertical-align:middle;width:300px;height:200px;white-space:normal}"
+                     "</style></head><body><div class=wrap><div id=b class=box>hello</div></div></body></html>")
+    check("vertical-align: middle centres a box (the ::after centring trick)",
+          found.get("b") == (350, 250, 300, 200), str(found.get("b")))
+    found, _ = boxes("<body style='margin:0'><header style='display:flex;justify-content:flex-end'>"
+                     "<div id=l><a style='float:right;display:inline-block;width:40px;height:40px'></a></div>"
+                     "<div id=r><a style='float:right;display:inline-block;width:85px;height:40px'></a></div>"
+                     "</header></body>", width=1400)
+    check("a right float in a flex item is measured as wide as it is",
+          found.get("l", (0, 0, 0, 0))[2] == 40 and found.get("r", (0, 0, 0, 0))[2] == 85, str(found))
+    found, _ = boxes("<html><head><style>html,body{height:100%;margin:0}</style></head><body>"
+                     "<div id=d style='position:absolute;top:0;bottom:0;left:0;right:0;"
+                     "margin:auto;width:fit-content;height:fit-content'><div style='width:200px;"
+                     "height:100px'></div></div></body></html>")
+    check("width and height: fit-content with margin: auto centre a box held at all four sides",
+          found.get("d") == (400, 300, 200, 100), str(found.get("d")))
+    _found, out = boxes("<body style='margin:0;color:#c00'><div id=m style='width:24px;height:24px;"
+                        "-webkit-mask:url(icon.svg) no-repeat center / cover;background-color:currentcolor'>"
+                        "</div></body>")
+    masked = [item for item in out.items if item and item[0] == "masked"]
+    check("a CSS mask is drawn as the background through its picture",
+          len(masked) == 1 and masked[0][2] == "icon.svg" and masked[0][3] == "cover", str(masked[:1]))
+
+
 def main() -> int:
     app = QApplication(sys.argv[:1])
     for test in (test_no_chromium, test_without_html_parser, test_parsing, test_cascade, test_layout,
@@ -5026,6 +5237,10 @@ def main() -> int:
     test_view(app)
     print("test_video_and_audio")
     test_video_and_audio(app)
+    print("test_dom_for_polyfills_dialogs_and_cssom")
+    test_dom_for_polyfills_dialogs_and_cssom(app)
+    print("test_border_box_heights_and_centring")
+    test_border_box_heights_and_centring(app)
     if FAILED:
         print(f"\n{len(FAILED)} FAILED: " + "; ".join(FAILED))
         return 1

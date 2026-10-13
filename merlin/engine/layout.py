@@ -328,6 +328,7 @@ class Layout:
         # a video's own size, once its player knows it: media_key -> (w, h)
         self.media = media or {}
         self.viewport_height = viewport_height
+        self._definite = {}            # id(element) -> its content height, where definite
         self._floats: list = []           # floats in the current formatting context
         self._absolute: list = [[]]       # waiting for their containing block
         self._fixed: list = []            # waiting for the window
@@ -603,9 +604,12 @@ class Layout:
         enclosing_link = self._link
         if href is not None:
             self._link = href
-        min_height = self._length(style.get("min-height"), 0.0, vertical=True)
-        max_height = self._length(style.get("max-height"), 0.0, vertical=True)
-        fixed_height = self._length(style.get("height"), 0.0, vertical=True)
+        # a percentage height is of the containing block's height when that is
+        # definite (the window's, for the page itself), and auto otherwise
+        base = self._height_base(element)
+        min_height = self._length(style.get("min-height"), base, vertical=True)
+        max_height = self._length(style.get("max-height"), base, vertical=True)
+        fixed_height = self._length(style.get("height"), base, vertical=True)
         if element.tag == "img" and fixed_height is None:
             _iw, image_h = self._image_size(element, style, available)
             given_w = _px(style.get("width"), available, auto=None)
@@ -645,6 +649,9 @@ class Layout:
             min_height = None if min_height is None else max(0.0, min_height - vertical)
             max_height = None if max_height is None else max(0.0, max_height - vertical)
             fixed_height = None if fixed_height is None else max(0.0, fixed_height - vertical)
+        if fixed_height is not None:
+            # definite: its children's percentage heights are of it
+            self._definite[id(element)] = fixed_height
 
         layered = style.get("position") in ("relative", "absolute", "fixed", "sticky") \
             and not self._measuring
@@ -866,7 +873,19 @@ class Layout:
                           border[0], radius, style.get("border-top-style")))
         else:
             paint.extend(self._borders(style, box, border))
-        self.out.items[background_index] = ("group", paint)
+        masks = style.get("mask-image")
+        mask = next((layer for layer in masks if layer and layer[0] == "url"), None) \
+            if isinstance(masks, list) and not self._measuring else None
+        if mask is not None and paint:
+            # the background drawn through the mask's picture: where it is
+            # opaque the box shows (an icon's shape in the text's colour)
+            index = masks.index(mask)
+            self.out.items[background_index] = (
+                "masked", box, mask[1], _layer_of(style.get("mask-size"), index) or "auto",
+                _layer_of(style.get("mask-position"), index) or "0% 0%",
+                _layer_of(style.get("mask-repeat"), index) or "repeat", paint)
+        else:
+            self.out.items[background_index] = ("group", paint)
         if href is not None:
             self.out.links.append((box, href))
         if self.live_controls and forms.kind_of(element) in forms.BUTTON_KINDS \
@@ -1370,6 +1389,19 @@ class Layout:
             return 300.0 * self.zoom
         return _Measure(self).extent(element, style, 1.0 if narrowest else 100000.0)
 
+    def _height_base(self, element: Element) -> float:
+        """What a percentage height of element is of: its containing block's
+        content height if that is definite, the window's for the root and for
+        a fixed box; 0 (a percentage then counts as auto) otherwise. html and
+        body at height: 100%, and a page's wrapper at 100% inside them, are
+        the window's height, as in browsers: Google's footer sits at its foot."""
+        parent = element.parent
+        if parent is None or getattr(parent, "tag", None) in (None, "#document") or element is self.document.root:
+            return self.viewport_height
+        if self.styles.get(element, {}).get("position") == "fixed":
+            return self.viewport_height
+        return self._definite.get(id(parent), 0.0)
+
     def _item_box(self, element: Element, style: dict, x: float, y: float,
                   border_width: float, border_height: float | None = None) -> float:
         """Lay out one flex item at a size already decided; returns its height."""
@@ -1384,6 +1416,15 @@ class Layout:
         item["box-sizing"] = "content-box"
         for side in ("top", "right", "bottom", "left"):
             item[f"margin-{side}"] = 0.0
+        if border_height is None and style.get("box-sizing") == "border-box":
+            # heights given as the border edge, as the width was: the content's
+            # now, or the padding and border were added a second time (an
+            # inline-block 48 high with 4 of padding came out 56)
+            vertical = (padding[0] + padding[2] + border[0] + border[2]) / z
+            for name in ("height", "min-height", "max-height"):
+                value = item.get(name)
+                if isinstance(value, (int, float)):
+                    item[name] = max(0.0, value - vertical)
         if border_height is not None:
             item["height"] = max(0.0, border_height - padding[0] - padding[2]
                                  - border[0] - border[2]) / z
@@ -1947,6 +1988,8 @@ class Layout:
             kind = item[0]
             if kind == "group":
                 return ("group", [moved(sub) for sub in item[1]])
+            if kind == "masked":
+                return (kind, item[1].translated(dx, dy)) + tuple(item[2:6]) + ([moved(sub) for sub in item[6]],)
             if kind == "clip_push" and len(item) > 3:
                 item[3]["area"] = item[3]["area"].translated(dx, dy)
             if kind in ("rect", "image", "rrect", "rborder", "svg", "control", "button",
@@ -2256,6 +2299,12 @@ class Layout:
         emit(False)
         return state["cursor"] - y, state["first"]
 
+    @staticmethod
+    def _outer(style: dict, given: float, edges: float) -> float:
+        """A width or height given in CSS as the box's border edge: with
+        box-sizing: border-box the padding and border are already in it."""
+        return max(given, edges) if style.get("box-sizing") == "border-box" else given + edges
+
     # ------------------------------------------------------- inline boxes
     def _inline_box(self, element: Element, style: dict, link, available: float):
         """An inline-block or inline <svg>, sized, as a part of a line.
@@ -2277,7 +2326,7 @@ class Layout:
         if self._measuring and _is_percentage(style.get("width")):
             fixed = None             # measured, a percentage of the room counts as auto
         if fixed is not None:
-            border_width = fixed + edges
+            border_width = self._outer(style, fixed, edges)
         elif element.tag == "select":
             # wide enough for its longest option, and the arrow
             _font, metrics = self.fonts.get(style)
@@ -2301,9 +2350,9 @@ class Layout:
         high = self._length(style.get("max-width"), available)
         low = self._length(style.get("min-width"), available)
         if high is not None:
-            border_width = min(border_width, high + edges)
+            border_width = min(border_width, self._outer(style, high, edges))
         if low is not None:
-            border_width = max(border_width, low + edges)
+            border_width = max(border_width, self._outer(style, low, edges))
         saved, saved_runs = self.out, self._runs
         held = (self._floats, self._absolute, self._fixed)
         self._floats, self._absolute, self._fixed = [], [[]], []
@@ -2320,6 +2369,19 @@ class Layout:
             ascent, descent = height + m_top + m_bottom, 0.0
         else:
             ascent, descent = baseline + m_top, height - baseline + m_bottom
+        if str(style.get("vertical-align", "")).strip() == "middle":
+            # its middle on the parent's baseline plus half its x-height, as
+            # CSS has it: the centring trick (an ::after 100% high beside the
+            # box, both middle) puts a dialog in the middle of the window, and
+            # Google's consent dialog had sat on the floor
+            whole = height + m_top + m_bottom
+            parent_style = self.styles.get(element.parent) if element.parent is not None else None
+            try:
+                x_height = self.fonts.get(parent_style or style)[1].xHeight()
+            except Exception:                              # noqa: BLE001
+                x_height = 0.0
+            ascent = whole / 2 + x_height / 2
+            descent = whole - ascent
         return ("box", border_width + m_left + m_right, element, style, link, ascent, descent,
                 ascent + descent, (m_left, m_top, border_width, m_bottom))
 
@@ -2801,7 +2863,7 @@ class Layout:
         else:
             fixed = self._length(style.get("width"), width)
             if fixed is not None:
-                border_width = fixed + edges
+                border_width = self._outer(style, fixed, edges)
             else:
                 # as wide as its content, up to the room there is
                 border_width = min(self._natural_width(element, style, False) + edges,
@@ -2809,9 +2871,9 @@ class Layout:
             low = self._length(style.get("min-width"), width)
             high = self._length(style.get("max-width"), width)
             if high is not None:
-                border_width = min(border_width, high + edges)
+                border_width = min(border_width, self._outer(style, high, edges))
             if low is not None:
-                border_width = max(border_width, low + edges)
+                border_width = max(border_width, self._outer(style, low, edges))
         outer = border_width + m_left + m_right
         top = y
         for _step in range(100):
@@ -2820,7 +2882,13 @@ class Layout:
                 break
             top = self._next_float_bottom(top, 1.0, x, width)
         left, right = self._room(top, 1.0, x, width)
-        box_x = left + m_left if side == "left" else right - m_right - border_width
+        # measured for its natural width, a right float sits beside what
+        # comes before it, as a left one would: against the far edge of the
+        # 100,000 pixels it is measured in, it made its whole box that wide
+        # (Google's apps and Sign in buttons, floated right in their flex
+        # items, took the whole bar between them)
+        on_left = side == "left" or self._measuring
+        box_x = left + m_left if on_left else right - m_right - border_width
         box_y = top + m_top
         if element.tag == "img":
             rect = QRectF(box_x, box_y, border_width, image_h)
@@ -2851,7 +2919,12 @@ class Layout:
                         static_x: float, static_y: float) -> None:
         """Place an absolutely positioned box against its containing block."""
         margin, padding, border = self._edges(style, block.width())
+        auto_top, auto_right, auto_bottom, auto_left = (m is None for m in margin)
         m_top, m_right, m_bottom, m_left = (m or 0.0 for m in margin)
+        # width: fit-content (a modal dialog's, a popover's) shrinks to its
+        # content even held at both sides, where auto would stretch
+        shrink_w = style.get("-merlin-width-fit") == "1"
+        shrink_h = style.get("-merlin-height-fit") == "1"
         edges_x = padding[1] + padding[3] + border[1] + border[3]
         edges_y = padding[0] + padding[2] + border[0] + border[2]
         left = self._length(style.get("left"), block.width())
@@ -2863,8 +2936,8 @@ class Layout:
             image_w, image_h = self._image_size(element, style, block.width(), block.height())
             border_width = image_w
         elif fixed is not None:
-            border_width = fixed + edges_x
-        elif left is not None and right is not None:
+            border_width = self._outer(style, fixed, edges_x)
+        elif left is not None and right is not None and not shrink_w:
             border_width = max(0.0, block.width() - left - right - m_left - m_right)
         else:
             # shrink to fit: as wide as its content, up to the room there is
@@ -2874,9 +2947,17 @@ class Layout:
         high = self._length(style.get("max-width"), block.width())
         low = self._length(style.get("min-width"), block.width())
         if high is not None:
-            border_width = min(border_width, high + edges_x)
+            border_width = min(border_width, self._outer(style, high, edges_x))
         if low is not None:
-            border_width = max(border_width, low + edges_x)
+            border_width = max(border_width, self._outer(style, low, edges_x))
+        if left is not None and right is not None and (auto_left or auto_right):
+            # held at both sides, its auto margins share what is left over:
+            # margin: auto centres it, as a dialog is centred
+            free = block.width() - left - right - border_width - m_left - m_right
+            if auto_left and auto_right:
+                m_left = max(0.0, free / 2) if free >= 0 else 0.0
+            elif auto_left:
+                m_left = max(0.0, free)
         if left is not None:
             box_x = block.left() + left + m_left
         elif right is not None:
@@ -2886,8 +2967,8 @@ class Layout:
         forced = None
         fixed_height = self._length(style.get("height"), block.height(), vertical=True)
         if fixed_height is not None:
-            forced = fixed_height + edges_y
-        elif top is not None and bottom is not None:
+            forced = self._outer(style, fixed_height, edges_y)
+        elif top is not None and bottom is not None and not shrink_h and not (auto_top or auto_bottom):
             forced = max(0.0, block.height() - top - bottom - m_top - m_bottom)
         box_y = block.top() + top + m_top if top is not None else static_y + m_top
         items_before, links_before = len(self.out.items), len(self.out.links)
@@ -2905,6 +2986,15 @@ class Layout:
             # held by its bottom edge: now that its height is known, move it there
             target = block.bottom() - bottom - m_bottom - height
             self._shift(items_before, links_before, target - box_y, boxes_from=boxes_before)
+        elif top is not None and bottom is not None and (auto_top or auto_bottom) and forced is None \
+                or top is not None and bottom is not None and (auto_top or auto_bottom) and fixed_height is not None:
+            # held at top and bottom with auto margins: centred in the height
+            # there is (a modal dialog, in the middle of the window)
+            free = block.height() - top - bottom - height - m_top - m_bottom
+            if free > 0:
+                move = free / 2 if (auto_top and auto_bottom) else (free if auto_top else 0.0)
+                if move:
+                    self._shift(items_before, links_before, move, boxes_from=boxes_before)
 
 class _Measure:
     """Lay something out into a scratch display list, to learn how wide it is."""
@@ -3105,6 +3195,8 @@ def _bottom_edge(item) -> float:
         return 0.0
     if item[0] == "group":
         return max((_bottom_edge(sub) for sub in item[1]), default=0.0)
+    if item[0] == "masked":
+        return item[1].bottom()
     if item[0] in ("rect", "image", "rrect", "rborder", "svg", "gradient", "dashed", "frame", "media"):
         return item[1].bottom()
     if item[0] == "text":
@@ -3117,6 +3209,8 @@ def _right_edge(item) -> float:
         return 0.0
     if item[0] == "group":
         return max((_right_edge(sub) for sub in item[1]), default=0.0)
+    if item[0] == "masked":
+        return item[1].right()
     if item[0] in ("rect", "image", "rrect", "rborder", "svg", "gradient", "bgimage", "dashed", "frame", "media"):
         return item[1].right()
     if item[0] == "extent":

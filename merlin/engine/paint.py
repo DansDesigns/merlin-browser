@@ -285,6 +285,8 @@ _MOVES = ("xform_push", "fixed_push", "sticky_push", "scroll_push")
 def _item_bounds(item):
     """Where an item draws, in page terms; None if it cannot be told."""
     kind = item[0]
+    if kind == "masked":
+        return QRectF(item[1])
     if kind == "group":
         found = None
         for sub in item[1]:
@@ -398,6 +400,8 @@ def _draw(painter, item, visible: QRectF, images) -> None:
             renderer = _svg_renderer(markup)
             if renderer is not None:
                 renderer.render(painter, rect)
+    elif kind == "masked":
+        _draw_masked(painter, item, visible, images)
     elif kind == "bgimage":
         rect = item[1]
         picture = images.get(item[2])
@@ -629,6 +633,47 @@ def _background_length(word: str, room: float):
         return float(word)
     except ValueError:
         return None
+
+
+def _draw_masked(painter, item, visible: QRectF, images) -> None:
+    """A box's background through its CSS mask: drawn in a layer of its own,
+    kept only where the mask's picture is opaque. Until the picture is in,
+    nothing is drawn, as in browsers (an icon is not a filled square first)."""
+    _kind, rect, source, size, position, repeat, parts = item
+    if not rect.intersects(visible) or rect.width() < 0.5 or rect.height() < 0.5:
+        return
+    picture = images.get(source)
+    if picture is None or picture is False or (hasattr(picture, "isNull") and picture.isNull()):
+        return
+    from PyQt6.QtGui import QImage, QPainter
+
+    scale = max(1.0, abs(painter.worldTransform().m11()) or 1.0)
+    width, height = max(1, int(rect.width() * scale + 0.999)), max(1, int(rect.height() * scale + 0.999))
+    if width * height > 16_000_000:
+        return
+    layer = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+    layer.fill(Qt.GlobalColor.transparent)
+    shape = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+    shape.fill(Qt.GlobalColor.transparent)
+    inner = QPainter(layer)
+    inner.scale(scale, scale)
+    inner.translate(-rect.x(), -rect.y())
+    for part in parts:
+        if part is not None:
+            _draw(inner, part, rect, images)
+    inner.end()
+    cut = QPainter(shape)
+    cut.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    cut.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    cut.scale(scale, scale)
+    cut.translate(-rect.x(), -rect.y())
+    draw_background_picture(cut, rect, picture, size, position, repeat, 0.0)
+    cut.end()
+    inner = QPainter(layer)
+    inner.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+    inner.drawImage(0, 0, shape)
+    inner.end()
+    painter.drawImage(rect, layer)
 
 
 def draw_background_picture(painter, rect: QRectF, picture, size: str, position: str,

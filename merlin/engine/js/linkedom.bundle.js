@@ -11964,6 +11964,34 @@ var moCallback = (element, parentNode) => {
     }
   }
 };
+// Merlin: a text or comment node's data changed: characterData records for
+// those observing it (or, with subtree, something holding it), as browsers
+// give them. linkedom had sent none: Polymer and ShadyDOM (YouTube) run their
+// microtasks by changing a text node's data and waiting for the observer, and
+// nothing they queued ever ran.
+var characterDataCallback = (node, oldValue) => {
+  const { ownerDocument } = node;
+  if (!ownerDocument) return;
+  const { active, observers } = ownerDocument[MUTATION_OBSERVER];
+  if (!active) return;
+  for (const observer of observers) {
+    for (const [target, { subtree, characterData, characterDataOldValue }] of observer.nodes) {
+      if (!characterData && !characterDataOldValue) continue;
+      if (target === node || subtree && (target === ownerDocument ? node.isConnected : target.contains(node))) {
+        const { callback, records, scheduled } = observer;
+        records.push(createRecord("characterData", node, node, [], [], null, characterDataOldValue ? oldValue : void 0));
+        if (!scheduled) {
+          observer.scheduled = true;
+          Promise.resolve().then(() => {
+            observer.scheduled = false;
+            callback(records.splice(0), observer);
+          });
+        }
+        break;
+      }
+    }
+  }
+};
 var MutationObserverClass = class {
   constructor(ownerDocument) {
     const observers = /* @__PURE__ */ new Set();
@@ -11995,6 +12023,7 @@ var MutationObserverClass = class {
         characterData: false
       }) {
         if ("attributeOldValue" in options || "attributeFilter" in options) options.attributes = true;
+        if (options.characterDataOldValue) options.characterData = true;
         options.childList = !!options.childList;
         options.subtree = !!options.subtree;
         this.nodes.set(target, options);
@@ -12576,8 +12605,9 @@ var CharacterData = class extends Node2 {
     return this[VALUE];
   }
   set data(value) {
+    const oldValue = this[VALUE];
     this[VALUE] = $String(value);
-    moCallback(this, this.parentNode);
+    characterDataCallback(this, oldValue);
   }
   get nodeValue() {
     return this.data;
@@ -15237,7 +15267,12 @@ var ParentNode = class extends Node2 {
         connectedCallback(node);
         break;
       case DOCUMENT_FRAGMENT_NODE: {
-        let { [PRIVATE]: parentNode, firstChild, lastChild } = node;
+        // Merlin: the fragment's own children, read as the DOM keeps them: a
+        // polyfill may have given it a prototype of its own (ShadyDOM turns
+        // Polymer's stamped fragment into its shadow root), whose firstChild
+        // is that polyfill's idea, and nothing was moved
+        let { [PRIVATE]: parentNode } = node;
+        let firstChild = fragmentFirstChild.call(node), lastChild = fragmentLastChild.call(node);
         if (firstChild) {
           knownSegment(next[PREV], firstChild, lastChild, next);
           knownAdjacent(node, node[END]);
@@ -15290,6 +15325,9 @@ var ParentNode = class extends Node2 {
     return replaced;
   }
 };
+
+var fragmentFirstChild = Object.getOwnPropertyDescriptor(ParentNode.prototype, "firstChild").get;
+var fragmentLastChild = Object.getOwnPropertyDescriptor(ParentNode.prototype, "lastChild").get;
 
 // cache/npm/registry.npmjs.org/linkedom/0.18.13/esm/mixin/non-element-parent-node.js
 var NonElementParentNode = class extends ParentNode {
@@ -17837,6 +17875,15 @@ var HTMLDetailsElement = class extends HTMLElement {
   }
 };
 
+// Merlin: <dialog> made as what it is, so show(), showModal() and close()
+// (host.js, installDialogs) are its own; linkedom had made it a plain element
+var HTMLDialogElement = class extends HTMLElement {
+  constructor(ownerDocument, localName = "dialog") {
+    super(ownerDocument, localName);
+  }
+};
+registerHTMLClass("dialog", HTMLDialogElement);
+
 // cache/npm/registry.npmjs.org/linkedom/0.18.13/esm/html/source-element.js
 var tagName18 = "source";
 var HTMLSourceElement = class extends HTMLElement {
@@ -17952,6 +17999,7 @@ var HTMLClasses = {
   HTMLUnknownElement,
   HTMLModElement,
   HTMLDetailsElement,
+  HTMLDialogElement,
   HTMLSourceElement,
   HTMLTrackElement,
   HTMLMarqueeElement

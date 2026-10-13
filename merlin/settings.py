@@ -130,6 +130,7 @@ DEFAULTS = {
     "restore_session": True,
     "single_instance": True,           # links reuse the window already open
     "last_session": [],
+    "last_session_active": 0,      # which of them was open when Merlin closed
     "default_zoom": 1.0,
     # --- privacy / shields ---
     "adblock_enabled": True,

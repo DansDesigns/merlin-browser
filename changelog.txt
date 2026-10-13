@@ -5,6 +5,57 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.32
+  - Merlin opens on the tab that was open when it was closed, and loads it
+    first; the other tabs wait until they are selected, as before. It had
+    always opened on the first tab.
+  Merlin Engine:
+  - YouTube's pages are built. YouTube runs its app through Polymer and the
+    ShadyDOM polyfill, which stopped at every step:
+    * ProcessingInstruction and CDATASection, which the polyfill reads, and
+      Window, whose prototype it patches, were missing
+    * Node.prototype's own appendChild, firstChild and the rest were stubs
+      (appendChild added nothing, firstChild was always empty). Polyfills keep
+      these to use later, and the polyfill's first step looped for ever,
+      holding up the page's scripts. They now work on any node, as a
+      browser's built-in ones do.
+    * observers never heard a text node's data change. Polymer and ShadyDOM
+      schedule their work that way, so nothing they queued ever ran.
+    * Polymer's ES5 adapter registers an element's name just before
+      defining it, which Merlin took for a second definition, and refused.
+  - YouTube's icons and logo (a box in the text's colour, cut to shape by an
+    SVG mask) are drawn: CSS masks work for backgrounds.
+  - Google's buttons work:
+    * <dialog> has show(), showModal() and close(); <form method=dialog>,
+      Esc, and the popover API work too. Google opens its menus and panels as
+      dialogs, and its consent dialog with showModal.
+    * the CSS object model: CSSStyleRule and the other rule classes,
+      cssRules read from the sheet, constructable stylesheets with
+      replaceSync(), and adoptedStyleSheets. AI Mode's button checked for a
+      CSSStyleRule, and with none it was never set up.
+    * XMLSerializer
+    * a click is a trusted MouseEvent with which, pageX and the rest, as in
+      browsers, where it had been a plain Event
+  - Layout, as Chrome lays it out:
+    * box-sizing: border-box for inline-blocks, floats, positioned boxes and
+      flex items' heights. It had only been honoured for blocks, so padding
+      and border were added again: Google's Sign in button was 60 pixels
+      tall, where it should be 40.
+    * percentage heights of a container with a definite height, and of the
+      window for html and body. They had always counted as auto, so a page
+      at height: 100% was only as tall as its content. Google's footer now
+      sits at the foot of the window.
+    * vertical-align: middle for inline boxes. The usual way to centre a
+      dialog in the window now works, where Google's consent dialog had sat
+      at the bottom.
+    * a right float in a flex item is measured at its own width. It had been
+      measured across the whole page: Google's apps button sat in the middle
+      of its bar, not beside Sign in.
+    * width and height: fit-content, and auto margins, centre a box held at
+      all four sides, as a modal dialog is
+  - Google's one-line search box no longer shows a little scroll-bar
+    spinner, and fields under a fixed dialog are hidden by it.
+
 1.8.31
   Merlin Engine:
   - Video and audio play in the page. <video> and <audio> have a box of

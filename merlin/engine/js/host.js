@@ -658,6 +658,9 @@ function install(html) {
   installFrames(g, made);
   installWebExtras(g);
   installMedia(g);
+  installWindowClass(g);
+  installCSSOM(g);
+  installDialogs(g, made);
   installSelects();
   // form.submit() and requestSubmit(), which the DOM had as nothing at all:
   // search boxes that send their form from a script (Google's, Ponder's) did
@@ -842,27 +845,13 @@ function install(html) {
   const sheetOf = (node) => {
     let sheet = sheets.get(node);
     if (sheet) return sheet;
-    const rules = [];
-    sheet = {
-      ownerNode: node, type: "text/css", disabled: false, title: node.getAttribute("title"),
-      get href() { return node.tagName === "LINK" ? new URL(node.getAttribute("href") || "", state.url).href : null; },
-      media: { mediaText: node.getAttribute("media") || "", length: 0 },
-      get cssRules() { return rules; }, get rules() { return rules; },
-      insertRule(text, index = 0) {
-        rules.splice(index, 0, { cssText: String(text) });
-        if (node.tagName === "STYLE") node.textContent = (node.textContent || "") + "\n" + String(text);
-        return index;
-      },
-      deleteRule(index) { rules.splice(index, 1); },
-      addRule(selector, body, index) { return this.insertRule(`${selector} { ${body} }`, index ?? rules.length); },
-      removeRule(index) { this.deleteRule(index ?? 0); },
-    };
+    sheet = new g.CSSStyleSheet({ media: node.getAttribute("media") || "" }, node);
     sheets.set(node, sheet);
     return sheet;
   };
   try {
     Object.defineProperty(document_, "styleSheets", { configurable: true, get() {
-      return [...document_.querySelectorAll("style, link[rel~=stylesheet]")].map(sheetOf);
+      return g.StyleSheetList.of([...document_.querySelectorAll("style, link[rel~=stylesheet]")].map(sheetOf));
     } });
   } catch (_) {}
   for (const cls of [g.HTMLStyleElement, g.HTMLLinkElement]) {
@@ -884,8 +873,12 @@ function install(html) {
   if (g.customElements && typeof g.customElements.define === "function") {
     const registry = g.customElements;
     const define = registry.define.bind(registry);
+    // the registry's own get, kept: Polymer's ES5 adapter (YouTube's)
+    // replaces customElements.get with its own list, and adds the name to it
+    // before defining, which read as a second definition, and YouTube stopped
+    const known = registry.get.bind(registry);
     registry.define = (name, constructor, options) => {
-      if (registry.get(name)) {
+      if (known(name)) {
         throw new DOMException(`Failed to execute 'define' on 'CustomElementRegistry': the name "${name}" has already been used with this registry`, "NotSupportedError");
       }
       return define(name, constructor, options);
@@ -1008,6 +1001,7 @@ function install(html) {
     registerProperty() {}, highlights: new Map(), paintWorklet: { addModule: async () => {} },
   };
   patchSelectors(g);
+  ownMembers(g, made);
   // In a browser HTMLElement has no observedAttributes, and a page may assign
   // one to its element class; linkedom's base class has it as a getter only,
   // and GitHub's elements failed to load on assigning it.
@@ -1144,6 +1138,8 @@ const handlers = new WeakMap();
 // can be in here (:target, :hover...) matches nothing, as it would at that
 // moment; :defined matches all. GitHub's scripts stopped on :target.
 const ALWAYS = new Set(["defined", "scope"]);
+// states Merlin marks with an attribute (installDialogs): asked for, the attribute
+const MARKED = { "modal": "[data-merlin-modal]", "popover-open": "[data-merlin-popover-open]" };
 function forgiving(original) {
   return function (selector, ...rest) {
     let text = String(selector);
@@ -1154,7 +1150,7 @@ function forgiving(original) {
         if (!found) throw error;
         const name = found[1];
         const pattern = new RegExp(":" + name + "(\\([^)]*\\))?", "g");
-        const next = text.replace(pattern, ALWAYS.has(name) ? "" : ":not(*)");
+        const next = text.replace(pattern, ALWAYS.has(name) ? "" : (MARKED[name.toLowerCase()] || ":not(*)"));
         if (next === text) throw error;
         text = next;
       }
@@ -1162,6 +1158,142 @@ function forgiving(original) {
     return original.call(this, text, ...rest);
   };
 }
+// Node.prototype and Element.prototype own what a browser's do. linkedom
+// keeps much of it lower down (appendChild and firstChild on a ParentNode
+// class under Element, parentNode on each node itself) and leaves stubs on
+// Node.prototype: appendChild there returns its argument and adds nothing,
+// firstChild is always null. Polyfills keep the browser's own methods by
+// copying them from these prototypes, ShadyDOM (YouTube's) among them, and
+// got the stubs: YouTube built none of its page, looping for ever. Each is
+// now the real one, whichever class of node it is called on.
+const OWNED = {
+  Node: ["parentNode", "parentElement", "firstChild", "lastChild", "previousSibling", "nextSibling", "childNodes",
+         "textContent", "nodeValue", "isConnected", "appendChild", "insertBefore", "removeChild", "replaceChild",
+         "cloneNode", "contains", "hasChildNodes", "getRootNode", "normalize", "compareDocumentPosition",
+         "isEqualNode", "ownerDocument"],
+  Element: ["children", "firstElementChild", "lastElementChild", "childElementCount", "previousElementSibling",
+            "nextElementSibling", "querySelector", "querySelectorAll", "getElementsByTagName",
+            "getElementsByClassName", "append", "prepend", "replaceChildren", "before", "after", "remove",
+            "replaceWith", "matches", "closest", "innerHTML", "outerHTML", "insertAdjacentElement",
+            "insertAdjacentHTML", "insertAdjacentText", "getAttribute", "setAttribute", "removeAttribute",
+            "hasAttribute", "toggleAttribute", "className", "id", "slot", "shadowRoot", "attachShadow"],
+  DocumentFragment: ["children", "firstElementChild", "lastElementChild", "childElementCount", "querySelector",
+                     "querySelectorAll", "getElementById", "append", "prepend", "replaceChildren"],
+  Document: ["children", "firstElementChild", "lastElementChild", "childElementCount", "querySelector",
+             "querySelectorAll", "getElementById", "append", "prepend", "getElementsByTagName",
+             "getElementsByClassName", "createElement", "createTextNode", "createComment",
+             "createDocumentFragment", "importNode", "adoptNode"],
+  CharacterData: ["data", "length", "previousElementSibling", "nextElementSibling", "before", "after", "remove",
+                  "replaceWith", "appendData", "deleteData", "insertData", "replaceData", "substringData"],
+};
+function ownMembers(g, made) {
+  const ours = new WeakSet();
+  // the DOM's own implementations, as a browser's native code is: found in
+  // every class the DOM made, before any page script runs. A polyfill's own
+  // accessors on a node's prototype (ShadyDOM puts its logical tree on its
+  // ShadowRoot's) are never taken for the native ones.
+  const native = new WeakSet();
+  const seen = new Set();
+  const collect = (cls) => {
+    let p = cls && cls.prototype;
+    while (p && p !== Object.prototype && !seen.has(p)) {
+      seen.add(p);
+      for (const key of Object.getOwnPropertyNames(p)) {
+        const d = Object.getOwnPropertyDescriptor(p, key);
+        for (const fn of [d.get, d.set, d.value]) if (typeof fn === "function") native.add(fn);
+      }
+      p = Object.getPrototypeOf(p);
+    }
+  };
+  for (const source of [made, made && made.window, g]) {
+    if (!source) continue;
+    for (const key of Object.getOwnPropertyNames(source)) {
+      let value;
+      try { value = source[key]; } catch (_) { continue; }
+      if (typeof value === "function" && value.prototype) collect(value);
+    }
+  }
+  for (const node of [document_, document_.documentElement, document_.createTextNode(""), document_.createComment(""),
+                      document_.createDocumentFragment(), document_.createElement("div"), document_.createElement("template")]) {
+    if (node) collect({ prototype: Object.getPrototypeOf(node) });
+  }
+  const DATA = new Set(["parentNode", "children", "firstElementChild", "lastElementChild", "childElementCount",
+                        "previousElementSibling", "nextElementSibling", "innerHTML", "outerHTML", "className", "id",
+                        "slot", "shadowRoot", "data", "length", "ownerDocument", "firstChild", "lastChild",
+                        "previousSibling", "nextSibling", "childNodes", "parentElement", "textContent", "nodeValue",
+                        "isConnected"]);
+  for (const [face, names] of Object.entries(OWNED)) {
+    const proto = g[face] && g[face].prototype;
+    if (!proto) continue;
+    for (const name of names) {
+      const original = Object.getOwnPropertyDescriptor(proto, name);
+      if (original && ours.has(original.get || original.value)) continue;
+      // Node's own are linkedom's stubs; elsewhere a prototype's own is real,
+      // and kept as it is
+      if (original && face !== "Node") continue;
+      // the real one for a node: the nearest of the DOM's own in its chain
+      // (Node's stub last: a text node's firstChild is null). One already
+      // running for this node is passed over: a class calling super.x comes
+      // back here, and must go on up rather than round again.
+      const running = [];
+      const cache = new WeakMap();
+      const busy = (node, fn) => running.some((r) => r.node === node && r.fn === fn);
+      const real = (node) => {
+        if (node === null || node === undefined) throw new TypeError("Illegal invocation");
+        const start = Object.getPrototypeOf(node);
+        const plain = !running.some((r) => r.node === node);
+        if (plain && start && cache.has(start)) return cache.get(start);
+        let p = start, found;
+        while (p) {
+          const here = p === proto ? original : Object.getOwnPropertyDescriptor(p, name);
+          const fn = here && (here.get || here.value || here.set);
+          if (here && native.has(fn) && !ours.has(fn) && !busy(node, fn)) { found = here; break; }
+          p = Object.getPrototypeOf(p);
+        }
+        if (plain && start) cache.set(start, found);
+        return found;
+      };
+      const run = (node, fn, call) => {
+        running.push({ node, fn });
+        try { return call(); } finally { running.pop(); }
+      };
+      const isMethod = original ? typeof original.value === "function" : !DATA.has(name);
+      const descriptor = { configurable: true, enumerable: original ? !!original.enumerable : false };
+      if (isMethod) {
+        const method = function (...args) {
+          const found = real(this);
+          if (found && typeof found.value === "function") return run(this, found.value, () => found.value.apply(this, args));
+          throw new TypeError(`Illegal invocation: ${name}`);
+        };
+        Object.defineProperty(method, "name", { value: name });
+        ours.add(method);
+        descriptor.writable = true;
+        descriptor.value = method;
+      } else {
+        const get = function () {
+          // parentNode and the like are each node's own: read straight
+          if (Object.prototype.hasOwnProperty.call(this, name)) {
+            const own = Object.getOwnPropertyDescriptor(this, name);
+            return own.get ? own.get.call(this) : own.value;
+          }
+          const found = real(this);
+          if (!found) return name === "parentNode" ? null : undefined;
+          if (!found.get) return found.value;
+          return run(this, found.get, () => found.get.call(this));
+        };
+        const set = function (value) {
+          const found = real(this);
+          if (found && found.set) return run(this, found.get || found.set, () => found.set.call(this, value));
+          if (!found || !found.get) Object.defineProperty(this, name, { value, writable: true, configurable: true, enumerable: true });
+        };
+        ours.add(get); ours.add(set);
+        descriptor.get = get; descriptor.set = set;
+      }
+      try { Object.defineProperty(proto, name, descriptor); } catch (_) {}
+    }
+  }
+}
+
 function patchSelectors(g) {
   const protos = [g.Element?.prototype, g.Document?.prototype, Object.getPrototypeOf(document_),
                   g.DocumentFragment?.prototype].filter(Boolean);
@@ -1717,6 +1849,590 @@ function mediaAnswered(message) {
   }
   try { el.dispatchEvent(new globalThis.Event(name)); } catch (e) { reportError(e); }
 }
+// <dialog>'s show(), showModal() and close(), the popover API, and the two
+// DOM interfaces linkedom lacks that browsers have always had. Google's
+// buttons open their menus and panels as dialogs (showModal was not a
+// function, and nothing opened); YouTube's web components polyfill reads
+// ProcessingInstruction and CDATASection and stopped where they were missing.
+// A modal dialog is marked data-merlin-modal for Merlin's styles (:modal), an
+// open popover data-merlin-popover-open (:popover-open).
+// Window, the window's own interface: window instanceof Window, and
+// Window.prototype with the window's event methods, as browsers have it.
+// YouTube's web components polyfill patches Window.prototype and stopped,
+// with "Window is not defined", before its app could start.
+function installWindowClass(g) {
+  if (typeof g.Window === "function") return;
+  const proto = Object.getPrototypeOf(g);
+  if (!proto || proto === Object.prototype) return;
+  const Window = function Window() { throw new TypeError("Illegal constructor"); };
+  Window.prototype = proto;
+  const hidden = (value) => ({ value, configurable: true, writable: true, enumerable: false });
+  try {
+    Object.defineProperty(proto, "constructor", hidden(Window));
+    Object.defineProperty(proto, Symbol.toStringTag, { value: "Window", configurable: true });
+    for (const name of ["addEventListener", "removeEventListener", "dispatchEvent"]) {
+      const own = g[name];
+      if (typeof own !== "function") continue;
+      Object.defineProperty(proto, name, hidden(function (...args) { return own.apply(g, args); }));
+    }
+  } catch (_) {}
+  g.Window = Window;
+}
+
+// The CSS object model: CSSStyleSheet (constructable too, with replace() and
+// replaceSync(), and adoptedStyleSheets), its cssRules parsed from the sheet's
+// text as CSSStyleRule, CSSMediaRule, CSSKeyframesRule and the rest, each with
+// its style. Google's search box asked whether a rule was a CSSStyleRule, and
+// with no such class its buttons (AI Mode's among them) were never set up;
+// Lit's components make their styles as constructed sheets.
+function installCSSOM(g) {
+  const stripComments = (text) => String(text || "").replace(/\/\*[\s\S]*?\*\//g, "");
+  // the end of a block or prelude, past strings and brackets
+  const scan = (text, i, stops) => {
+    let depth = 0, quote = "";
+    for (; i < text.length; i++) {
+      const c = text[i];
+      if (quote) { if (c === "\\") i++; else if (c === quote) quote = ""; continue; }
+      if (c === '"' || c === "'") { quote = c; continue; }
+      if (c === "(" || c === "[") depth++;
+      else if (c === ")" || c === "]") depth--;
+      else if (depth <= 0 && stops.includes(c)) return i;
+    }
+    return text.length;
+  };
+  const blockEnd = (text, open) => {
+    let depth = 0, quote = "";
+    for (let i = open; i < text.length; i++) {
+      const c = text[i];
+      if (quote) { if (c === "\\") i++; else if (c === quote) quote = ""; continue; }
+      if (c === '"' || c === "'") { quote = c; continue; }
+      if (c === "{") depth++;
+      else if (c === "}" && --depth === 0) return i;
+    }
+    return text.length;
+  };
+  const camel = (name) => name.replace(/-([a-z])/g, (_m, c) => c.toUpperCase());
+  const dashed = (name) => name.startsWith("--") ? name : name.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase()).replace(/^(webkit|moz|ms)-/, "-$1-");
+
+  class CSSStyleDeclaration {
+    constructor(text = "", parentRule = null, onChange = null) {
+      Object.defineProperty(this, "_map", { value: new Map(), writable: true });
+      Object.defineProperty(this, "_change", { value: onChange, writable: true });
+      Object.defineProperty(this, "parentRule", { value: parentRule, writable: true });
+      this._read(text);
+      return new Proxy(this, {
+        get(target, key, receiver) {
+          if (typeof key === "string" && !(key in target)) {
+            if (/^\d+$/.test(key)) return [...target._map.keys()][Number(key)];
+            if (/^[a-zA-Z]/.test(key) || key.startsWith("--")) return target.getPropertyValue(dashed(key));
+          }
+          return Reflect.get(target, key, receiver);
+        },
+        set(target, key, value, receiver) {
+          if (typeof key === "string" && !(key in target) && (/^[a-zA-Z]/.test(key) || key.startsWith("--"))) {
+            target.setProperty(dashed(key), value); return true;
+          }
+          return Reflect.set(target, key, value, receiver);
+        },
+      });
+    }
+    _read(text) {
+      this._map = new Map();
+      const body = stripComments(text);
+      let i = 0;
+      while (i < body.length) {
+        const end = scan(body, i, ";");
+        const part = body.slice(i, end); i = end + 1;
+        const colon = part.indexOf(":");
+        if (colon < 0) continue;
+        const name = part.slice(0, colon).trim();
+        let value = part.slice(colon + 1).trim(), priority = "";
+        const important = value.match(/!\s*important\s*$/i);
+        if (important) { value = value.slice(0, important.index).trim(); priority = "important"; }
+        if (name) this._map.set(name.startsWith("--") ? name : name.toLowerCase(), { value, priority });
+      }
+    }
+    get length() { return this._map.size; }
+    item(i) { return [...this._map.keys()][i] ?? ""; }
+    getPropertyValue(name) { return this._map.get(String(name).startsWith("--") ? String(name) : String(name).toLowerCase())?.value ?? ""; }
+    getPropertyPriority(name) { return this._map.get(String(name).toLowerCase())?.priority ?? ""; }
+    setProperty(name, value, priority = "") {
+      name = String(name); if (!name.startsWith("--")) name = name.toLowerCase();
+      if (value === null || value === undefined || String(value) === "") { this.removeProperty(name); return; }
+      this._map.set(name, { value: String(value), priority: priority ? "important" : "" });
+      if (this._change) this._change();
+    }
+    removeProperty(name) {
+      const old = this.getPropertyValue(name);
+      this._map.delete(String(name).startsWith("--") ? String(name) : String(name).toLowerCase());
+      if (this._change) this._change();
+      return old;
+    }
+    get cssText() { return [...this._map].map(([k, v]) => `${k}: ${v.value}${v.priority ? " !important" : ""};`).join(" "); }
+    set cssText(text) { this._read(text); if (this._change) this._change(); }
+    [Symbol.iterator]() { return this._map.keys(); }
+  }
+  for (const name of ["cssFloat"]) Object.defineProperty(CSSStyleDeclaration.prototype, name, {
+    get() { return this.getPropertyValue("float"); }, set(v) { this.setProperty("float", v); }, configurable: true });
+
+  class CSSRuleList extends Array {
+    item(i) { return this[i] ?? null; }
+    static get [Symbol.species]() { return Array; }
+  }
+  class StyleSheetList extends Array {
+    item(i) { return this[i] ?? null; }
+    static get [Symbol.species]() { return Array; }
+  }
+  class MediaList extends Array {
+    constructor(text = "") { super(); this.mediaText = text; }
+    get mediaText() { return this.join(", "); }
+    set mediaText(text) { this.length = 0; for (const m of String(text || "").split(",").map((x) => x.trim()).filter(Boolean)) this.push(m); }
+    item(i) { return this[i] ?? null; }
+    appendMedium(m) { if (!this.includes(m)) this.push(m); }
+    deleteMedium(m) { const i = this.indexOf(m); if (i >= 0) this.splice(i, 1); }
+    toString() { return this.mediaText; }
+    static get [Symbol.species]() { return Array; }
+  }
+  class CSSRule {
+    constructor(text = "", parentStyleSheet = null, parentRule = null) {
+      this._text = text; this.parentStyleSheet = parentStyleSheet; this.parentRule = parentRule;
+    }
+    get cssText() { return this._text; }
+    set cssText(_v) {}
+    get type() { return 0; }
+  }
+  const types = { STYLE_RULE: 1, CHARSET_RULE: 2, IMPORT_RULE: 3, MEDIA_RULE: 4, FONT_FACE_RULE: 5, PAGE_RULE: 6,
+                  KEYFRAMES_RULE: 7, KEYFRAME_RULE: 8, NAMESPACE_RULE: 10, COUNTER_STYLE_RULE: 11, SUPPORTS_RULE: 12,
+                  FONT_FEATURE_VALUES_RULE: 14 };
+  for (const [k, v] of Object.entries(types)) { CSSRule[k] = v; CSSRule.prototype[k] = v; }
+  class CSSStyleRule extends CSSRule {
+    constructor(selector, body, sheet, parent) {
+      super("", sheet, parent);
+      this._selector = selector.trim();
+      this.style = new CSSStyleDeclaration(body, this, () => sheet && sheet._ruleChanged && sheet._ruleChanged());
+      this.cssRules = CSSRuleList.from([]);
+    }
+    get type() { return 1; }
+    get selectorText() { return this._selector; }
+    set selectorText(v) { this._selector = String(v); }
+    get cssText() { return `${this._selector} { ${this.style.cssText} }`; }
+  }
+  class CSSGroupingRule extends CSSRule {
+    constructor(text, inner, sheet, parent) {
+      super(text, sheet, parent);
+      this.cssRules = parseRules(inner, sheet, this);
+    }
+    insertRule(text, index = 0) { const made = parseRules(String(text), this.parentStyleSheet, this); this.cssRules.splice(index, 0, ...made); return index; }
+    deleteRule(index) { this.cssRules.splice(index, 1); }
+    get cssText() { return this._prelude + " { " + this.cssRules.map((r) => r.cssText).join(" ") + " }"; }
+  }
+  class CSSConditionRule extends CSSGroupingRule {
+    get conditionText() { return this._condition; }
+  }
+  class CSSMediaRule extends CSSConditionRule {
+    constructor(condition, inner, sheet, parent) {
+      super("", inner, sheet, parent);
+      this._condition = condition; this._prelude = "@media " + condition; this.media = new MediaList(condition);
+    }
+    get type() { return 4; }
+  }
+  class CSSSupportsRule extends CSSConditionRule {
+    constructor(condition, inner, sheet, parent) { super("", inner, sheet, parent); this._condition = condition; this._prelude = "@supports " + condition; }
+    get type() { return 12; }
+  }
+  class CSSContainerRule extends CSSConditionRule {
+    constructor(condition, inner, sheet, parent) { super("", inner, sheet, parent); this._condition = condition; this._prelude = "@container " + condition; }
+    get containerName() { return (this._condition.match(/^\s*([a-z][\w-]*)\s+[(]/i) || [])[1] || ""; }
+  }
+  class CSSLayerBlockRule extends CSSGroupingRule {
+    constructor(name, inner, sheet, parent) { super("", inner, sheet, parent); this.name = name; this._prelude = "@layer " + name; }
+  }
+  class CSSLayerStatementRule extends CSSRule {
+    constructor(text, names, sheet, parent) { super(text, sheet, parent); this.nameList = names; }
+  }
+  class CSSFontFaceRule extends CSSRule {
+    constructor(body, sheet, parent) { super("", sheet, parent); this.style = new CSSStyleDeclaration(body, this); }
+    get type() { return 5; }
+    get cssText() { return `@font-face { ${this.style.cssText} }`; }
+  }
+  class CSSPageRule extends CSSRule {
+    constructor(selector, body, sheet, parent) { super("", sheet, parent); this.selectorText = selector; this.style = new CSSStyleDeclaration(body, this); }
+    get type() { return 6; }
+    get cssText() { return `@page ${this.selectorText} { ${this.style.cssText} }`.replace("@page  {", "@page {"); }
+  }
+  class CSSKeyframeRule extends CSSRule {
+    constructor(key, body, sheet, parent) { super("", sheet, parent); this.keyText = key; this.style = new CSSStyleDeclaration(body, this); }
+    get type() { return 8; }
+    get cssText() { return `${this.keyText} { ${this.style.cssText} }`; }
+  }
+  class CSSKeyframesRule extends CSSRule {
+    constructor(name, inner, sheet, parent) {
+      super("", sheet, parent);
+      this.name = name;
+      this.cssRules = CSSRuleList.from(parseBlocks(inner).map(([key, body]) => new CSSKeyframeRule(key, body, sheet, this)));
+    }
+    get type() { return 7; }
+    findRule(key) { return this.cssRules.find((r) => r.keyText === key) || null; }
+    appendRule(text) { const [[key, body] = []] = parseBlocks(text); if (key) this.cssRules.push(new CSSKeyframeRule(key, body, this.parentStyleSheet, this)); }
+    deleteRule(key) { const i = this.cssRules.findIndex((r) => r.keyText === key); if (i >= 0) this.cssRules.splice(i, 1); }
+    get cssText() { return `@keyframes ${this.name} { ${this.cssRules.map((r) => r.cssText).join(" ")} }`; }
+  }
+  class CSSImportRule extends CSSRule {
+    constructor(text, sheet, parent) {
+      super(text, sheet, parent);
+      const found = text.match(/@import\s+(?:url\(\s*)?["']?([^"')\s]+)["']?\s*\)?\s*([^;]*)/i);
+      this.href = found ? found[1] : ""; this.media = new MediaList(found ? found[2].trim() : ""); this.styleSheet = null;
+    }
+    get type() { return 3; }
+  }
+  class CSSNamespaceRule extends CSSRule {
+    constructor(text, sheet, parent) {
+      super(text, sheet, parent);
+      const found = text.match(/@namespace\s+(?:([\w-]+)\s+)?(?:url\()?["']?([^"')]+)/i);
+      this.prefix = found && found[1] || ""; this.namespaceURI = found ? found[2] : "";
+    }
+    get type() { return 10; }
+  }
+  // [prelude, body] for each block in text
+  const parseBlocks = (text) => {
+    const out = []; text = stripComments(text);
+    let i = 0;
+    while (i < text.length) {
+      const open = scan(text, i, "{");
+      if (open >= text.length) break;
+      const close = blockEnd(text, open);
+      out.push([text.slice(i, open).trim(), text.slice(open + 1, close)]);
+      i = close + 1;
+    }
+    return out;
+  };
+  const parseRules = (text, sheet, parent) => {
+    const rules = CSSRuleList.from([]);
+    text = stripComments(text);
+    let i = 0;
+    while (i < text.length) {
+      while (i < text.length && /\s/.test(text[i])) i++;
+      if (i >= text.length) break;
+      const stop = scan(text, i, "{;}");
+      if (stop >= text.length || text[stop] === "}") { i = stop + 1; continue; }
+      const prelude = text.slice(i, stop).trim();
+      if (text[stop] === ";") {
+        const at = prelude.match(/^@([\w-]+)/);
+        if (at) {
+          const name = at[1].toLowerCase();
+          if (name === "import") rules.push(new CSSImportRule(prelude + ";", sheet, parent));
+          else if (name === "namespace") rules.push(new CSSNamespaceRule(prelude + ";", sheet, parent));
+          else if (name === "layer") rules.push(new CSSLayerStatementRule(prelude + ";", prelude.slice(6).split(",").map((x) => x.trim()), sheet, parent));
+        }
+        i = stop + 1;
+        continue;
+      }
+      const close = blockEnd(text, stop);
+      const body = text.slice(stop + 1, close);
+      i = close + 1;
+      const at = prelude.match(/^@(-[a-z]+-)?([\w-]+)\s*([\s\S]*)$/i);
+      try {
+        if (!at) rules.push(new CSSStyleRule(prelude, body, sheet, parent));
+        else {
+          const name = at[2].toLowerCase(), rest = at[3].trim();
+          if (name === "media") rules.push(new CSSMediaRule(rest, body, sheet, parent));
+          else if (name === "supports") rules.push(new CSSSupportsRule(rest, body, sheet, parent));
+          else if (name === "container") rules.push(new CSSContainerRule(rest, body, sheet, parent));
+          else if (name === "layer") rules.push(new CSSLayerBlockRule(rest, body, sheet, parent));
+          else if (name === "font-face") rules.push(new CSSFontFaceRule(body, sheet, parent));
+          else if (name === "page") rules.push(new CSSPageRule(rest, body, sheet, parent));
+          else if (name === "keyframes") rules.push(new CSSKeyframesRule(rest, body, sheet, parent));
+          else { const r = new CSSRule(`${prelude} {${body}}`, sheet, parent); rules.push(r); }
+        }
+      } catch (_) {}
+    }
+    return rules;
+  };
+  class StyleSheet {}
+  // a <style>'s or <link>'s sheet (owner given), or one a script makes
+  class CSSStyleSheet extends StyleSheet {
+    constructor(options = {}, owner = null) {
+      super();
+      Object.defineProperty(this, "_owner", { value: owner, writable: true });
+      Object.defineProperty(this, "_text", { value: "", writable: true });
+      Object.defineProperty(this, "_rules", { value: null, writable: true });
+      Object.defineProperty(this, "_rulesFor", { value: null, writable: true });
+      this.disabled = !!options.disabled;
+      this.media = new MediaList(typeof options.media === "string" ? options.media : (options.media?.mediaText || ""));
+      this.title = owner ? owner.getAttribute("title") : null;
+      this.type = "text/css";
+      this.parentStyleSheet = null;
+      this.ownerRule = null;
+    }
+    get ownerNode() { return this._owner; }
+    get href() {
+      const node = this._owner;
+      return node && node.tagName === "LINK" ? new URL(node.getAttribute("href") || "", state.url).href : null;
+    }
+    _source() {
+      const node = this._owner;
+      if (!node) return this._text;
+      return node.tagName === "STYLE" ? (node.textContent || "") : this._text;
+    }
+    get cssRules() {
+      const text = this._source();
+      if (this._rules === null || this._rulesFor !== text) { this._rules = parseRules(text, this, null); this._rulesFor = text; }
+      return this._rules;
+    }
+    get rules() { return this.cssRules; }
+    _ruleChanged() {
+      // a rule's style changed by a script: the sheet's text follows, so the
+      // page is styled with it
+      const text = this.cssRules.map((r) => r.cssText).join("\n");
+      this._rulesFor = text;
+      if (this._owner && this._owner.tagName === "STYLE") this._owner.textContent = text; else this._text = text;
+      adopted.refresh();
+    }
+    insertRule(text, index = 0) {
+      const rules = this.cssRules;
+      if (index < 0 || index > rules.length) throw new DOMException("Failed to execute 'insertRule' on 'CSSStyleSheet': The index provided is outside the bounds.", "IndexSizeError");
+      const made = parseRules(String(text), this, null);
+      if (!made.length) throw new DOMException(`Failed to execute 'insertRule' on 'CSSStyleSheet': Failed to parse the rule '${text}'.`, "SyntaxError");
+      if (this._owner && this._owner.tagName === "STYLE" && index >= rules.length) {
+        // added at the end of a <style>: its text, so Merlin Engine styles the page with it
+        this._owner.textContent = (this._owner.textContent || "") + "\n" + String(text);
+      } else {
+        rules.splice(index, 0, ...made);
+        const joined = rules.map((r) => r.cssText).join("\n");
+        if (this._owner && this._owner.tagName === "STYLE") this._owner.textContent = joined; else this._text = joined;
+        this._rulesFor = joined;
+      }
+      adopted.refresh();
+      return index;
+    }
+    deleteRule(index) {
+      const rules = this.cssRules;
+      if (index < 0 || index >= rules.length) throw new DOMException("Failed to execute 'deleteRule' on 'CSSStyleSheet': The index provided is outside the bounds.", "IndexSizeError");
+      rules.splice(index, 1);
+      const joined = rules.map((r) => r.cssText).join("\n");
+      if (this._owner && this._owner.tagName === "STYLE") this._owner.textContent = joined; else this._text = joined;
+      this._rulesFor = joined;
+      adopted.refresh();
+    }
+    addRule(selector, body, index) { return this.insertRule(`${selector} { ${body} }`, index ?? this.cssRules.length), -1; }
+    removeRule(index) { this.deleteRule(index ?? 0); }
+    replaceSync(text) {
+      if (this._owner) throw new DOMException("Failed to execute 'replaceSync' on 'CSSStyleSheet': Can't call replaceSync on non-constructed CSSStyleSheets.", "NotAllowedError");
+      this._text = String(text).replace(/@import[^;]*;/gi, ""); this._rules = null;
+      adopted.refresh();
+    }
+    replace(text) {
+      try { this.replaceSync(text); return Promise.resolve(this); } catch (e) { return Promise.reject(e); }
+    }
+  }
+  StyleSheetList.of = (items) => StyleSheetList.from(items);
+  // document.adoptedStyleSheets: their text kept in a <style> of Merlin's in
+  // the head, so the page is drawn with them. A shadow root's are kept too.
+  const adopted = {
+    list: [],
+    element: null,
+    refresh() {
+      if (!this.list.length && !this.element) return;
+      try {
+        if (!this.element) {
+          this.element = document_.createElement("style");
+          this.element.setAttribute("data-merlin-adopted", "");
+        }
+        const text = this.list.map((sheet) => sheet._source()).join("\n");
+        if (this.element.textContent !== text) this.element.textContent = text;
+        if (!this.element.parentNode && document_.head) document_.head.appendChild(this.element);
+      } catch (_) {}
+    },
+  };
+  const adoptable = (value) => {
+    const list = Array.from(value || []);
+    for (const sheet of list) if (!(sheet instanceof CSSStyleSheet)) throw new TypeError("Failed to set the 'adoptedStyleSheets' property: Failed to convert value to 'CSSStyleSheet'.");
+    return list;
+  };
+  try {
+    Object.defineProperty(document_, "adoptedStyleSheets", { configurable: true,
+      get() { return adopted.list; }, set(value) { adopted.list = adoptable(value); adopted.refresh(); } });
+  } catch (_) {}
+  const shadowProto = g.ShadowRoot && g.ShadowRoot.prototype;
+  if (shadowProto && !Object.getOwnPropertyDescriptor(shadowProto, "adoptedStyleSheets")) {
+    const own = new WeakMap();
+    try {
+      Object.defineProperty(shadowProto, "adoptedStyleSheets", { configurable: true,
+        get() { return own.get(this) || []; }, set(value) { own.set(this, adoptable(value)); } });
+    } catch (_) {}
+  }
+  Object.assign(g, { CSSRule, CSSStyleRule, CSSGroupingRule, CSSConditionRule, CSSMediaRule, CSSSupportsRule,
+    CSSContainerRule, CSSLayerBlockRule, CSSLayerStatementRule, CSSFontFaceRule, CSSPageRule, CSSKeyframeRule,
+    CSSKeyframesRule, CSSImportRule, CSSNamespaceRule, CSSRuleList, StyleSheet, CSSStyleSheet, StyleSheetList,
+    MediaList });
+  if (typeof g.CSSStyleDeclaration !== "function" || !g.CSSStyleDeclaration.prototype.getPropertyValue) g.CSSStyleDeclaration = CSSStyleDeclaration;
+}
+
+function installDialogs(g, made) {
+  const CharacterData = g.CharacterData || made.CharacterData;
+  if (typeof g.ProcessingInstruction !== "function" && typeof CharacterData === "function") {
+    g.ProcessingInstruction = class ProcessingInstruction extends CharacterData {};
+  }
+  if (typeof g.CDATASection !== "function" && typeof made.CDATASection === "function") g.CDATASection = made.CDATASection;
+  if (typeof g.XMLSerializer !== "function") {
+    g.XMLSerializer = class XMLSerializer {
+      serializeToString(node) {
+        if (node == null) throw new TypeError("Failed to execute 'serializeToString' on 'XMLSerializer': parameter 1 is not of type 'Node'.");
+        if (node.nodeType === 9) return (node.doctype ? String(node.doctype) : "") + (node.documentElement ? node.documentElement.outerHTML : "");
+        if (node.nodeType === 1) return node.outerHTML;
+        if (node.nodeType === 11) return [...node.childNodes].map((n) => this.serializeToString(n)).join("");
+        if (node.nodeType === 3) return String(node.data ?? node.textContent ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        if (node.nodeType === 8) return `<!--${node.data ?? ""}-->`;
+        return String(node.textContent ?? "");
+      }
+    };
+  }
+  const later = (fn) => setTimeout(() => { try { fn(); } catch (e) { reportError(e); } }, 0);
+  const fire = (target, type, cancelable) => {
+    const event = new (g.Event || NodeEvent)(type, { cancelable: !!cancelable });
+    target.dispatchEvent(event);
+    return !event.defaultPrevented;
+  };
+  const invalid = (message) => new DOMException(message, "InvalidStateError");
+  const Dialog = g.HTMLDialogElement;
+  if (typeof Dialog === "function") {
+    const proto = Dialog.prototype;
+    const props = {
+      open: { get() { return this.hasAttribute("open"); },
+              set(v) { if (v) this.setAttribute("open", ""); else this.removeAttribute("open"); } },
+      returnValue: { get() { return this.__returnValue ?? ""; }, set(v) { this.__returnValue = String(v); } },
+      closedBy: { get() { return this.getAttribute("closedby") || "auto"; }, set(v) { this.setAttribute("closedby", String(v)); } },
+    };
+    for (const [name, descriptor] of Object.entries(props)) {
+      try { Object.defineProperty(proto, name, { configurable: true, ...descriptor }); } catch (_) {}
+    }
+    const methods = {
+      show() {
+        if (this.hasAttribute("open")) {
+          if (this.hasAttribute("data-merlin-modal")) throw invalid("Failed to execute 'show' on 'HTMLDialogElement': The dialog is already open as a modal dialog, and therefore cannot be opened as a non-modal dialog.");
+          return;
+        }
+        this.setAttribute("open", "");
+      },
+      showModal() {
+        if (this.hasAttribute("open")) {
+          if (this.hasAttribute("data-merlin-modal")) return;
+          throw invalid("Failed to execute 'showModal' on 'HTMLDialogElement': The element already has an 'open' attribute, and therefore cannot be opened modally.");
+        }
+        if (!this.isConnected) throw invalid("Failed to execute 'showModal' on 'HTMLDialogElement': The element is not in a Document.");
+        this.setAttribute("data-merlin-modal", "");
+        this.setAttribute("open", "");
+        modals.push(this);
+        // focus goes into it, to the first thing marked autofocus, as browsers do
+        try { (this.querySelector("[autofocus]") || null)?.focus?.(); } catch (_) {}
+      },
+      close(value) {
+        if (!this.hasAttribute("open")) return;
+        if (value !== undefined) this.returnValue = value;
+        this.removeAttribute("open");
+        this.removeAttribute("data-merlin-modal");
+        const at = modals.indexOf(this);
+        if (at >= 0) modals.splice(at, 1);
+        later(() => fire(this, "close", false));
+      },
+      requestClose(value) {
+        if (!this.hasAttribute("open")) return;
+        if (fire(this, "cancel", true)) this.close(value);
+      },
+    };
+    for (const [name, fn] of Object.entries(methods)) {
+      try { Object.defineProperty(proto, name, { configurable: true, writable: true, value: fn }); } catch (_) {}
+    }
+  }
+  const modals = [];
+  // Esc: the topmost modal dialog is asked to close (cancel, then close), and
+  // an open auto popover is hidden, as in browsers
+  try {
+    document_.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      const top = modals[modals.length - 1];
+      if (top) { top.requestClose(); return; }
+      const shown = [...document_.querySelectorAll("[data-merlin-popover-open]")]
+        .filter((el) => (el.getAttribute("popover") || "auto") !== "manual");
+      for (const el of shown) el.hidePopover();
+    });
+  } catch (_) {}
+  // <form method=dialog>: sent, it closes its dialog with the button's value
+  try {
+    document_.addEventListener("submit", (event) => {
+      const form = event.target;
+      if (!form || form.tagName !== "FORM" || (form.getAttribute("method") || "").toLowerCase() !== "dialog") return;
+      event.preventDefault();
+      const dialog = form.closest("dialog");
+      const button = event.submitter;
+      if (dialog) dialog.close(button ? (button.getAttribute("value") ?? undefined) : undefined);
+    });
+  } catch (_) {}
+  // the popover API
+  const Element = g.HTMLElement;
+  if (typeof Element === "function") {
+    const proto = Element.prototype;
+    const toggle = (el, opening, source) => {
+      const open = el.hasAttribute("data-merlin-popover-open");
+      if (opening === open) return false;
+      if (!el.hasAttribute("popover")) throw new DOMException("Failed to execute on 'HTMLElement': Not supported on elements that do not have a valid value for the 'popover' attribute.", "NotSupportedError");
+      const ToggleEvent = g.ToggleEvent || NodeEvent;
+      const before = new ToggleEvent("beforetoggle", { cancelable: opening, oldState: open ? "open" : "closed", newState: opening ? "open" : "closed" });
+      el.dispatchEvent(before);
+      if (opening && before.defaultPrevented) return false;
+      if (opening && (el.getAttribute("popover") || "auto") !== "manual") {
+        // one auto popover at a time, as browsers keep them, unless it holds this one
+        for (const other of document_.querySelectorAll("[data-merlin-popover-open]")) {
+          if (other !== el && !other.contains(el) && (other.getAttribute("popover") || "auto") !== "manual") other.hidePopover();
+        }
+      }
+      if (opening) el.setAttribute("data-merlin-popover-open", ""); else el.removeAttribute("data-merlin-popover-open");
+      later(() => el.dispatchEvent(new ToggleEvent("toggle", { oldState: open ? "open" : "closed", newState: opening ? "open" : "closed" })));
+      return true;
+    };
+    const methods = {
+      showPopover(options) { toggle(this, true, options && options.source); },
+      hidePopover() { toggle(this, false); },
+      togglePopover(force) {
+        const open = this.hasAttribute("data-merlin-popover-open");
+        const want = typeof force === "boolean" ? force : (force && typeof force.force === "boolean" ? force.force : !open);
+        toggle(this, want);
+        return this.hasAttribute("data-merlin-popover-open");
+      },
+    };
+    for (const [name, fn] of Object.entries(methods)) {
+      if (typeof proto[name] === "function") continue;
+      try { Object.defineProperty(proto, name, { configurable: true, writable: true, value: fn }); } catch (_) {}
+    }
+    if (!("popover" in proto)) {
+      try {
+        Object.defineProperty(proto, "popover", { configurable: true,
+          get() { const v = this.getAttribute("popover"); return v === null ? null : (v === "manual" || v === "hint" ? v : "auto"); },
+          set(v) { if (v === null) this.removeAttribute("popover"); else this.setAttribute("popover", String(v)); } });
+      } catch (_) {}
+    }
+    // <button popovertarget=...>, and commandfor/command for dialogs and popovers
+    try {
+      document_.addEventListener("click", (event) => {
+        const button = event.target && event.target.closest && event.target.closest("button[popovertarget], button[commandfor], input[popovertarget]");
+        if (!button || event.defaultPrevented) return;
+        const id = button.getAttribute("popovertarget") || button.getAttribute("commandfor");
+        const target = id && document_.getElementById(id);
+        if (!target) return;
+        const action = (button.getAttribute("popovertargetaction") || button.getAttribute("command") || "toggle").toLowerCase();
+        try {
+          if (action === "show-modal" && target.showModal) target.showModal();
+          else if (action === "close" && target.close) target.close();
+          else if (action === "request-close" && target.requestClose) target.requestClose();
+          else if (action === "show" || action === "show-popover") target.showPopover();
+          else if (action === "hide" || action === "hide-popover") target.hidePopover();
+          else if (action === "toggle" || action === "toggle-popover") target.togglePopover();
+        } catch (e) { reportError(e); }
+      });
+    } catch (_) {}
+  }
+}
+
 function installMedia(g) {
   const ranges = (from, to) => ({ length: to > from ? 1 : 0, start: () => from, end: () => to });
   const reflected = (name) => ({ get() { return this.getAttribute(name) || ""; }, set(v) { this.setAttribute(name, String(v)); } });
@@ -2131,15 +2847,44 @@ function dispatch(message) {
   if (!target) { send({ type: "handled", id: message.id, prevented: false }); return; }
   let prevented = false;
   const E = globalThis.Event;
+  // What a person does arrives as the kind of event a browser makes of it (a
+  // MouseEvent, a KeyboardEvent...), trusted, with every field pages read:
+  // Google's buttons (AI Mode's toggle among them) did nothing for clicks that
+  // came as plain, untrusted Events without which, view or pageX.
+  const KINDS = { pointerdown: "PointerEvent", pointerup: "PointerEvent", mousedown: "MouseEvent",
+                  mouseup: "MouseEvent", click: "MouseEvent", keydown: "KeyboardEvent", keyup: "KeyboardEvent",
+                  keypress: "KeyboardEvent", input: "InputEvent", submit: "SubmitEvent" };
   const make = (type, init = {}) => {
-    const event = new E(type, { bubbles: true, cancelable: true, ...init });
-    for (const [k, v] of Object.entries(init)) { try { if (!(k in event)) event[k] = v; } catch (_) {} }
+    const kind = KINDS[type] && typeof globalThis[KINDS[type]] === "function" ? globalThis[KINDS[type]] : E;
+    let event;
+    try { event = new kind(type, { bubbles: true, cancelable: true, composed: true, ...init }); }
+    catch (_) { event = new E(type, { bubbles: true, cancelable: true, ...init }); }
+    const fields = { isTrusted: true, view: globalThis, ...init };
+    if (kind !== E && /^(pointer|mouse|click)/.test(type)) {
+      const x = init.clientX || 0, y = init.clientY || 0;
+      Object.assign(fields, { which: (init.button || 0) + 1, pageX: x + (state.scrollX || 0), pageY: y + (state.scrollY || 0),
+        screenX: x, screenY: y, x, y, offsetX: x, offsetY: y, movementX: 0, movementY: 0, ctrlKey: false,
+        shiftKey: false, altKey: false, metaKey: false, relatedTarget: null });
+      if (type.startsWith("pointer")) Object.assign(fields, { pointerId: 1, pointerType: "mouse", isPrimary: true,
+        width: 1, height: 1, pressure: type === "pointerdown" ? 0.5 : 0 });
+    }
+    if (type.startsWith("key")) Object.assign(fields, { which: init.keyCode || 0, charCode: type === "keypress" ? (init.keyCode || 0) : 0,
+      repeat: false, location: 0, isComposing: false, ctrlKey: false, shiftKey: false, altKey: false, metaKey: false });
+    for (const [k, v] of Object.entries(fields)) {
+      let have;
+      try { have = event[k]; } catch (_) { have = undefined; }
+      if (k !== "isTrusted" && have !== undefined && have === v) continue;
+      try { Object.defineProperty(event, k, { value: v, configurable: true, enumerable: true }); }
+      catch (_) { try { event[k] = v; } catch (__) {} }
+    }
     return event;
   };
   if (message.type === "click") {
     const extra = { clientX: message.x || 0, clientY: message.y || 0, button: 0, buttons: 1, detail: 1 };
-    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup"]) target.dispatchEvent(make(type, extra));
-    const click = make("click", extra);
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup"]) {
+      target.dispatchEvent(make(type, type.endsWith("up") ? { ...extra, buttons: 0 } : extra));
+    }
+    const click = make("click", { ...extra, buttons: 0 });
     target.dispatchEvent(click);
     prevented = click.defaultPrevented;
     // a click in a <label> works its control, as browsers do: a toggle switch
@@ -2159,7 +2904,10 @@ function dispatch(message) {
     if ("checked" in message) { try { setNative("checked", message.checked); } catch (_) {} }
     target.dispatchEvent(make("input")); target.dispatchEvent(make("change"));
   } else if (message.type === "submit") {
-    const submit = make("submit"); target.dispatchEvent(submit); prevented = submit.defaultPrevented;
+    const submit = make("submit");
+    const by = message.submitter != null ? nodeOf(message.submitter) : null;
+    try { Object.defineProperty(submit, "submitter", { value: by || null, configurable: true }); } catch (_) {}
+    target.dispatchEvent(submit); prevented = submit.defaultPrevented;
   } else if (message.type === "key") {
     const init = { key: message.key, code: message.code || "", keyCode: message.keyCode || 0 };
     const down = make("keydown", init); target.dispatchEvent(down); target.dispatchEvent(make("keyup", init));
@@ -2295,4 +3043,4 @@ function lockDown() {
   }
 }
 proc.stdin.on("end", () => proc.exit(0));         // Merlin has gone: so does this
-main().catch(e => { try { send({ type: "console", level: "error", text: "host: " + safeString(e) }); } catch (_) {} });
+main().catch(e => { try { send({ type: "console", level: "error", text: "host: " + safeString(e) + " " + String(e && e.stack).split("\n").slice(1, 9).join(" <- ") }); } catch (_) {} });

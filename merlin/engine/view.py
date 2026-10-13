@@ -1441,6 +1441,9 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
         # images are (they had never been fetched, nor drawn)
         for element, style in (self._styles or {}).items():
             layers = style.get("background-image")
+            masks = style.get("mask-image")
+            if isinstance(masks, list) and masks:
+                layers = (layers if isinstance(layers, list) else []) + masks   # a mask's picture too
             if not layers or style.get("display") == "none" or not isinstance(layers, list):
                 continue
             for layer in layers:
@@ -2652,6 +2655,11 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
                 if level <= 0 and self._covered(QRectF(rect.left(), top, rect.width(), height),
                                                 level):
                     shown = False
+            elif shown and self._covered(QRectF(rect.left(), top, rect.width(), height),
+                                         self._control_level(element), pinned_only=True):
+                # a field in the page under a fixed box drawn over it (a
+                # dialog, Google's consent): hidden, as the box hides it
+                shown = False
             widget.setVisible(shown)
 
     def _covers(self) -> list:
@@ -2665,7 +2673,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             return []
         if getattr(display, "_covers", None) is not None:
             return display._covers
-        found, layers, pinned = [], [], 0
+        found, layers, pinned, levels = [], [], 0, {}
         for item in display.items:
             if item is None:
                 continue
@@ -2678,18 +2686,37 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
                 layers.append(item[1])
             elif kind == "layer_pop" and layers:
                 layers.pop()
-            elif layers and not pinned:
-                # a box's background and border come as a group
-                for sub in (item[1] if kind == "group" else [item]):
+            elif kind == "control" and not pinned:
+                levels[item[2]] = layers[-1] if layers else 0
+            elif layers:
+                # a box's background and border come as a group. A fixed box's
+                # (a dialog over the page, Google's consent) is where it is in
+                # the window, whatever the scroll
+                subs = item[1] if kind == "group" else item[6] if kind == "masked" else [item]
+                for sub in subs:
+                    if not isinstance(sub, tuple):
+                        continue
                     if sub and sub[0] in ("rect", "rrect", "gradient", "image"):
-                        found.append((sub[1], layers[-1]))
+                        found.append((sub[1], layers[-1], bool(pinned)))
         display._covers = found
+        display._control_levels = levels
         return found
 
-    def _covered(self, window_rect: QRectF, level: int) -> bool:
+    def _control_level(self, element) -> int:
+        """The stacking level a field in the page is drawn at."""
+        self._covers()
+        return getattr(self._display, "_control_levels", {}).get(element, 0) if self._display is not None else 0
+
+    def _covered(self, window_rect: QRectF, level: int, pinned_only: bool = False) -> bool:
+        """Whether the page draws over this part of the window: boxes in the
+        page at level or above for a field in a fixed box; for a field in the
+        page, fixed boxes above its level."""
         centre = window_rect.center()
-        for rect, z in self._covers():
-            if z >= level and rect.translated(0, -self._scroll).contains(centre):
+        for rect, z, pinned in self._covers():
+            if pinned_only:
+                if pinned and z > level and rect.contains(centre):
+                    return True
+            elif not pinned and z >= level and rect.translated(0, -self._scroll).contains(centre):
                 return True
         return False
 
@@ -2728,6 +2755,15 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             widget = QPlainTextEdit(self)
             widget.setPlainText(str(value))
             widget.setFrameShape(QPlainTextEdit.Shape.NoFrame)
+            # a one-line textarea (Google's search box) shows no scroll bar:
+            # Qt's had shown its arrows there as a little spinner. The text
+            # scrolls with the caret, as in a browser's field
+            widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            style = self._styles.get(element, {}) if self._styles else {}
+            if element.attrs.get("rows", "").strip() == "1" or style.get("overflow-y") in ("hidden", "clip") \
+                    or style.get("overflow") in ("hidden", "clip"):
+                widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                widget.document().setDocumentMargin(1)
             widget.setPlaceholderText(element.attrs.get("placeholder", ""))
             if "readonly" in element.attrs:
                 widget.setReadOnly(True)
@@ -2986,7 +3022,10 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             return
         if self._script is not None and not scripts_asked and form.attrs.get("data-mjs"):
             # the page's submit handlers first: most frameworks send forms themselves
-            self._script_event({"type": "submit", "target": int(form.attrs["data-mjs"])},
+            message = {"type": "submit", "target": int(form.attrs["data-mjs"])}
+            if submitter is not None and submitter.attrs.get("data-mjs"):
+                message["submitter"] = int(submitter.attrs["data-mjs"])     # event.submitter
+            self._script_event(message,
                                lambda prevented: None if prevented else
                                self._submit(element, submitter, scripts_asked=True))
             return

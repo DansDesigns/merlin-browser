@@ -670,13 +670,8 @@ def main(argv: list[str] | None = None) -> int:
         window.new_tab(url)
         opened = True
     if not opened and settings.get("restore_session"):
-        restored = settings.get("last_session", [])[:20]
-        for position, url in enumerate(restored):
-            # the first tab loads now, the rest wait until they are selected
-            window.new_tab(url, background=True, defer=position > 0)
-            opened = True
-        if opened:
-            window.tabs.setCurrentIndex(0)
+        opened = window.restore_session_tabs(settings.get("last_session", []),
+                                             settings.get("last_session_active", 0))
     if not opened:
         window.new_tab(settings.get("home_page"))
 

@@ -3104,6 +3104,8 @@ class BrowserWindow(QMainWindow):
         from PyQt6 import sip
 
         urls = []
+        current = self.tabs.currentIndex()
+        active = 0
         for i in range(self.tabs.count()):
             view = self.tabs.widget(i)
             # a page already released, at shutdown, has nothing left to read
@@ -3114,8 +3116,13 @@ class BrowserWindow(QMainWindow):
             if not url or url == "about:blank":
                 url = view.property("pending_url") or ""
             if url and url != "about:blank":
+                if i <= current:
+                    # the tab that was open (or, if that was a new tab page,
+                    # the one before it) is the one Merlin opens on next time
+                    active = len(urls)
                 urls.append(url)
         self.settings.set("last_session", urls, save=False)
+        self.settings.set("last_session_active", active, save=False)
         if self.settings.get("remember_window_geometry"):
             geometry = self.geometry()
             self.settings.set(
@@ -3125,6 +3132,24 @@ class BrowserWindow(QMainWindow):
             )
             self.settings.set("window_maximized", self.isMaximized(), save=False)
         self.settings.save()
+
+    def restore_session_tabs(self, urls, active=0) -> bool:
+        """The last session's tabs, opened again: the one that was open when
+        Merlin closed is selected and loads now, the rest wait until they are
+        selected. Gives back whether any were opened."""
+        urls = [u for u in (urls or []) if isinstance(u, str) and u][:20]
+        if not urls:
+            return False
+        try:
+            active = int(active or 0)
+        except (TypeError, ValueError):
+            active = 0
+        active = active if 0 <= active < len(urls) else 0
+        first = self.tabs.count()
+        for position, url in enumerate(urls):
+            self.new_tab(url, background=True, defer=position != active)
+        self.tabs.setCurrentIndex(first + active)
+        return True
 
     def restore_geometry(self) -> None:
         if not self.settings.get("remember_window_geometry"):
