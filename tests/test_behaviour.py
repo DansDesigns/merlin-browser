@@ -1225,6 +1225,48 @@ def test_mouse_back_forward(app) -> None:
     window.close()
 
 
+def test_back_forward_history_menus(app) -> None:
+    """Right-click on back or forward lists the tab's pages that way, the
+    nearest first, as Brave does; picking one goes straight there. Both engines."""
+    window, settings, _ = make_window(app, "t-nav-menu")
+    for engine in (False, True):
+        name = "Merlin Engine" if engine else "Chromium"
+        settings.set("merlin_engine", engine, save=False)
+        view = window.new_tab(page("one"))
+        wait(app, 2.0)
+        for title in ("two", "three", "four"):
+            window.navigate(page(title))
+            wait(app, 2.0)
+        back_button = window.toolbar.widgetForAction(window.act_back)
+        check(f"the back button opens a menu on right-click ({name})",
+              back_button.contextMenuPolicy() == Qt.ContextMenuPolicy.CustomContextMenu)
+        menu = window.show_nav_history_menu(back_button, False, QPoint(4, 4))
+        titles = [a.text() for a in menu.actions() if not a.isSeparator()] if menu else []
+        check(f"back's menu lists the pages behind, the nearest first ({name})",
+              titles[:3] == ["three", "two", "one"] and "Show full history" in titles, str(titles))
+        menu.close()
+        # straight back two pages
+        first = next(a for a in menu.actions() if a.text() == "two")
+        first.trigger()
+        wait(app, 2.0)
+        check(f"picking a page in it goes straight there ({name})",
+              "two" in view.url().toString(), view.url().toString())
+        forward = window.show_nav_history_menu(window.toolbar.widgetForAction(window.act_forward), True)
+        ahead = [a.text() for a in forward.actions() if not a.isSeparator()] if forward else []
+        check(f"forward's menu then lists the pages ahead, the nearest first ({name})",
+              ahead[:2] == ["three", "four"], str(ahead))
+        forward.close()
+        ahead_action = next(a for a in forward.actions() if a.text() == "four")
+        ahead_action.trigger()
+        wait(app, 2.0)
+        check(f"and picking one there goes forward to it ({name})",
+              "four" in view.url().toString(), view.url().toString())
+        check(f"with nothing ahead, forward has no menu ({name})",
+              window.show_nav_history_menu(None, True) is None)
+    settings.set("merlin_engine", False, save=False)
+    window.close()
+
+
 def test_merlin_engine_passwords(app) -> None:
     """A login in a Merlin Engine tab: offered, saved, updated, and filled."""
     from PyQt6.QtTest import QTest
@@ -2465,7 +2507,7 @@ def main() -> int:
                  test_stream_lookup_is_quick, test_stream_failure_is_not_a_box,
                  test_stalled_stream_recovers, test_youtube_cookies_for_ytdlp,
                  test_merlin_engine_tabs, test_merlin_engine_typing,
-                 test_mouse_back_forward, test_merlin_engine_passwords,
+                 test_mouse_back_forward, test_back_forward_history_menus, test_merlin_engine_passwords,
                  test_ftp_opens_in_merlin_engine, test_merlin_engine_tab_icon,
                  test_script_sites_and_debug_save, test_source_and_save_page_as,
                  test_certificate_padlock, test_interface_too_large,

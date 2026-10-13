@@ -214,6 +214,41 @@ def _registrable(host: str) -> str:
     return ".".join(parts[-2:])
 
 
+def origin_of(url: QUrl) -> str:
+    """scheme://host[:port], the port only when it is not the scheme's own."""
+    port = url.port()
+    own = {"http": 80, "https": 443}.get(url.scheme().lower())
+    return f"{url.scheme().lower()}://{url.host().lower()}" + (f":{port}" if port not in (-1, own) else "")
+
+
+def fetch_site(initiator: QUrl, target: QUrl) -> str:
+    """Sec-Fetch-Site for a request from a page at initiator to target."""
+    if origin_of(initiator) == origin_of(target):
+        return "same-origin"
+    near = (initiator.scheme().lower() == target.scheme().lower()
+            and _registrable(initiator.host()) == _registrable(target.host()))
+    return "same-site" if near else "cross-site"
+
+
+def initiated_headers(headers: dict, initiator: QUrl, target: QUrl) -> None:
+    """A navigation the page started (a link, a form, its script), sent as
+    Chrome sends it: the page as its referrer (only its origin when the target
+    is another site's; none from https to http) and Sec-Fetch-Site saying how
+    near the target is. Merlin had sent each as typed into the address bar,
+    with no referrer: a form posted so can be taken for a forgery (YouTube's
+    consent page, whose choice of History on was not kept)."""
+    site = fetch_site(initiator, target)
+    if site == "same-origin":
+        referrer = initiator.adjusted(QUrl.UrlFormattingOption.RemoveFragment
+                                      | QUrl.UrlFormattingOption.RemoveUserInfo).toString()
+    else:
+        downgrade = initiator.scheme().lower() == "https" and target.scheme().lower() == "http"
+        referrer = "" if downgrade else origin_of(initiator) + "/"
+    headers["Sec-Fetch-Site"] = site
+    if referrer:
+        headers["Referer"] = referrer
+
+
 _TAG = re.compile(r"""<(?:[^>"']|"[^"]*"|'[^']*')*>""")
 _STYLE_TEXT = re.compile(r"<style\b[^>]*>(.*?)</style>", re.S | re.I)
 _OWN_TEXT = ("option", "textarea", "select", "script", "style", "title", "noscript")
@@ -701,12 +736,34 @@ def _svg_image(data: bytes) -> QImage:
     return picture
 
 
+class _HistoryItem:
+    """One page in a tab's history, asked as the window asks a Chromium tab's
+    history items: its address and title, for the back and forward menus."""
+
+    def __init__(self, url: QUrl, title: str, index: int):
+        self._url, self._title, self._index = QUrl(url), title, index
+
+    def url(self) -> QUrl:
+        return QUrl(self._url)
+
+    def title(self) -> str:
+        return self._title
+
+    def isValid(self) -> bool:                                # noqa: N802
+        return True
+
+    def index(self) -> int:
+        return self._index
+
+
 class _History:
     """Back and forward, as the browser window asks Chromium's history."""
 
     def __init__(self):
         self.entries: list[QUrl] = []
+        self.titles: list[str] = []
         self.index = -1
+        self.go = None                    # the view's, to go to an entry
 
     def canGoBack(self) -> bool:                              # noqa: N802
         return self.index > 0
@@ -716,8 +773,31 @@ class _History:
 
     def push(self, url: QUrl) -> None:
         del self.entries[self.index + 1:]
+        del self.titles[self.index + 1:]
         self.entries.append(url)
+        self.titles.append("")
         self.index = len(self.entries) - 1
+
+    def set_title(self, title: str) -> None:
+        """The page now shown is called this."""
+        if 0 <= self.index < len(self.titles) and title:
+            self.titles[self.index] = title
+
+    def _item(self, number: int) -> _HistoryItem:
+        title = self.titles[number] if number < len(self.titles) else ""
+        return _HistoryItem(self.entries[number], title, number)
+
+    def backItems(self, most: int) -> list:                   # noqa: N802
+        """The pages before this one, the oldest first, as Chromium's."""
+        return [self._item(n) for n in range(max(0, self.index - most), max(0, self.index))]
+
+    def forwardItems(self, most: int) -> list:                # noqa: N802
+        """The pages after this one, the nearest first, as Chromium's."""
+        return [self._item(n) for n in range(self.index + 1, min(len(self.entries), self.index + 1 + most))]
+
+    def goToItem(self, item) -> None:                         # noqa: N802
+        if self.go is not None and isinstance(item, _HistoryItem):
+            self.go(item.index())
 
 
 class _Page(QObject):
@@ -837,6 +917,8 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
         self._hovered = ""
         self._load_number = 0
         self._history = _History()
+        self._history.go = self.go_to_history
+        self.titleChanged.connect(self._history.set_title)
         self._pending_fragment = ""
         self.scrollbar = QScrollBar(Qt.Orientation.Vertical, self)
         self.scrollbar.valueChanged.connect(self._scrolled)
@@ -1006,6 +1088,12 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             self._history.index += 1
             self._navigate(self._history.entries[self._history.index], record=False)
 
+    def go_to_history(self, number: int) -> None:
+        """Back or forward to entry number of this tab's history."""
+        if 0 <= number < len(self._history.entries) and number != self._history.index:
+            self._history.index = number
+            self._navigate(self._history.entries[number], record=False)
+
     def reload(self) -> None:
         if self._url.isValid() and self._url.scheme() not in ("", "about"):
             self._navigate(self._url, record=False)
@@ -1047,7 +1135,9 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
         return jar
 
     def _navigate(self, url: QUrl, record: bool, body: bytes | None = None,
-                  content_type: str = "") -> None:
+                  content_type: str = "", initiator: QUrl | None = None) -> None:
+        """Load url. initiator is the page that started it (a link, a form,
+        its script), None when the person did (the address bar, a reload)."""
         scheme = url.scheme().lower()
         if scheme != "merlin":
             self._stop_script()
@@ -1108,8 +1198,13 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
         if framed:
             headers = self._frame_headers(headers, url)
         ancestors = self._ancestor_origins() if framed else []
+        page_started = (initiator is not None and initiator.isValid()
+                        and initiator.scheme().lower() in ("http", "https"))
+        if page_started and not framed and scheme in ("http", "https"):
+            initiated_headers(headers, initiator, url)
         if body is not None and self._url.isValid():
-            headers["Origin"] = self._url.adjusted(
+            # the origin of the page that sent the form
+            headers["Origin"] = origin_of(initiator) if page_started else self._url.adjusted(
                 QUrl.UrlFormattingOption.RemovePath | QUrl.UrlFormattingOption.RemoveQuery
                 | QUrl.UrlFormattingOption.RemoveFragment).toString()
         host_name = url.host()
@@ -2235,7 +2330,8 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             self._url = QUrl(message.get("url", ""))
             self.urlChanged.emit(self.url())
         elif kind == "navigate":
-            QTimer.singleShot(0, lambda u=message.get("url", ""): self.setUrl(QUrl(u)))
+            QTimer.singleShot(0, lambda u=message.get("url", ""), at=QUrl(self._url):
+                              self._navigate(QUrl(u), record=True, initiator=at))
         elif kind == "reload":
             QTimer.singleShot(0, self.reload)
         elif kind == "history":
@@ -2281,6 +2377,31 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
                 if k in ("User-Agent", "Accept-Language", "DNT", "Sec-GPC")}
         headers = dict(base, **(message.get("headers") or {}))
         headers.setdefault("Referer", self._url.toString())
+        # the page's origin, as a browser sends it with anything but a plain
+        # GET to its own site: Google's servers had answered a POST without
+        # it with a failure (YouTube's consent page's browserinfo)
+        method = str(message.get("method", "GET")).upper()
+        target = QUrl(url)
+        if (self._url.scheme().lower() in ("http", "https") and target.scheme().lower() in ("http", "https")
+                and not any(k.lower() == "origin" for k in headers)
+                and (method not in ("GET", "HEAD")
+                     or (origin_of(target) != origin_of(self._url)
+                         and str(headers.get("sec-fetch-dest", "")).lower() not in ("script", "style", "image")))):
+            headers["Origin"] = origin_of(self._url)
+        # and said to be the page's own request, as Chrome says: Chrome-like
+        # connections had otherwise gone as a page the person opened (Accept
+        # text/html, Sec-Fetch-Mode navigate, Sec-Fetch-Site none), which a
+        # fetch or XMLHttpRequest never is
+        named = {k.lower(): v for k, v in headers.items()}
+        dest = str(named.get("sec-fetch-dest", "empty")).lower()
+        if "sec-fetch-dest" not in named:
+            headers["Sec-Fetch-Dest"] = dest
+        if "sec-fetch-mode" not in named:
+            headers["Sec-Fetch-Mode"] = "cors" if dest == "empty" else "no-cors"
+        if "sec-fetch-site" not in named and self._url.scheme().lower() in ("http", "https"):
+            headers["Sec-Fetch-Site"] = fetch_site(self._url, target)
+        if "accept" not in named:
+            headers["Accept"] = "*/*"
 
         # a script or module, kept from an earlier visit while its server allows
         cache = None
@@ -3367,9 +3488,10 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
         if where["target"] == "_blank" and where["method"] == "GET" and new_tab is not None:
             new_tab(where["url"])
         elif where["method"] == "POST":
-            self._navigate(url, record=True, body=where["body"], content_type=where["type"])
+            self._navigate(url, record=True, body=where["body"], content_type=where["type"],
+                           initiator=QUrl(self._url))
         else:
-            self.setUrl(url)
+            self._navigate(url, record=True, initiator=QUrl(self._url))
 
     def _login_in(self, form, values: dict):
         """(username, password) when the form holds a filled-in password field."""
@@ -4308,4 +4430,4 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             return
         if not href or href.lower().startswith("javascript:"):
             return
-        self.setUrl(self._url.resolved(QUrl(href)))
+        self._navigate(self._url.resolved(QUrl(href)), record=True, initiator=QUrl(self._url))

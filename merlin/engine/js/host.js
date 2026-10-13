@@ -149,12 +149,23 @@ function fromBase64(text) {
 }
 
 const NativeResponse = globalThis.Response, NativeHeaders = globalThis.Headers, NativeRequest = globalThis.Request;
+const NativeFetch = globalThis.fetch;
+// A Request's own address, method and headers, as a browser's fetch reads
+// them: a page may give one its own url or method (YouTube's check for
+// blockers that rewrite requests does, on a data: request made to look like a
+// player request), which fetch never sees. Merlin had sent that disguise to
+// YouTube, an empty POST, and failed the check.
+const requestOwn = (name) => Object.getOwnPropertyDescriptor(NativeRequest.prototype, name).get;
+const requestUrl = requestOwn("url"), requestMethod = requestOwn("method"), requestHeaders = requestOwn("headers");
 async function merlinFetch(input, init = {}) {
+  init = init || {};
   const request = input instanceof NativeRequest ? input : null;
-  const url = new URL(request ? request.url : String(input), location.href).href;
-  const method = (init.method || (request && request.method) || "GET").toUpperCase();
+  const url = new URL(request ? requestUrl.call(request) : String(input), location.href).href;
+  const method = (init.method || (request && requestMethod.call(request)) || "GET").toUpperCase();
+  // a data: address is answered here, as a browser does, without the network
+  if (url.startsWith("data:")) return NativeFetch(url, { method });
   const headers = {};
-  new NativeHeaders(init.headers || (request && request.headers) || {}).forEach((v, k) => { headers[k] = v; });
+  new NativeHeaders(init.headers || (request && requestHeaders.call(request)) || {}).forEach((v, k) => { headers[k] = v; });
   let body = init.body ?? null;
   if (body === null && request && method !== "GET" && method !== "HEAD") body = await request.arrayBuffer();
   let bodyB64 = null;
@@ -399,6 +410,26 @@ function install(html) {
     scrollingElement: () => document_.documentElement, fullscreenElement: () => null,
     pointerLockElement: () => null, pictureInPictureElement: () => null,
   };
+  // its collections (document.forms and the rest), which linkedom lacks:
+  // each the matching elements as they are now, by index and by name
+  const collection = (selector) => () => {
+    const found = [...document_.querySelectorAll(selector)];
+    const named = (name) => found.find(e => e.getAttribute("id") === name || e.getAttribute("name") === name) || null;
+    const list = Object.assign(Object.create(null), found);
+    Object.defineProperties(list, {
+      length: { value: found.length }, item: { value: (i) => found[i] ?? null }, namedItem: { value: named },
+      [Symbol.iterator]: { value: () => found[Symbol.iterator]() },
+      [Symbol.toStringTag]: { value: "HTMLCollection" },
+    });
+    for (const e of found) for (const key of [e.getAttribute("name"), e.getAttribute("id")])
+      if (key && !(key in list) && !/^\d+$/.test(key)) Object.defineProperty(list, key, { value: e });
+    return list;
+  };
+  Object.assign(documentProperties, {
+    forms: collection("form"), images: collection("img"), links: collection("a[href], area[href]"),
+    scripts: collection("script"), anchors: collection("a[name]"), embeds: collection("embed"),
+    plugins: collection("embed"), applets: collection("applet"),
+  });
   for (const [name, getter] of Object.entries(documentProperties)) {
     let present;
     try { present = document_[name]; } catch (_) { present = undefined; }
@@ -451,6 +482,14 @@ function install(html) {
   g.localStorage = new MerlinStorage(state.storage, true);
   g.sessionStorage = new MerlinStorage({}, false);
   g.fetch = merlinFetch;
+  // a Request's address taken against the page's, as a browser's is: the
+  // runtime's wants it whole, and YouTube's new Request("/youtubei/v1/search")
+  // had thrown, every search failing as if offline
+  define("Request", class Request extends NativeRequest {
+    constructor(input, init) {
+      super(input instanceof NativeRequest ? input : new URL(String(input), location.href).href, init);
+    }
+  });
   g.matchMedia = (query) => ({
     media: String(query), get matches() { return evaluateMedia(query); }, onchange: null,
     addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent() { return false; },

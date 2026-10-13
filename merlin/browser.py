@@ -451,6 +451,14 @@ class BrowserWindow(QMainWindow):
         for action in (self.act_back, self.act_forward, self.act_reload,
                        self.act_home):
             self.toolbar.addAction(action)
+        # right-click on back or forward: the tab's pages that way, as Brave
+        # lists them, to go straight to any
+        for action, forward in ((self.act_back, False), (self.act_forward, True)):
+            button = self.toolbar.widgetForAction(action)
+            if button is not None:
+                button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                button.customContextMenuRequested.connect(
+                    lambda point, b=button, f=forward: self.show_nav_history_menu(b, f, point))
 
         # single actions live left of the address bar, menus to the right
         self.btn_bookmark = QToolButton(self)
@@ -1456,6 +1464,58 @@ class BrowserWindow(QMainWindow):
             view.reload()
         elif what == "reload_bypass":
             view.page().triggerAction(QWebEnginePage.WebAction.ReloadAndBypassCache)
+
+    NAV_MENU_PAGES = 15
+
+    def nav_history_entries(self, forward: bool) -> list:
+        """The current tab's pages behind it (or ahead of it), the nearest
+        first: Chromium's history items, or Merlin Engine's alike."""
+        view = self.current()
+        if view is None:
+            return []
+        try:
+            history = view.page().history()
+            listing = getattr(history, "forwardItems" if forward else "backItems", None)
+            items = list(listing(self.NAV_MENU_PAGES)) if listing is not None else []
+        except Exception:                                  # noqa: BLE001
+            return []
+        if not forward:
+            items.reverse()                  # backItems come oldest first
+        return [item for item in items if item.isValid()]
+
+    def show_nav_history_menu(self, button, forward: bool, point=None) -> QMenu | None:
+        """The menu of pages under the back or forward button; picking one
+        goes straight there, as Brave's does."""
+        view = self.current()
+        items = self.nav_history_entries(forward)
+        if view is None or not items:
+            return None
+        dark = bool(self.settings.get("dark_ui"))
+        menu = QMenu(self)
+        menu.setObjectName("navHistoryMenu")
+        menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        for item in items:
+            url = item.url().toString()
+            title = item.title() or ("New tab" if url in START_URLS or not url else url)
+            if len(title) > 60:
+                title = title[:57] + "..."
+            action = menu.addAction(icons.themed_icon("history", dark, 16), title.replace("&", "&&"))
+            action.setToolTip(url)
+            action.triggered.connect(
+                lambda _c=False, v=view, it=item: self._go_to_history_item(v, it))
+        menu.addSeparator()
+        menu.addAction("Show full history", self.show_history)
+        if button is not None:
+            at = button.mapToGlobal(point) if point is not None else \
+                button.mapToGlobal(button.rect().bottomLeft())
+            menu.popup(at)
+        return menu
+
+    def _go_to_history_item(self, view, item) -> None:
+        try:
+            view.page().history().goToItem(item)
+        except Exception:                                  # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------ navigation
     def navigate(self, text: str) -> None:

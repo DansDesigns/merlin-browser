@@ -5,6 +5,36 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.34
+  - Right-click the back or forward button for the pages that way in the
+    tab, the nearest first, as Brave lists them; pick one to go straight
+    there, or "Show full history". In both Chromium and Merlin Engine tabs.
+  Merlin Engine:
+  - YouTube's searches show their results. YouTube asks for them with
+    new Request("/youtubei/v1/search"), an address relative to the page,
+    which the script runtime refused (it wants whole addresses); YouTube took
+    the failure for a lost connection and showed "Connect to the Internet".
+    A Request's address is now taken against the page's, as in a browser.
+  - Requests a page's scripts make go as Chrome sends them: as the page's own
+    request (Sec-Fetch-Mode cors, Sec-Fetch-Dest empty, Sec-Fetch-Site saying
+    how near the server is, Accept */*), where they had gone as a page the
+    person opened; and with the page's origin on anything but a plain GET
+    to its own site. Google's server had answered YouTube's consent page's
+    request without it with a failure.
+  - A link, form or script that leaves the page sends the page as referrer
+    and Sec-Fetch-Site as Chrome does, where every navigation had gone as if
+    typed into the address bar, with no referrer. YouTube's consent page
+    sends its "YouTube History: On" choice as such a form; sent as typed, it
+    could be taken for a forgery and the choice not kept.
+  - fetch() reads a Request's own address and method, not ones a page gives
+    it afterwards, and answers data: addresses itself. YouTube's check for
+    ad blockers that rewrite requests disguises one so; Merlin had sent the
+    disguise to YouTube as an empty request, and failed the check.
+  - el.style = "color: red" sets an element's style, as in a browser. It had
+    thrown, stopping part of YouTube's page being built.
+  - document.forms, images, links, scripts, anchors and embeds are there,
+    by index and by name.
+
 1.8.33
   Merlin Engine: far less CPU on pages whose scripts keep changing them, as
   YouTube's do. On YouTube's home page with a part of it changing ten times a

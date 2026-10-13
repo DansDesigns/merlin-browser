@@ -15881,6 +15881,12 @@ var Element2 = class extends ParentNode {
   get style() {
     return this[STYLE] || (this[STYLE] = new CSSStyleDeclaration(this));
   }
+  // el.style = "color: red" sets its style attribute, as a browser's does
+  // (PutForwards=cssText): Polymer sets it so from a style="" attribute, and
+  // had thrown on YouTube without a setter
+  set style(value) {
+    this.setAttribute("style", value == null ? "" : String(value));
+  }
   get tabIndex() {
     return numericAttribute.get(this, "tabindex") || -1;
   }

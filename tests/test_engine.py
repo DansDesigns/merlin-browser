@@ -5241,6 +5241,153 @@ setInterval(() => {
     wait(app, 0.3)
 
 
+def test_requests_as_a_browser_makes_them(app) -> None:
+    """Requests a page makes, made as a browser makes them: a Request's
+    address taken against the page's (YouTube's searches had failed as if
+    offline), a Request's own address and method rather than ones the page
+    gave it (YouTube's check for blockers), the page's origin sent with a
+    POST, and a form the page sends carrying it as referrer; and el.style =
+    "..." and document.forms, which YouTube's and Google's scripts use."""
+    from PyQt6.QtTest import QTest
+
+    from merlin.engine import MerlinView
+    from merlin.engine.script import LocalStorage
+    from merlin.engine.view import initiated_headers
+
+    sent = {}
+    cross = {}
+    initiated_headers(cross, QUrl("https://a.example.com/page?x#y"), QUrl("https://other.org/z"))
+    same_site = {}
+    initiated_headers(same_site, QUrl("https://consent.youtube.com/d?x=1#f"), QUrl("https://www.youtube.com/"))
+    down = {}
+    initiated_headers(down, QUrl("https://a.example.com/p"), QUrl("http://a.example.com/q"))
+    same = {}
+    initiated_headers(same, QUrl("https://consent.youtube.com/d?x=1#f"), QUrl("https://consent.youtube.com/save"))
+    check("a page's navigation to another site sends only its origin as referrer",
+          cross == {"Sec-Fetch-Site": "cross-site", "Referer": "https://a.example.com/"}, str(cross))
+    check("one within its site says same-site; one within its origin, the whole address",
+          same_site.get("Sec-Fetch-Site") == "same-site"
+          and same == {"Sec-Fetch-Site": "same-origin", "Referer": "https://consent.youtube.com/d?x=1"},
+          f"{same_site} {same}")
+    check("and from https to http, no referrer", "Referer" not in down, str(down))
+
+    runtime = _node_for_tests()
+    if not runtime:
+        print("  skip  requests as a browser makes them: Node.js is not here")
+        return
+    folder = tempfile.mkdtemp(prefix="merlin-requests-")
+    open(os.path.join(folder, "page.html"), "w").write("""<!DOCTYPE html><html><body>
+<form id=f name=consent method=post action=/save style="margin:0"><input type=hidden name=set_ytc value=false>
+<button id=send style="width:120px;height:30px">Confirm</button></form><p id=log>waiting</p>
+<script>
+const out = []; const say = (k, v) => out.push(k + '=' + v);
+const report = () => { document.getElementById('log').textContent = out.join(' ') + ' done=1'; };
+(async () => {
+  try {
+    const r = await fetch(new Request('/api?q=ufo', { method: 'POST', body: 'hello' }));
+    say('relative', r.status + ':' + (await r.text()));
+  } catch (e) { say('relative', 'threw ' + e.message); }
+  // a data: request dressed as a POST elsewhere: fetch reads its own address
+  const q = new Request('data:application/json;base64,' + btoa('{"a":1}'));
+  Object.defineProperty(q, 'url', { get: () => location.origin + '/player' });
+  Object.defineProperty(q, 'method', { get: () => 'POST' });
+  try { say('data', (await (await fetch(q)).json()).a); } catch (e) { say('data', 'threw ' + e.message); }
+  const d = document.createElement('div');
+  try { d.style = 'color: red; width: 5px'; say('style', d.getAttribute('style').replace(/ /g, '') + ':' + d.style.width); }
+  catch (e) { say('style', 'threw'); }
+  say('forms', document.forms.length + ':' + [...document.forms].length + ':' + (document.forms.consent === document.getElementById('f'))
+      + ':' + (document.forms.namedItem('consent') === document.forms[0]));
+  document.querySelector('input[name=set_ytc]').value = 'true';
+  report();
+})();
+</script></body></html>""")
+    open(os.path.join(folder, "after.html"), "w").write("<title>after</title><p>saved</p>")
+
+    class Recorder(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            sent[self.path.split("?")[0]] = (dict(self.headers), body)
+            if self.path.startswith("/api"):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(b"got " + body)
+            else:
+                self.send_response(303)
+                self.send_header("Location", "/after.html")
+                self.end_headers()
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Recorder)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    origin = f"http://127.0.0.1:{server.server_address[1]}"
+
+    class Host:
+        settings = {}
+
+        def javascript_allowed(self, site):
+            return True
+
+        def node_for_scripts(self):
+            return runtime
+
+        def script_cache_dir(self):
+            return os.path.join(folder, "cache")
+
+        def local_storage(self):
+            return LocalStorage(None)
+
+    view = MerlinView()
+    view._host = Host()
+    view.resize(800, 600)
+    view.show()
+
+    def log():
+        found = next((x for x in view._document.root.elements() if x.id == "log"), None) if view._document else None
+        return " ".join(found.text().split()) if found is not None else ""
+
+    def until(test, seconds):
+        end = time.time() + seconds
+        while time.time() < end and not test():
+            app.processEvents()
+            time.sleep(0.01)
+        return test()
+
+    try:
+        view.setUrl(QUrl(origin + "/page.html"))
+        until(lambda: "done=1" in log(), 10)
+        text = log()
+        check("new Request('/relative') is taken against the page's address",
+              "relative=200:got hello" in text, text)
+        api = {k.lower(): v for k, v in sent.get("/api", ({}, b""))[0].items()}
+        check("and its POST carries the page's origin",
+              api.get("origin") == origin, str(api))
+        check("and goes as the page's own request, not as a page opened (it had said navigate, document, none)",
+              api.get("sec-fetch-mode") == "cors" and api.get("sec-fetch-dest") == "empty"
+              and api.get("sec-fetch-site") == "same-origin" and "sec-fetch-user" not in api
+              and "upgrade-insecure-requests" not in api and api.get("accept") == "*/*", str(api))
+        check("fetch reads a Request's own address and method, not ones the page gave it",
+              "data=1" in text and "/player" not in sent, text)
+        check("el.style = '...' sets its style", "style=color:red;width:5px:5px" in text, text)
+        check("document.forms lists the forms, by index, by name, iterable", "forms=1:1:true:true" in text, text)
+        QTest.mouseClick(view, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(60, 22))
+        until(lambda: "/save" in sent and view.title() == "after", 10)
+        headers, body = sent.get("/save", ({}, b""))
+        headers = {k.lower(): v for k, v in headers.items()}
+        check("a form the page sends carries it as referrer, its origin and same-origin",
+              headers.get("referer") == origin + "/page.html" and headers.get("origin") == origin
+              and headers.get("sec-fetch-site") == "same-origin", str(headers))
+        check("with the value its script set", b"set_ytc=true" in body, str(body))
+    finally:
+        view.shutdown()
+        server.shutdown()
+
+
 def main() -> int:
     app = QApplication(sys.argv[:1])
     for test in (test_no_chromium, test_without_html_parser, test_parsing, test_cascade, test_layout,
@@ -5344,6 +5491,8 @@ def main() -> int:
     test_border_box_heights_and_centring(app)
     print("test_scripts_changes_sent_lightly")
     test_scripts_changes_sent_lightly(app)
+    print("test_requests_as_a_browser_makes_them")
+    test_requests_as_a_browser_makes_them(app)
     if FAILED:
         print(f"\n{len(FAILED)} FAILED: " + "; ".join(FAILED))
         return 1
