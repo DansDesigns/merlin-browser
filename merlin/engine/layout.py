@@ -29,6 +29,13 @@ _FLOAT, _ABSOLUTE = object(), object()
 _BOX = object()                          # an inline-block, or an inline <svg>
 
 INLINE_BOXES = ("inline-block", "inline-flex", "inline-grid", "inline-table")
+MEDIA_TAGS = ("video", "audio")
+
+
+def media_key(element) -> str:
+    """What a video is known by across layouts: its script number, which
+    stays when the page's scripts change it, or itself."""
+    return element.attrs.get("data-mjs") or f"id:{id(element)}"
 
 BLOCK = {"block", "list-item", "table", "table-row", "table-row-group",
          "table-header-group", "table-footer-group", "flex", "grid", "table-caption",
@@ -313,10 +320,13 @@ def _object_fit(style: dict):
 class Layout:
     def __init__(self, document, styles: dict, width: float, zoom: float = 1.0,
                  images: dict | None = None, viewport_height: float = 768.0,
-                 live_controls: bool = False, font_aliases: dict | None = None):
+                 live_controls: bool = False, font_aliases: dict | None = None,
+                 media: dict | None = None):
         # In a view, form fields are real widgets: layout draws their boxes,
         # leaves their text to the widget, and says where each one is.
         self.live_controls = live_controls
+        # a video's own size, once its player knows it: media_key -> (w, h)
+        self.media = media or {}
         self.viewport_height = viewport_height
         self._floats: list = []           # floats in the current formatting context
         self._absolute: list = [[]]       # waiting for their containing block
@@ -424,7 +434,7 @@ class Layout:
                     z = 0
                 fixed.link_z.extend([z] * len(self.out.links))
                 for piece_item in self.out.items:
-                    if piece_item is not None and piece_item[0] in ("control", "frame"):
+                    if piece_item is not None and piece_item[0] in ("control", "frame", "media"):
                         fixed.control_z[piece_item[2]] = z
             self.out = saved
             self.out.fixed = fixed
@@ -537,6 +547,16 @@ class Layout:
         if element.tag == "iframe" and width_value is None:
             # a frame's own size, unless given: 300 by 150, as in every browser
             width_value = 300.0 * z + (horizontal_extra if style.get("box-sizing") == "border-box" else 0.0)
+        if element.tag in MEDIA_TAGS and width_value is None:
+            # a video's own width once known, 300 until then; given a height
+            # only, as wide as its proportions make it
+            natural = self._media_natural(element)
+            given_h = self._length(style.get("height"), 0.0, vertical=True)
+            if natural and given_h:
+                width_value = given_h * natural[0] / natural[1]
+            else:
+                width_value = (natural[0] * z if natural else 300.0 * z)
+            width_value += horizontal_extra if style.get("box-sizing") == "border-box" else 0.0
         if style.get("box-sizing") == "border-box":
             # widths given for the border box hold its padding and border: a
             # 200px box of border-box had come out 250 wide with its padding,
@@ -605,6 +625,19 @@ class Layout:
         if element.tag == "iframe" and fixed_height is None:
             fixed_height = 150.0 * self.zoom + (
                 padding[0] + padding[2] + border[0] + border[2] if style.get("box-sizing") == "border-box" else 0.0)
+        if element.tag in MEDIA_TAGS and fixed_height is None:
+            # in proportion to its width once its picture is known (width:
+            # 100%, height: auto, as most sites size videos); 150 until then,
+            # as browsers have it; an audio player's bar 54
+            natural = self._media_natural(element)
+            if element.tag == "audio":
+                fixed_height = 54.0 * self.zoom
+            elif natural:
+                fixed_height = content_width * natural[1] / natural[0]
+            else:
+                fixed_height = 150.0 * self.zoom
+            if style.get("box-sizing") == "border-box":
+                fixed_height += padding[0] + padding[2] + border[0] + border[2]
         if style.get("box-sizing") == "border-box":
             # heights given for the border box hold its padding and border, as
             # widths do: Google's 40px Sign in button had grown to 60
@@ -721,9 +754,11 @@ class Layout:
         elif element.tag == "svg":
             inner_height, first_baseline = self._svg_block(element, style, content_x,
                                                            content_y, content_width)
-        elif element.tag == "iframe":
+        elif element.tag == "iframe" or element.tag in MEDIA_TAGS:
             # what is inside an <iframe> is another page, shown in a frame of
-            # its own (view.py); the text written inside it is not shown
+            # its own (view.py); the text written inside it is not shown. Nor
+            # is a <video>'s: its <source>s and the words for browsers without
+            # video
             inner_height, first_baseline = 0.0, None
         # a form field is a field whatever its display: Google's search box is a
         # textarea with display: flex, laid out as a flex box with no field in it
@@ -784,6 +819,10 @@ class Layout:
         if element.tag == "iframe" and not self._measuring:
             # the frame's place: its page is drawn there, by a view of its own
             self.out.items.append(("frame", QRectF(box_x + border[3] + padding[3], box_y + border[0] + padding[0],
+                                                   content_width, inner_height), element))
+        if element.tag in MEDIA_TAGS and not self._measuring:
+            # a video's place: its player is a widget there (view.py)
+            self.out.items.append(("media", QRectF(box_x + border[3] + padding[3], box_y + border[0] + padding[0],
                                                    content_width, inner_height), element))
         if element.tag == "img" and not self._measuring:
             content_box = QRectF(box_x + border[3] + padding[3], box_y + border[0] + padding[0],
@@ -1287,7 +1326,7 @@ class Layout:
             self.out.links[index] = (matrix.mapRect(rect), href)
         for index in range(items_from, len(self.out.items)):
             item = self.out.items[index]
-            if item is not None and item[0] in ("button", "control", "frame"):
+            if item is not None and item[0] in ("button", "control", "frame", "media"):
                 self.out.items[index] = (item[0], matrix.mapRect(item[1])) + tuple(item[2:])
         for panel in self.out.scrollers[scrollers_from:]:
             panel["area"] = matrix.mapRect(panel["area"])
@@ -1310,6 +1349,16 @@ class Layout:
             # Measured by contents, it had none: Ponder's logo, height: 26px
             # in a flex row, came out 0 wide and was not seen
             return self._image_size(element, style, 100000.0)[0]
+        if element.tag in MEDIA_TAGS:
+            # a video's width is its own (its picture's, or 300), not its contents'
+            given = _px(style.get("width"), 0.0, auto=None)
+            if given is not None and not _is_percentage(style.get("width")):
+                return given * self.zoom
+            natural = self._media_natural(element)
+            given_h = _px(style.get("height"), 0.0, auto=None)
+            if natural and given_h is not None and not _is_percentage(style.get("height")):
+                return given_h * natural[0] / natural[1] * self.zoom
+            return (natural[0] if natural else 300.0) * self.zoom
         if element.tag == "iframe":
             # a frame's width is its own (300 unless given), not its contents'
             given = _px(style.get("width"), 0.0, auto=None)
@@ -1641,8 +1690,22 @@ class Layout:
         return cursor - y, first_baseline
 
     # ------------------------------------------------------------ images
-    def _image_size(self, element, style: dict, available: float):
-        """Width and height for an image: given, natural, or kept in proportion."""
+    def _media_natural(self, element):
+        """A video's own width and height, once its player knows them;
+        from width and height attributes before that, as browsers take them."""
+        found = self.media.get(media_key(element))
+        if found and found[0] > 0 and found[1] > 0:
+            return found
+        return None
+
+    def _image_size(self, element, style: dict, available: float, available_height: float | None = None):
+        """Width and height for an image: given, natural, or kept in proportion.
+
+        A percentage height is of available_height, when there is a definite
+        one to be of (an absolutely placed picture, of its containing block):
+        Square's product pictures fill a square, width and height 100%, and
+        object-fit: cover crops them to it; their height had been left to
+        their proportions, wide ones short and tall ones running long."""
         picture = self.images.get(element.attrs.get("src", "").strip())
         if picture is False:
             # blocked, or failed: with a size given it keeps its box, as in
@@ -1661,8 +1724,11 @@ class Layout:
                     picture.height() / picture.devicePixelRatio())
                    if picture is not None else None)
         w = _px(style.get("width"), available, auto=None)
-        h = _px(style.get("height"), 0.0, auto=None) \
-            if not isinstance(style.get("height"), tuple) else None
+        height_value = style.get("height")
+        if isinstance(height_value, tuple):
+            h = _px(height_value, available_height, auto=None) if available_height else None
+        else:
+            h = _px(height_value, 0.0, auto=None)
         if w is None and h is None and natural:
             w, h = float(natural[0]), float(natural[1])
         elif w is not None and h is None:
@@ -1671,6 +1737,13 @@ class Layout:
             w = h * natural[0] / natural[1] if natural and natural[1] else 0.0
         if w is None or h is None:
             return 0.0, 0.0                     # not loaded yet, and no size given
+        # a percentage is of page pixels, zoom already in them: only the rest
+        # are zoomed, or at 125% a picture of width 100% was 25% too wide
+        zoom = self.zoom or 1.0
+        if isinstance(style.get("width"), tuple):
+            w /= zoom
+        if isinstance(height_value, tuple):
+            h /= zoom
         w, h = w * self.zoom, h * self.zoom
         limit = _px(style.get("max-width"), available, auto=None)
         if limit is not None:
@@ -1877,7 +1950,7 @@ class Layout:
             if kind == "clip_push" and len(item) > 3:
                 item[3]["area"] = item[3]["area"].translated(dx, dy)
             if kind in ("rect", "image", "rrect", "rborder", "svg", "control", "button",
-                        "gradient", "bgimage", "shadow", "dashed", "clip_push", "frame"):
+                        "gradient", "bgimage", "shadow", "dashed", "clip_push", "frame", "media"):
                 return (kind, item[1].translated(dx, dy)) + tuple(item[2:])
             if kind == "text":
                 return (kind, item[1] + dx, item[2] + dy) + item[3:]
@@ -2787,7 +2860,7 @@ class Layout:
         bottom = self._length(style.get("bottom"), block.height(), vertical=True)
         fixed = self._length(style.get("width"), block.width())
         if element.tag == "img":
-            image_w, image_h = self._image_size(element, style, block.width())
+            image_w, image_h = self._image_size(element, style, block.width(), block.height())
             border_width = image_w
         elif fixed is not None:
             border_width = fixed + edges_x
@@ -3032,7 +3105,7 @@ def _bottom_edge(item) -> float:
         return 0.0
     if item[0] == "group":
         return max((_bottom_edge(sub) for sub in item[1]), default=0.0)
-    if item[0] in ("rect", "image", "rrect", "rborder", "svg", "gradient", "dashed", "frame"):
+    if item[0] in ("rect", "image", "rrect", "rborder", "svg", "gradient", "dashed", "frame", "media"):
         return item[1].bottom()
     if item[0] == "text":
         return item[2] + QFontMetricsF(item[4]).descent()
@@ -3044,7 +3117,7 @@ def _right_edge(item) -> float:
         return 0.0
     if item[0] == "group":
         return max((_right_edge(sub) for sub in item[1]), default=0.0)
-    if item[0] in ("rect", "image", "rrect", "rborder", "svg", "gradient", "bgimage", "dashed", "frame"):
+    if item[0] in ("rect", "image", "rrect", "rborder", "svg", "gradient", "bgimage", "dashed", "frame", "media"):
         return item[1].right()
     if item[0] == "extent":
         return item[1]

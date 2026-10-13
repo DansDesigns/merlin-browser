@@ -5,6 +5,75 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.31
+  Merlin Engine:
+  - Video and audio play in the page. <video> and <audio> have a box of
+    their own, sized as browsers size them (300 by 150 with nothing given,
+    the video's own shape once its first picture is in, audio's controls 300
+    by 54), and play in it with Merlin's controls: play and pause, the time,
+    a bar to seek along, sound on and off, and full screen (double-click, or
+    the button; Space, the arrows, J and L, M and Esc there). A paused video
+    shows its first picture; one set to play by itself does so muted, as
+    browsers allow. MP4 (H.264 and AAC), WebM (VP9 and Opus) and HLS streams
+    play, through Qt Multimedia's FFmpeg; the picture is drawn into the page,
+    so the site's own buttons and menus over it still work.
+  - Pages' scripts have HTMLMediaElement: play() (and its promise), pause(),
+    load(), currentTime, duration, volume, muted, loop, playbackRate,
+    videoWidth and videoHeight, readyState, canPlayType() and the rest, with
+    their events (loadedmetadata, play, playing, timeupdate, pause, ended,
+    volumechange, error...), and new Audio(). Players carry on as a page's
+    scripts rebuild what is around them.
+  - YouTube plays in Merlin Engine. YouTube's own player streams through
+    Media Source Extensions, which Merlin Engine does not have yet, so
+    yt-dlp finds the video's stream, with Node.js for YouTube's challenge
+    and the person's YouTube cookies, and Merlin plays it where YouTube's
+    player is, its picture shown while it is found. A watch, shorts or live
+    page plays at once; an embedded video when its play button is pressed.
+    Other sites that stream their video the same way (Vimeo, Twitch and the
+    many yt-dlp knows) play when a person presses play, never because a
+    page's script asked. yt-dlp and Node.js are fetched only after asking.
+    Sites that need DRM (Netflix, Prime Video) cannot play here.
+
+1.8.30
+  Merlin Engine:
+  - Hover menus stay open as the pointer moves down to an option. What the
+    pointer is over is now what is drawn on top, as in browsers (its
+    z-index, positioned boxes over the rest, later over earlier), where the
+    smallest box there had been taken: the open menu lost to the heading and
+    the search bar beneath it, and shut. And the pointer is tested against
+    the page only once it is laid out as styled (AlterniTech's pages are laid
+    out in the background), and what is hovered is kept when the page's
+    scripts change it.
+  - Pictures fill boxes they are sized to by percentages: an absolutely
+    placed picture's height is of its box's height, as its width is of its
+    width. Square's product pictures, width and height 100% in a square
+    and cropped with object-fit: cover, had kept their own proportions, wide
+    ones short and tall ones running long. (And a picture sized by a
+    percentage is no longer zoomed twice.)
+  - Convert to it!'s "Click to select a file" opens the file dialog. An
+    event listener's this is the element it listens on, as in browsers; it
+    had been the element clicked, and Preact, which keeps an element's
+    handlers on the element, found none. An event keeps its target after it
+    has been dispatched.
+  - GitHub: its modules, which import each other in a circle, run. Each had
+    waited for the other to be ready first, for ever ("took over 20s"), and
+    much of the page was never built; modules are now linked as a whole, as
+    Node links them, cycles and all. In workers too.
+  - GitHub scrolls about three times as smoothly, and the rest of Merlin is
+    not held up while its tab is open:
+    * parts of the page out of view are passed over when drawing, where all
+      2,000 of GitHub's positioned boxes had been gone through every frame;
+      transforms that do not move are worked out once, not each frame
+    * pictures shown smaller than they are are scaled once and kept, not
+      scaled again on every frame
+    * only the part of the window that changes is drawn again (an
+      animation's corner), not all of it
+    * styling a page is about three times quicker on large sites: a rule
+      that needs an ancestor (.list > *) is passed over at once where there
+      is none, as browsers' ancestor filters do, and each element's rules are
+      gone through once for it and its ::before and ::after together.
+      GitHub's took 3.8 seconds, and now takes about 1.
+
 1.8.29
   Installed web apps leave the browser's tabs alone. A web app's window
   saved its one page as the browser's last session when it closed, so the

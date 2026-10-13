@@ -78,6 +78,10 @@ _POPS = ("clip_pop", "opacity_pop", "sticky_pop", "fixed_pop", "xform_pop", "scr
 # by the view before each paint.
 NOW = 0.0
 
+# Where, among the pictures paint is given, the page's videos are: media_key
+# -> (controller, place). Each draws its own picture and controls.
+MEDIA_KEY = "\x00media"
+
 
 def _transform(spec: dict):
     """An element's transform at NOW, as a QTransform, and the opacity it is
@@ -88,6 +92,9 @@ def _transform(spec: dict):
     from . import animate
     from .layout import _origin
 
+    if not spec.get("animations") and "_drawn" in spec:
+        # a transform that does not move is worked out once, not every frame
+        return spec["_drawn"]
     ops, opacity = spec["ops"], None
     box = spec["box"]
     for animation in spec.get("animations") or []:
@@ -106,7 +113,10 @@ def _transform(spec: dict):
         m = animate.with_perspective(m, (seen["depth"], pb[0] + px, pb[1] + py))
     if spec.get("backface") and animate.facing_away(m):
         opacity = 0.0                       # turned away, with its back hidden
-    return QTransform(*animate.projected(m)), opacity
+    drawn = (QTransform(*animate.projected(m)), opacity)
+    if not spec.get("animations"):
+        spec["_drawn"] = drawn
+    return drawn
 
 
 def _layer_ends(display: DisplayList) -> dict:
@@ -269,8 +279,99 @@ def _paint_range(painter, display, start, end, shown, images, ends, scroll, acti
         _paint_layer(painter, display, layer, shown, images, ends, scroll)
 
 
+_MOVES = ("xform_push", "fixed_push", "sticky_push", "scroll_push")
+
+
+def _item_bounds(item):
+    """Where an item draws, in page terms; None if it cannot be told."""
+    kind = item[0]
+    if kind == "group":
+        found = None
+        for sub in item[1]:
+            if sub is None:
+                continue
+            rect = _item_bounds(sub)
+            if rect is None:
+                return None
+            found = rect if found is None else found.united(rect)
+        return found if found is not None else QRectF()     # an empty group draws nothing
+    if kind == "text":
+        _k, x, baseline, text, font = item[:5]
+        metrics = QFontMetricsF(font)
+        return QRectF(x, baseline - metrics.ascent(), metrics.horizontalAdvance(text) + 2,
+                      metrics.ascent() + metrics.descent())
+    if kind == "shadow":
+        box, shadows = item[1], item[2]
+        reach = max((abs(dx) + abs(dy) + blur * 2 + abs(spread) for dx, dy, blur, spread, _c in shadows),
+                    default=0.0)
+        return box.adjusted(-reach, -reach, reach, reach)
+    if kind in _PUSHES or kind in _POPS or kind in ("layer_push", "layer_pop", "fixed_slot", "extent"):
+        return QRectF()
+    rect = item[1] if len(item) > 1 else None
+    return rect if isinstance(rect, QRectF) else None
+
+
+def _layer_bounds(display, start: int, close: int):
+    """All a layer draws, in page terms, worked out once for a display list;
+    None if anything in it moves (a transform, a pinned or sticky box, a
+    panel that scrolls), or cannot be told."""
+    cache = getattr(display, "_bounds_cache", None)
+    if cache is None or getattr(display, "_bounds_count", -1) != len(display.items):
+        cache = {}
+        display._bounds_cache, display._bounds_count = cache, len(display.items)
+    if start in cache:
+        return cache[start]
+    from PyQt6.QtGui import QTransform
+
+    found = QRectF()
+    # transforms that do not move are followed, what they hold mapped through
+    # them; anything that moves (an animation, a pinned or sticky box, a
+    # panel's scroll) and the layer is always gone through
+    stack = [QTransform()]
+    for item in display.items[start + 1:close]:
+        if item is None:
+            continue
+        kind = item[0]
+        if kind == "xform_push":
+            spec = item[1]
+            if spec.get("animations") or spec.get("perspective"):
+                found = None
+                break
+            try:
+                transform, _opacity = _transform(spec)
+            except Exception:                              # noqa: BLE001
+                found = None
+                break
+            stack.append(transform * stack[-1])
+            continue
+        if kind == "xform_pop":
+            if len(stack) > 1:
+                stack.pop()
+            continue
+        if kind in _MOVES:
+            found = None
+            break
+        rect = _item_bounds(item)
+        if rect is None:
+            found = None
+            break
+        if not rect.isEmpty():
+            if len(stack) > 1:
+                rect = stack[-1].mapRect(rect)
+            found = rect if found.isEmpty() else found.united(rect)
+    cache[start] = found
+    return found
+
+
 def _paint_layer(painter, display, layer, shown, images, ends, scroll) -> None:
     _z, start, close, in_force, context, _order = layer
+    bounds = _layer_bounds(display, start, close)
+    if bounds is not None and not any(item[0] in _MOVES for item in in_force):
+        # nothing of it in view: not gone through at all. GitHub has 2,000
+        # positioned boxes, each a layer, every one had been gone through,
+        # its transform worked out, on every frame of a scroll
+        if bounds.isEmpty() or not bounds.intersects(shown[-1]):
+            return
     painter.save()
     here = list(shown)
     for item in in_force:
@@ -316,6 +417,16 @@ def _draw(painter, item, visible: QRectF, images) -> None:
             painter.setBrush(_colour(rgba))
             painter.drawRoundedRect(rect, radius, radius)
             painter.restore()
+    elif kind == "media":
+        rect, element = item[1], item[2]
+        if rect.intersects(visible):
+            from .layout import media_key
+
+            found = (images.get(MEDIA_KEY) or {}).get(media_key(element))
+            if found is not None:
+                found[0].draw(painter, rect)
+            elif element.tag != "audio":
+                painter.fillRect(rect, QColor(0, 0, 0))
     elif kind == "shadow":
         box, shadows, radius, inset = item[1], item[2], item[3], item[4]
         reach = max((abs(dx) + abs(dy) + blur + abs(spread) for dx, dy, blur, spread, _c in shadows),
@@ -382,7 +493,7 @@ def _draw(painter, item, visible: QRectF, images) -> None:
             if isinstance(picture, SvgPicture):
                 picture.render(painter, target)        # sharp at any size
             else:
-                painter.drawImage(target, picture)
+                painter.drawImage(target, _scaled(picture, target, painter))
             if clipped:
                 painter.restore()
             return
@@ -395,6 +506,47 @@ def _draw(painter, item, visible: QRectF, images) -> None:
             painter.drawText(rect.adjusted(4, 2, -4, -2),
                              Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
                              | Qt.TextFlag.TextWordWrap, alt)
+
+
+# Pictures scaled to the size they are drawn at, kept: a large picture shown
+# small (GitHub's) had been scaled down again on every frame of a scroll.
+# Bounded by their pixels, the least recently drawn going first.
+_SCALED: "dict" = {}
+_SCALED_PIXELS = [0]
+_SCALED_LIMIT = 48_000_000          # about 190 MB at 4 bytes a pixel
+
+
+def _scaled(picture, target: QRectF, painter):
+    from collections import OrderedDict
+
+    global _SCALED
+    try:
+        ratio = painter.device().devicePixelRatioF() if painter.device() is not None else 1.0
+        transform = painter.worldTransform()
+        ratio *= max(abs(transform.m11()), abs(transform.m22())) or 1.0
+    except Exception:                                      # noqa: BLE001
+        ratio = 1.0
+    width, height = round(target.width() * ratio), round(target.height() * ratio)
+    if width <= 0 or height <= 0 or (abs(width - picture.width()) <= 1 and abs(height - picture.height()) <= 1):
+        return picture
+    if picture.width() * picture.height() < 64 * 64 or width * height > 16_000_000:
+        return picture                       # small ones are quick; huge ones not kept
+    if not isinstance(_SCALED, OrderedDict):
+        _SCALED = OrderedDict()
+    key = (picture.cacheKey(), width, height)
+    found = _SCALED.get(key)
+    if found is not None:
+        _SCALED.move_to_end(key)
+        return found
+    made = picture.scaled(width, height, Qt.AspectRatioMode.IgnoreAspectRatio,
+                          Qt.TransformationMode.SmoothTransformation)
+    made.setDevicePixelRatio(1.0)
+    _SCALED[key] = made
+    _SCALED_PIXELS[0] += width * height
+    while _SCALED_PIXELS[0] > _SCALED_LIMIT and len(_SCALED) > 1:
+        (_k, old) = _SCALED.popitem(last=False)
+        _SCALED_PIXELS[0] -= old.width() * old.height()
+    return made
 
 
 def _pattern(pen: QPen, style) -> None:

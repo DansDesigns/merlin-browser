@@ -569,13 +569,30 @@ INHERITED = {
 class Selector:
     """One complex selector, stored right to left for matching."""
 
-    __slots__ = ("parts", "specificity", "key", "matchable", "pseudo")
+    __slots__ = ("parts", "specificity", "key", "matchable", "pseudo", "needs")
 
     def __init__(self, parts, specificity, matchable=True):
         self.parts = parts                # [(compound, combinator-to-the-left)]
         self.pseudo = None                # "before" or "after" for a ::before or ::after rule
         self.specificity = specificity
         self.matchable = matchable
+        # the tags, ids and classes the element's ancestors must have, for the
+        # rule to match at all (.Stack > * needs a .Stack above): an element
+        # whose ancestors lack one is passed over without matching, as
+        # browsers' ancestor filters do. GitHub has 314 rules tried on every
+        # element, most of them so; its cascade took seconds
+        needs = set()
+        for index in range(len(parts) - 1):
+            if parts[index][1] not in (" ", ">"):
+                break                     # past a sibling, not an ancestor
+            above = parts[index + 1][0]
+            if above.get("id"):
+                needs.add(("id", above["id"]))
+            for name in above.get("classes") or ():
+                needs.add(("class", name))
+            if above.get("tag") and above["tag"] != "*":
+                needs.add(("tag", above["tag"]))
+        self.needs = frozenset(needs)
         compound = parts[0][0] if parts else {}
         if compound.get("id"):
             self.key = ("id", compound["id"])
@@ -1344,6 +1361,9 @@ th { text-align: center }
 td, th { padding: 1px }
 img { display: inline }
 iframe { display: inline-block; border: 2px inset #767676 }
+video, audio { display: inline-block }
+audio:not([controls]) { display: none }
+source, track { display: none }
 input, select, textarea, button { display: inline-block; font-size: 13.33px;
   font-family: sans-serif; color: #000000 }
 input, textarea, select { border: 1px solid #8f8f9d; padding: 2px 3px; background-color: #ffffff }
@@ -1412,15 +1432,23 @@ class Styler:
         # depend on the window's size, and are worked out again when it changes
         self.viewport_units = False
         author: dict = {}
+        several = set()                  # rules filed under more than one key
+        self._several = several
         for base, rules in self._sheets:
             for rule in rules:
                 if rule.media and not all(self._holds(q) for q in rule.media):
                     continue
-                for key in index_keys(rule.selector):
+                keys = index_keys(rule.selector)
+                if len(keys) > 1:
+                    several.add(id(rule))
+                for key in keys:
                     author.setdefault(key, []).append((rule, base))
         default: dict = {}
         for rule in _DEFAULT_RULES + (_QUIRKS_RULES if getattr(self.document, "quirks", False) else []):
-            for key in index_keys(rule.selector):
+            keys = index_keys(rule.selector)
+            if len(keys) > 1:
+                several.add(id(rule))
+            for key in keys:
                 default.setdefault(key, []).append((rule, 0))
         self._index = {"default": default, "author": author}
 
@@ -1452,52 +1480,105 @@ class Styler:
         if element is self.document.root:
             keys.append(("root", ""))
         seen = set()
+        several = self.__dict__.get("_several", ())
         for key in keys:
             for entry in index.get(key, ()):
                 # a rule filed under several keys (:where(.a, .b)) is tried once;
                 # the same rule from a sheet loaded twice is two entries, as the
-                # later copy takes the later place in the cascade
-                marker = (id(entry[0]), entry[1])
-                if marker not in seen:
+                # later copy takes the later place in the cascade. Only such
+                # rules are looked for twice: the rest are under one key
+                if id(entry[0]) in several:
+                    marker = (id(entry[0]), entry[1])
+                    if marker in seen:
+                        continue
                     seen.add(marker)
-                    yield entry
+                yield entry
+
+    def _ancestor_keys(self, element) -> frozenset:
+        """The tags, ids and classes of every element above this one."""
+        cache = self.__dict__.setdefault("_above", {})
+        # up to the nearest element already known (or the top), then down
+        path = []
+        node = element.parent
+        known = frozenset()
+        while isinstance(node, Element):
+            found = cache.get(id(node))
+            if found is not None and found[0] is node:
+                known = found[1]
+                break
+            path.append(node)
+            node = node.parent
+        for node in reversed(path):
+            # what is above node's children: what is above node, and node
+            own = {("tag", node.tag)}
+            if node.id:
+                own.add(("id", node.id))
+            own.update(("class", name) for name in node.classes)
+            known = known | own
+            cache[id(node)] = (node, known)
+        return known
 
     def compute(self) -> dict:
         """Computed style for every element: a dict of property to value."""
+        self._above = {}
         root_size = 16.0
         self._compute(self.document.root, None, root_size)
         return self.styles
 
     def _declared(self, element: Element, pseudo: str | None = None) -> list:
         """Every declaration for the element, weakest first, not yet expanded;
-        for its ::before or ::after when pseudo says which."""
-        found = []   # (layer, specificity, order, name, value)
+        for its ::before or ::after when pseudo says which.
+
+        The element's rules are gone through once for it and its ::before and
+        ::after together (they had been gone through three times), the
+        pseudo-elements' kept for when they are asked for, straight after."""
+        kept = self.__dict__.get("_pseudo_kept")
+        if pseudo is not None and kept is not None and kept[0] is element:
+            return kept[1].get(pseudo, [])
+        found = {None: [], "before": [], "after": []}   # (layer, specificity, order, name, value)
         # A sheet loaded more than once gives the same rules again, each in its
         # own place in the cascade; whether one matches is worked out once
         answers = {}
+        above = None
         for origin, layer_normal, layer_important in (("default", 0, 5), ("author", 1, 4)):
             for rule, base in self._candidates(self._index[origin], element):
-                if rule.selector.pseudo != pseudo:
+                selector = rule.selector
+                which = selector.pseudo
+                if which not in found or (which is not None and pseudo is not None and which != pseudo):
                     continue
+                if which is not None and pseudo is None and element.tag in self._NO_PSEUDO:
+                    continue
+                needs = selector.needs
+                if needs:
+                    if above is None:
+                        above = self._ancestor_keys(element)
+                    if not needs <= above:
+                        continue
                 answer = answers.get(id(rule))
                 if answer is None:
-                    answer = answers[id(rule)] = matches(rule.selector, element)
+                    answer = answers[id(rule)] = matches(selector, element)
                 if answer:
+                    bucket = found[which]
                     for name, value, important in rule.declarations:
-                        found.append((layer_important if important else layer_normal,
-                                      rule.selector.specificity, base + rule.order, name, value))
+                        bucket.append((layer_important if important else layer_normal,
+                                       selector.specificity, base + rule.order, name, value))
+
+        def ordered(items):
+            items.sort(key=lambda item: (item[0], item[1], item[2]))
+            # each with whether it is the default stylesheet's, which all: revert keeps
+            return [(name, value, layer in (0, 5)) for layer, _spec, _order, name, value in items]
+
         if pseudo is not None:
-            found.sort(key=lambda item: (item[0], item[1], item[2]))
-            return [(name, value, layer in (0, 5)) for layer, _spec, _order, name, value in found]
+            return ordered(found[pseudo])
+        self._pseudo_kept = (element, {"before": ordered(found["before"]), "after": ordered(found["after"])})
+        own = found[None]
         for name, value in presentational_hints(element):
-            found.append((1, (0, 0, 0), -1, name, value))
+            own.append((1, (0, 0, 0), -1, name, value))
         inline = element.attrs.get("style")
         if inline:
             for name, value, important in parse_declarations(inline):
-                found.append((4 if important else 2, (1, 0, 0), 10 ** 9, name, value))
-        found.sort(key=lambda item: (item[0], item[1], item[2]))
-        # each with whether it is the default stylesheet's, which all: revert keeps
-        return [(name, value, layer in (0, 5)) for layer, _spec, _order, name, value in found]
+                own.append((4 if important else 2, (1, 0, 0), 10 ** 9, name, value))
+        return ordered(own)
 
     def _compute(self, element: Element, parent: dict | None, root_size: float,
                  ordered: list | None = None) -> None:
@@ -2180,11 +2261,11 @@ def presentational_hints(element: Element) -> list:
     attrs = element.attrs
     tag = element.tag
     found = []
-    if tag in ("table", "td", "th", "img", "col", "hr", "iframe") and attrs.get("width"):
+    if tag in ("table", "td", "th", "img", "col", "hr", "iframe", "video") and attrs.get("width"):
         length = _html_length(attrs["width"])
         if length:
             found.append(("width", length))
-    if tag in ("td", "th", "img", "tr", "iframe") and attrs.get("height"):
+    if tag in ("td", "th", "img", "tr", "iframe", "video") and attrs.get("height"):
         length = _html_length(attrs["height"])
         if length:
             found.append(("height", length))

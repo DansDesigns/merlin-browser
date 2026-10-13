@@ -657,6 +657,7 @@ function install(html) {
   };
   installFrames(g, made);
   installWebExtras(g);
+  installMedia(g);
   installSelects();
   // form.submit() and requestSubmit(), which the DOM had as nothing at all:
   // search boxes that send their form from a script (Google's, Ponder's) did
@@ -1298,7 +1299,27 @@ function makeModule(source, url) {
     importModuleDynamically: (specifier) => moduleEvaluated(resolveSpecifier(specifier, url)),
   });
 }
+// A module, fetched and made, not yet linked: what the linker gives back.
+// Node links the whole graph itself, cycles and all; waiting here for each
+// import to be linked first had left modules that import each other (GitHub's,
+// in a circle) each waiting on the other, never run, and GitHub's parts never
+// built
+const linking = new Map();
 function moduleLinked(url) {
+  if (linking.has(url)) return linking.get(url);
+  const done = (async () => {
+    const made = await moduleMade(url);
+    if (made.status === "unlinked") {
+      await made.link((specifier, referrer) => moduleMade(resolveSpecifier(specifier, referrer.identifier)));
+    }
+    // being linked as part of another module's graph: until that is done
+    while (made.status === "linking") await new Promise((resolve) => setTimeout(resolve, 2));
+    return made;
+  })();
+  linking.set(url, done);
+  return done;
+}
+function moduleMade(url) {
   if (modules.has(url)) return modules.get(url);
   const made = (async () => {
     let source;
@@ -1314,9 +1335,7 @@ function moduleLinked(url) {
     } else {
       throw new TypeError(`Failed to fetch dynamically imported module: ${url}`);
     }
-    const made = makeModule(source, url);
-    await made.link((specifier, referrer) => moduleLinked(resolveSpecifier(specifier, referrer.identifier)));
-    return made;
+    return makeModule(source, url);
   })();
   modules.set(url, made);
   return made;
@@ -1334,7 +1353,8 @@ async function importModule(url) {
 async function inlineModule(code) {
   const url = `${state.url.split("#")[0]}#inline-module-${++inlineModules}`;
   const made = makeModule(code, url);
-  await made.link((specifier, referrer) => moduleLinked(resolveSpecifier(specifier, state.url)));
+  await made.link((specifier, referrer) => moduleMade(resolveSpecifier(specifier,
+    referrer === made ? state.url : referrer.identifier)));
   await made.evaluate();
   return made.namespace;
 }
@@ -1632,6 +1652,164 @@ function installSelects() {
 // What a browser has, and Deno had, that Node lacks: FileReader (Ponder reads
 // a chosen picture with it), and the events ErrorEvent, ProgressEvent and
 // PromiseRejectionEvent.
+// ------------------------------------------------------------------ <video> and <audio>
+// HTMLMediaElement: the page's videos are played by Merlin (mediaview.py), and
+// told here what they do. play() and the rest are messages to Merlin; their
+// state, and the events (play, timeupdate, ended...), come back in
+// media_event. Merlin has no Media Source Extensions yet: there is no
+// MediaSource, so players (hls.js, YouTube's) that look for one fall back to
+// giving the video a plain address, an HLS playlist too, which Merlin plays.
+const mediaState = new WeakMap();
+const mediaPlays = new WeakMap();
+function mediaOf(el) {
+  let found = mediaState.get(el);
+  if (!found) {
+    found = { paused: true, ended: false, currentTime: 0, duration: NaN, volume: 1, muted: el.hasAttribute("muted"),
+              videoWidth: 0, videoHeight: 0, readyState: 0, currentSrc: "", error: null, playbackRate: 1, seeking: false };
+    mediaState.set(el, found);
+  }
+  return found;
+}
+function mediaCanPlay(kind) {
+  kind = String(kind || "").trim().toLowerCase();
+  if (!kind) return "";
+  const base = kind.split(";")[0].trim();
+  const good = ["video/mp4", "video/webm", "video/ogg", "audio/mp4", "audio/mpeg", "audio/mp3", "audio/webm",
+    "audio/ogg", "audio/wav", "audio/wave", "audio/x-wav", "audio/flac", "audio/aac", "video/quicktime",
+    "application/vnd.apple.mpegurl", "application/x-mpegurl", "audio/mpegurl", "video/x-m4v", "audio/x-m4a", "audio/opus"];
+  if (!good.includes(base)) return "";
+  const at = kind.indexOf("codecs");
+  if (at < 0) return "maybe";
+  const known = ["avc1", "avc3", "mp4a", "vp8", "vp9", "vp09", "opus", "vorbis", "theora", "flac", "mp3", "hev1", "hvc1", "av01"];
+  const names = kind.slice(at + 6).split(",").map((c) => c.replace(/[=\s"']/g, "")).filter(Boolean);
+  return names.length && names.every((n) => known.some((k) => n.startsWith(k))) ? "probably" : "";
+}
+function mediaTell(el, action, value) {
+  const src = el.getAttribute("src") || (el.querySelector && el.querySelector("source[src]")?.getAttribute("src")) || "";
+  let absolute = src;
+  try { absolute = src ? new URL(src, state.url).href : ""; } catch (_) {}
+  send({ type: "media", target: idOf(el), action, value: value === undefined ? null : value,
+         tag: el.tagName.toLowerCase(), src: absolute });
+}
+function mediaAnswered(message) {
+  const el = nodeOf(message.target);
+  if (!el) return;
+  const now = mediaOf(el);
+  const given = message.state || {};
+  for (const key of ["paused", "ended", "currentTime", "volume", "muted", "videoWidth", "videoHeight", "readyState",
+                     "currentSrc", "playbackRate"]) {
+    if (key in given && given[key] !== undefined && given[key] !== null) now[key] = given[key];
+  }
+  now.duration = given.duration === null || given.duration === undefined ? now.duration : given.duration;
+  if (given.error) now.error = Object.assign(new (globalThis.MediaError || Object)(), { code: 4, message: String(given.error) });
+  const name = message.event;
+  if (name === "statechange") return;
+  const waiting = mediaPlays.get(el) || [];
+  if (name === "playing" || name === "play") {
+    mediaPlays.set(el, []);
+    for (const [resolve] of waiting) resolve();
+  } else if (name === "error") {
+    mediaPlays.set(el, []);
+    for (const [, reject] of waiting) reject(new DOMException("The element has no supported sources.", "NotSupportedError"));
+  } else if (name === "pause" && !now.ended) {
+    mediaPlays.set(el, []);
+    for (const [, reject] of waiting) reject(new DOMException("The play() request was interrupted by a call to pause().", "AbortError"));
+  }
+  try { el.dispatchEvent(new globalThis.Event(name)); } catch (e) { reportError(e); }
+}
+function installMedia(g) {
+  const ranges = (from, to) => ({ length: to > from ? 1 : 0, start: () => from, end: () => to });
+  const reflected = (name) => ({ get() { return this.getAttribute(name) || ""; }, set(v) { this.setAttribute(name, String(v)); } });
+  const flag = (name, action) => ({
+    get() { return this.hasAttribute(name); },
+    set(v) { if (v) this.setAttribute(name, ""); else this.removeAttribute(name); if (action) mediaTell(this, action, !!v); },
+  });
+  class MediaError { static MEDIA_ERR_ABORTED = 1; static MEDIA_ERR_NETWORK = 2; static MEDIA_ERR_DECODE = 3;
+                     static MEDIA_ERR_SRC_NOT_SUPPORTED = 4; constructor() { this.code = 4; this.message = ""; } }
+  g.MediaError = MediaError;
+  const methods = {
+    play() {
+      const media = mediaOf(this);
+      media.paused = false; media.ended = false;
+      mediaTell(this, "play");
+      return new Promise((resolve, reject) => {
+        const list = mediaPlays.get(this) || [];
+        list.push([resolve, reject]);
+        mediaPlays.set(this, list);
+      });
+    },
+    pause() { const media = mediaOf(this); media.paused = true; mediaTell(this, "pause"); },
+    load() { const media = mediaOf(this); media.readyState = 0; mediaTell(this, "load"); },
+    canPlayType(kind) { return mediaCanPlay(kind); },
+    fastSeek(seconds) { this.currentTime = seconds; },
+    addTextTrack() { return { mode: "disabled", cues: [], activeCues: [], addCue() {}, removeCue() {}, addEventListener() {}, removeEventListener() {} }; },
+    requestFullscreen() { mediaTell(this, "fullscreen", true); return Promise.resolve(); },
+    requestPictureInPicture() { return Promise.reject(new DOMException("Picture-in-picture is not available.", "NotSupportedError")); },
+    setMediaKeys() { return Promise.reject(new DOMException("Protected media is not available in Merlin Engine.", "NotSupportedError")); },
+    captureStream() { throw new DOMException("captureStream is not available.", "NotSupportedError"); },
+    getVideoPlaybackQuality() { return { totalVideoFrames: 0, droppedVideoFrames: 0, corruptedVideoFrames: 0, creationTime: 0 }; },
+  };
+  const properties = {
+    paused: { get() { return mediaOf(this).paused; } },
+    ended: { get() { return mediaOf(this).ended; } },
+    seeking: { get() { return false; } },
+    currentTime: { get() { return mediaOf(this).currentTime; },
+                   set(v) { const t = Number(v) || 0; mediaOf(this).currentTime = t; mediaTell(this, "seek", t); } },
+    duration: { get() { return mediaOf(this).duration; } },
+    volume: { get() { return mediaOf(this).volume; },
+              set(v) { const level = Math.max(0, Math.min(1, Number(v))); mediaOf(this).volume = level; mediaTell(this, "volume", level); } },
+    muted: { get() { return mediaOf(this).muted; }, set(v) { mediaOf(this).muted = !!v; mediaTell(this, "muted", !!v); } },
+    defaultMuted: flag("muted"),
+    autoplay: flag("autoplay"), loop: flag("loop", "loop"), controls: flag("controls"), playsInline: flag("playsinline"),
+    disablePictureInPicture: flag("disablepictureinpicture"), disableRemotePlayback: flag("disableremoteplayback"),
+    preload: reflected("preload"), poster: reflected("poster"), crossOrigin: reflected("crossorigin"),
+    src: { get() { const v = this.getAttribute("src"); try { return v ? new URL(v, state.url).href : ""; } catch (_) { return v || ""; } },
+           set(v) { this.setAttribute("src", String(v)); mediaOf(this).readyState = 0; mediaTell(this, "src", String(v)); } },
+    srcObject: { get() { return null; }, set(_v) { mediaTell(this, "src", "mediasource:"); } },
+    currentSrc: { get() { return mediaOf(this).currentSrc || this.src || ""; } },
+    readyState: { get() { return mediaOf(this).readyState; } },
+    networkState: { get() { return mediaOf(this).readyState ? 1 : (this.src ? 2 : 0); } },
+    videoWidth: { get() { return mediaOf(this).videoWidth; } },
+    videoHeight: { get() { return mediaOf(this).videoHeight; } },
+    error: { get() { return mediaOf(this).error; } },
+    playbackRate: { get() { return mediaOf(this).playbackRate; },
+                    set(v) { mediaOf(this).playbackRate = Number(v) || 1; mediaTell(this, "rate", Number(v) || 1); } },
+    defaultPlaybackRate: { get() { return 1; }, set(_v) {} },
+    preservesPitch: { get() { return true; }, set(_v) {} },
+    buffered: { get() { const m = mediaOf(this); return ranges(0, Number.isFinite(m.duration) ? m.duration : 0); } },
+    seekable: { get() { const m = mediaOf(this); return ranges(0, Number.isFinite(m.duration) ? m.duration : 0); } },
+    played: { get() { return ranges(0, mediaOf(this).currentTime); } },
+    textTracks: { get() { return Object.assign([], { addEventListener() {}, removeEventListener() {}, getTrackById() { return null; } }); } },
+    audioTracks: { get() { return Object.assign([], { addEventListener() {}, removeEventListener() {} }); } },
+    videoTracks: { get() { return Object.assign([], { addEventListener() {}, removeEventListener() {} }); } },
+    mediaKeys: { get() { return null; } },
+    remote: { get() { return { state: "disconnected", watchAvailability() { return Promise.reject(new DOMException("", "NotSupportedError")); } }; } },
+  };
+  const constants = { NETWORK_EMPTY: 0, NETWORK_IDLE: 1, NETWORK_LOADING: 2, NETWORK_NO_SOURCE: 3,
+                      HAVE_NOTHING: 0, HAVE_METADATA: 1, HAVE_CURRENT_DATA: 2, HAVE_FUTURE_DATA: 3, HAVE_ENOUGH_DATA: 4 };
+  for (const name of ["HTMLMediaElement", "HTMLVideoElement", "HTMLAudioElement"]) {
+    const cls = g[name];
+    if (typeof cls !== "function") continue;
+    for (const [key, fn] of Object.entries(methods)) {
+      try { Object.defineProperty(cls.prototype, key, { configurable: true, writable: true, value: fn }); } catch (_) {}
+    }
+    for (const [key, descriptor] of Object.entries(properties)) {
+      try { Object.defineProperty(cls.prototype, key, { configurable: true, ...descriptor }); } catch (_) {}
+    }
+    for (const [key, value] of Object.entries(constants)) {
+      try { Object.defineProperty(cls, key, { value, configurable: true }); Object.defineProperty(cls.prototype, key, { value, configurable: true }); } catch (_) {}
+    }
+  }
+  // new Audio(src): a sound a script plays, never put in the page
+  g.Audio = function Audio(src) {
+    const audio = document_.createElement("audio");
+    audio.setAttribute("preload", "auto");
+    if (src !== undefined) audio.src = src;
+    return audio;
+  };
+  g.Audio.prototype = (g.HTMLAudioElement || g.HTMLElement).prototype;
+}
+
 function installWebExtras(g) {
   const Base = NodeEvent;
   const withFields = (name, fields) => class extends Base {
@@ -1902,6 +2080,7 @@ function dispatch(message) {
     return;
   }
   if (message.type === "image") { imageAnswered(message); return; }
+  if (message.type === "media_event") { mediaAnswered(message); return; }
   if (message.type === "message") { receiveMessage(message); return; }
   if (message.type === "port_message") {
     const port = anchors.get(message.port);

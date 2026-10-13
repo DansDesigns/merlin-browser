@@ -1,5 +1,5 @@
 # Merlin Browser
-![version](https://img.shields.io/badge/version-1.8.29-6f8ff0)
+![version](https://img.shields.io/badge/version-1.8.31-6f8ff0)
 
 ### ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png) V1.6 Requires a reinstall as there has been a fundamental change to the folder structure. ![warning](https://github.com/DansDesigns/AlternixOS/blob/main/warning.png)
 
@@ -182,6 +182,18 @@ of its own as Chrome keeps them, talking to the page around them by
 postMessage and MessagePorts. A frame of another site keeps its cookies and
 storage to that page only, and a site that refuses to be framed is not shown.
 
+Video and audio (`<video>`, `<audio>`) play in the page, with Merlin's own
+controls and full screen, through Qt Multimedia's FFmpeg: MP4 (H.264, AAC),
+WebM (VP9, Opus) and HLS streams. Pages' scripts have the whole
+HTMLMediaElement API and its events. YouTube, and the other sites whose
+players stream through Media Source Extensions (which Merlin Engine does not
+have yet), play too: yt-dlp finds the video's stream, with Node.js for
+YouTube's, and Merlin plays it where the site's player is. A YouTube video
+page plays at once, an embedded one when its play button is pressed, and on
+other sites when a person presses play. yt-dlp and Node.js are fetched only
+when asked. Sites that need DRM (Netflix, Prime Video and the like) cannot
+play in Merlin Engine; Chromium's tabs are for those.
+
 
 
 Download from the [Releases](https://github.com/DansDesigns/merlin-browser/releases) page or build from source by cloning this repo then running:
@@ -331,7 +343,8 @@ merlin/
   single.py      one window, so links reuse the browser already open
   updater.py     version check and in-place update
   engine/        MerlinEngine, Merlin's own web engine: html, css, layout,
-                 paint and view, each its own module
+                 paint and view, each its own module; mediaview.py plays
+                 video and audio, siteplay.py YouTube's and other sites'
   codecengine.py fetching, checking and swapping in the codec engine
   crashlog.py    merlin-log.txt, and the stack if Merlin is ever killed
   stdlib_anchor.py  standard modules Merlin.exe carries for future updates

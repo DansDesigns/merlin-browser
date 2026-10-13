@@ -27,6 +27,8 @@ from .css import Styler, media_matches
 from .layout import Layout
 from .paint import paint
 from .frames import FramesMixin, refused_page, refuses_framing
+from .mediaview import MediaMixin
+from .siteplay import SitePlayMixin
 
 # What a page load says about itself when Merlin's own user agent is not to
 # hand. "MerlinEngine/0.1" was refused outright by sites' bot protection, with
@@ -708,7 +710,7 @@ class _Page(QObject):
         self._view.refresh_hiding()
 
 
-class MerlinView(QWidget, FramesMixin):
+class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
     titleChanged = pyqtSignal(str)
     urlChanged = pyqtSignal(QUrl)
     iconChanged = pyqtSignal(QIcon)
@@ -818,6 +820,7 @@ class MerlinView(QWidget, FramesMixin):
         # CSS animations: drawn about 30 times a second, only while the page
         # has some and the tab can be seen
         self._animation_epoch = time.monotonic()
+        self._media_init()                 # its videos (mediaview.py)
         self._animation_timer = QTimer(self)
         self._animation_timer.setInterval(33)
         self._animation_timer.timeout.connect(self._animation_tick)
@@ -1371,6 +1374,7 @@ class MerlinView(QWidget, FramesMixin):
             self._display = None          # the old page goes; the new one is being laid out
             self._panel_scroll = {}       # and its panels' positions with it
         self._clear_frames()              # its frames go with it
+        self._clear_media()               # and its videos
         self._find = ("", -1)
         self._found_rect = None
         self._markup = prepared.get("markup", markup) if prepared else markup
@@ -1643,6 +1647,7 @@ class MerlinView(QWidget, FramesMixin):
                 picture = QImage.fromData(data)
         self._images[src] = picture if picture is not None and not picture.isNull() else False
         self._report_image(src)
+        self._media_picture_arrived(src)         # a video's poster (mediaview.py)
         if self._image_moves_layout(src):
             # at most one layout for images in a quarter-second, however many
             # arrive: each had laid the whole page out again
@@ -1837,8 +1842,9 @@ class MerlinView(QWidget, FramesMixin):
         return f"{self._url.scheme()}://{self._url.authority()}"
 
     def shutdown(self) -> None:
-        """The tab is closing: its page's scripts end with it."""
+        """The tab is closing: its page's scripts end with it, and its videos."""
         self._stop_script()
+        self._clear_media()
 
     def _stop_script(self) -> None:
         if self._script is not None:
@@ -2014,6 +2020,8 @@ class MerlinView(QWidget, FramesMixin):
             # it, and nothing on the page answered.
             if getattr(element, "pseudo", None):
                 return False
+            if styles.get(element, {}).get("visibility") in ("hidden", "collapse"):
+                return False
             node = element
             while node is not None and hasattr(node, "attrs"):
                 events = styles.get(node, {}).get("pointer-events")
@@ -2057,7 +2065,40 @@ class MerlinView(QWidget, FramesMixin):
                         r = r.translated(0, -dy)
                 if r.contains(page_point) and hittable(e, False):
                     candidates.append((r, e))
-        return [element for _rect, element in sorted(candidates, key=lambda c: c[0].width() * c[0].height())]
+        return [element for _rect, element in sorted(candidates, key=self._paint_order, reverse=True)]
+
+    def _paint_order(self, candidate):
+        """Where an element is drawn among others, the topmost highest: as a
+        browser finds what the pointer is over. Its stacking (the z-index of
+        each positioned box holding it, outermost first), then whether it is
+        in a positioned box at all, then its place in the page, a box's
+        contents after the box. The smallest box had been taken as the one on
+        top: AlterniTech's menu, open over the page, lost to the search bar
+        and the heading beneath it, and shut as the pointer came down to it."""
+        _rect, element = candidate
+        order = getattr(self, "_tree_numbers", None)
+        if order is None or getattr(self, "_tree_numbers_of", None) is not self._document:
+            order = {id(e): n for n, e in enumerate(self._document.root.elements())} if self._document else {}
+            self._tree_numbers, self._tree_numbers_of = order, self._document
+        styles = self._styles or {}
+        stacking, positioned = [], False
+        chain = []
+        node = element
+        while node is not None and hasattr(node, "attrs"):
+            chain.append(node)
+            node = node.parent
+        for node in reversed(chain):
+            style = styles.get(node, {})
+            if style.get("position") not in (None, "", "static"):
+                positioned = True
+                z = style.get("z-index")
+                try:
+                    if z not in (None, "", "auto"):
+                        stacking.append(int(float(z)))
+                except (TypeError, ValueError):
+                    pass
+        stacking = tuple(stacking[:8]) + (0,) * (8 - min(8, len(stacking)))
+        return (stacking, positioned, order.get(id(element), -1))
 
     def _element_at(self, position):
         """The script id of the element a click at position lands on, or None."""
@@ -2094,6 +2135,8 @@ class MerlinView(QWidget, FramesMixin):
                         self.update()
                         self._panel_moved(panel, top)
                     break
+        elif kind == "media":
+            self._media_from_script(message)
         elif kind == "pick_file":
             # the page's own button asked for its file input's dialog
             element = self._by_script_id.get(str(message.get("target")))
@@ -2289,6 +2332,7 @@ class MerlinView(QWidget, FramesMixin):
             self._widgets = kept
             self._rekey_frames(old_frames)
             self._element_count = sum(1 for _ in self._document.root.elements())
+            self._carry_hover()
             title = prepared.get("title") or ""
             if title and title != self._title:
                 self._title = title
@@ -2329,7 +2373,7 @@ class MerlinView(QWidget, FramesMixin):
             self._layout_in_background()
             return
         self._display = Layout(self._document, self._styles, self._page_width(), self._zoom,
-                               images=self._images,
+                               images=self._images, media=dict(self._media_sizes),
                                viewport_height=float(max(1, self.height())),
                                live_controls=True, font_aliases=self._font_aliases).run()
         self._shown_laid_out()
@@ -2350,12 +2394,13 @@ class MerlinView(QWidget, FramesMixin):
         document, styles = self._document, self._styles
         width, zoom = self._page_width(), self._zoom
         images = dict(self._images)
+        media_sizes = dict(self._media_sizes)
         aliases = {k: list(v) for k, v in self._font_aliases.items()}
         height = float(max(1, self.height()))
 
         def work():
             try:
-                out = Layout(document, styles, width, zoom, images=images,
+                out = Layout(document, styles, width, zoom, images=images, media=media_sizes,
                              viewport_height=height, live_controls=True,
                              font_aliases=aliases).run()
             except Exception:                              # noqa: BLE001
@@ -2390,6 +2435,9 @@ class MerlinView(QWidget, FramesMixin):
                 self._display.fixed.panel_scroll = self._panel_scroll
         self._update_scrollbar()
         self._sync_controls()
+        wanted = getattr(self, "_hover_wanted", None)
+        if wanted is not None and not self._layout_running:
+            QTimer.singleShot(0, self._hover_retry)
         self.update()
         self._send_geometry()
         display = self._display
@@ -2476,7 +2524,7 @@ class MerlinView(QWidget, FramesMixin):
         """Make a widget for each form field laid out, and put each in its place."""
         if self._display is None:
             return
-        found, buttons, frames = {}, [], {}
+        found, buttons, frames, media = {}, [], {}, {}
         self._control_sticky = {}
         self._control_panels = {}
         for source, fixed in ((self._display, False), (self._display.fixed, True)):
@@ -2512,6 +2560,10 @@ class MerlinView(QWidget, FramesMixin):
                         self._control_panels[item[2]] = list(panels)
                 elif item and item[0] == "button":
                     buttons.append((item[1], item[2], fixed, list(panels)))
+                elif item and item[0] == "media":
+                    from .layout import media_key
+
+                    media[media_key(item[2])] = (item[1], fixed, item[2])
                 elif item and item[0] == "frame":
                     frames[item[2]] = (item[1], fixed)
                     if around:
@@ -2535,6 +2587,7 @@ class MerlinView(QWidget, FramesMixin):
         self._places = {e: (r, f) for e, (r, f, _font, _colour) in found.items()}
         self._buttons = buttons
         self._sync_frames(frames)          # frames.py: made, loaded, given their places
+        self._sync_media(media)            # mediaview.py: a player for each video
         self._place_controls()
         if not self._focused_once and self._widgets:
             self._focused_once = True
@@ -3373,7 +3426,7 @@ class MerlinView(QWidget, FramesMixin):
         # painter still open, is a crash on Linux. (1.8.19 could not start so.)
         painter = QPainter(self)
         try:
-            self._paint_into(painter)
+            self._paint_into(painter, event.rect())
         except Exception:                                  # noqa: BLE001
             import traceback
 
@@ -3386,7 +3439,7 @@ class MerlinView(QWidget, FramesMixin):
         finally:
             painter.end()
 
-    def _paint_into(self, painter) -> None:
+    def _paint_into(self, painter, area=None) -> None:
         canvas = self._display.canvas if self._display and self._display.canvas else (
             None if self.is_frame() else (255, 255, 255, 255))
         # a frame whose page sets no background shows its parent through, as
@@ -3397,6 +3450,12 @@ class MerlinView(QWidget, FramesMixin):
             painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
             painter.translate(0, -self._scroll)
             visible = QRectF(0, self._scroll, self.width(), self.height())
+            if area is not None and not area.isEmpty():
+                # only what is to be drawn again (an animation's corner of the
+                # window), not the whole window each time
+                visible = visible.intersected(QRectF(area.x(), area.y() + self._scroll,
+                                                     area.width(), area.height()))
+                painter.setClipRect(visible)
             if self._display.canvas_gradients:
                 # gradients and pictures on <html> or <body> span the whole page
                 from .paint import fill_page_layers
@@ -3412,7 +3471,9 @@ class MerlinView(QWidget, FramesMixin):
 
             # animations are drawn at the time since this page was shown
             painting.NOW = time.monotonic() - self._animation_epoch
+            pictures[painting.MEDIA_KEY] = self._media_registry()
             paint(painter, self._display, visible, pictures)
+            self._paint_site_media(painter, visible)
 
     def _scroll_panels(self, position, delta: float) -> float:
         """Scroll the panels under position (window terms) by delta pixels,
@@ -3655,8 +3716,12 @@ class MerlinView(QWidget, FramesMixin):
         """The compounds of the page's :hover rules, without the :hover, with
         a Styler to style again by; None if the page has none. Made once per
         page and set of sheets."""
-        key = (id(self._document), id(self._sheets), len(self._sheets or []), self._styled_at)
+        # by the sheets' text, not the document: a page whose scripts change
+        # it is a new document each time, with the same rules
+        key = (hash(tuple(self._sheets or [])), self._styled_at)
         if getattr(self, "_hover_key", None) == key:
+            if self._hover_kit is not None:
+                self._hover_kit[0].document = self._document
             return self._hover_kit
         self._hover_key = key
         self._hover_kit = None
@@ -3690,6 +3755,14 @@ class MerlinView(QWidget, FramesMixin):
         """Mark the element under the pointer and those holding it as hovered,
         and style again what a :hover rule changes: Square's menus drop down
         on .nav__item:hover, and had stayed shut."""
+        if position is not None and (self._layout_running or getattr(self, "_hover_timer_on", False)):
+            # what is drawn is not yet laid out as styled: tested against
+            # it, the pointer over a menu just opened was over nothing, and
+            # the menu closed again (AlterniTech's, a page laid out in the
+            # background). Tried again once the layout is shown.
+            self._hover_wanted = position
+            return
+        self._hover_wanted = None
         kit = self._hover_selectors() if self._display is not None else None
         chain = []
         if kit is not None and position is not None:
@@ -3732,9 +3805,47 @@ class MerlinView(QWidget, FramesMixin):
     def _restyle_hover(self) -> None:
         self._hover_timer_on = False
         relevant, self._hover_pending = getattr(self, "_hover_pending", None) or [], []
+        if self._hover_styles(relevant):
+            self._layout()
+            self.update()
+        else:
+            self._hover_retry()
+
+    def _hover_retry(self) -> None:
+        wanted = getattr(self, "_hover_wanted", None)
+        if wanted is not None:
+            self._update_hover(wanted)
+
+    def _carry_hover(self) -> None:
+        """A page its scripts changed is a new document: what was hovered in
+        the old one is hovered in it too, by the elements' script numbers,
+        and styled so before it is shown. Square's pages change as they
+        please, and each change had shut the open menu."""
+        old = getattr(self, "_hover_chain", [])
+        if not old or self._document is None:
+            return
+        numbers = [e.attrs.get("data-mjs") for e in old]
+        chain = [self._by_script_id.get(n) for n in numbers if n]
+        chain = [e for e in chain if e is not None]
+        for element in old:
+            element.hover = False
+        for element in chain:
+            element.hover = True
+        self._hover_chain = chain
+        self._hover_document = self._document
+        kit = self._hover_selectors()
+        if chain and kit is not None:
+            from .css import _matches_compound
+
+            relevant = [e for e in chain if any(_matches_compound(c, e) for c in kit[1])]
+            if relevant:
+                self._hover_styles(relevant)
+
+    def _hover_styles(self, relevant: list) -> bool:
+        """Style again the boxes a :hover rule can change; whether any were."""
         kit = self._hover_selectors()
         if not relevant or kit is None or self._document is None or not self._styles:
-            return
+            return False
         styler = kit[0]
         # a :hover rule styles the element, what it holds, and (with + or ~)
         # what follows it: its parent's whole box is styled again
@@ -3764,12 +3875,16 @@ class MerlinView(QWidget, FramesMixin):
                 parent = top.parent if hasattr(top.parent, "attrs") else None
                 styler._compute(top, styles.get(parent) if parent is not None else None, root_size)
         except Exception:                                  # noqa: BLE001
-            return
+            return False
         self._styles = styles
-        self._layout()
-        self.update()
+        return True
 
     def leaveEvent(self, event) -> None:                      # noqa: N802
+        self._hover_wanted = None
+        for key, controller in self._players.items():
+            if controller.hovered:
+                controller.hovered = False
+                self._media_changed(key)
         self._set_hover([], self._hover_selectors() if self._display is not None else None)
         super().leaveEvent(event)
 
@@ -3777,6 +3892,7 @@ class MerlinView(QWidget, FramesMixin):
         from .layout import LabelTarget
 
         self._update_hover(event.position())
+        self._media_hover(event.position())
         href = self._link_at(event.position())
         button = self._button_at(event.position())
         state = (href, button)
@@ -3792,10 +3908,17 @@ class MerlinView(QWidget, FramesMixin):
                 self._url.resolved(QUrl(href)).toString()
             self.linkHovered.emit(shown)
 
+    def mouseDoubleClickEvent(self, event) -> None:           # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self._media_double_click(event.position()):
+            return
+        super().mouseDoubleClickEvent(event)
+
     def mouseReleaseEvent(self, event) -> None:               # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton:
             return
         position = event.position()
+        if self._media_click(position):
+            return                         # a video's own controls
         target = self._element_at(position) if self._script is not None else None
         if target is not None:
             self._script_event({"type": "click", "target": target, "x": position.x(),

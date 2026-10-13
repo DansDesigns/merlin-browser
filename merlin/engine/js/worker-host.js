@@ -197,17 +197,31 @@ function makeModule(text, url) {
     importModuleDynamically: (specifier) => evaluated(new URL(specifier, url).href),
   });
 }
-function linked(url) {
+// made, not linked, for the linker: Node links the graph itself, cycles too
+// (as host.js: modules importing each other had waited on each other forever)
+function made(url) {
   if (modules.has(url)) return modules.get(url);
-  const made = (async () => {
+  const module = (async () => {
     const response = await workerFetch(url, { headers: { "sec-fetch-dest": "script" } });
     if (!response.ok) throw new TypeError(`Failed to fetch module ${url} (${response.status})`);
-    const module = makeModule(await response.text(), url);
-    await module.link((specifier, referrer) => linked(new URL(specifier, referrer.identifier).href));
+    return makeModule(await response.text(), url);
+  })();
+  modules.set(url, module);
+  return module;
+}
+const linkings = new Map();
+function linked(url) {
+  if (linkings.has(url)) return linkings.get(url);
+  const done = (async () => {
+    const module = await made(url);
+    if (module.status === "unlinked") {
+      await module.link((specifier, referrer) => made(new URL(specifier, referrer.identifier).href));
+    }
+    while (module.status === "linking") await new Promise((resolve) => setTimeout(resolve, 2));
     return module;
   })();
-  modules.set(url, made);
-  return made;
+  linkings.set(url, done);
+  return done;
 }
 async function evaluated(url) {
   const module = await linked(url);
@@ -231,7 +245,7 @@ for (const each of ["process", "global", "require", "module", "setImmediate", "c
     if (type === "module") {
       if (givenSource !== undefined) {
         const module = makeModule(givenSource, scriptUrl);
-        await module.link((specifier, referrer) => linked(new URL(specifier, referrer.identifier).href));
+        await module.link((specifier, referrer) => made(new URL(specifier, referrer.identifier).href));
         await module.evaluate();
       } else {
         await evaluated(scriptUrl);

@@ -12089,8 +12089,12 @@ var stringAttribute = {
 
 // cache/npm/registry.npmjs.org/linkedom/0.18.13/esm/interface/event-target.js
 var wm = /* @__PURE__ */ new WeakMap();
+// Merlin: a listener's this is the element it listens on (currentTarget), as
+// in browsers, not the one the event came from. Preact keeps an element's
+// handlers on the element and finds them through this: a click on the text
+// inside Convert to it!'s drop area had found none, and opened no file dialog
 function dispatch(event, listener) {
-  if (typeof listener === "function") listener.call(event.target, event);
+  if (typeof listener === "function") listener.call(event.currentTarget, event);
   else listener.handleEvent(event);
   return event._stopImmediatePropagationFlag;
 }
@@ -12109,8 +12113,9 @@ function invokeListeners({ currentTarget, target }) {
       if (options && options.once) listeners.delete(listener);
       if (dispatch(this, listener)) break;
     }
-    delete this.currentTarget;
-    delete this.target;
+    // Merlin: once dispatched, an event keeps its target, as in browsers;
+    // only currentTarget goes
+    this.currentTarget = null;
     return this.cancelBubble;
   }
 }
@@ -17325,6 +17330,11 @@ var HTMLVideoElement = class extends HTMLElement {
     super(ownerDocument, localName);
   }
 };
+// Merlin: <video> and <audio> made as what they are, so the media interface
+// Merlin gives them (host.js, installMedia) is theirs; linkedom had made them
+// plain elements
+registerHTMLClass("video", HTMLVideoElement);
+registerHTMLClass("audio", HTMLAudioElement);
 
 // cache/npm/registry.npmjs.org/linkedom/0.18.13/esm/html/table-cell-element.js
 var HTMLTableCellElement = class extends HTMLElement {

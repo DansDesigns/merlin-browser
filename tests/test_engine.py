@@ -4178,7 +4178,14 @@ def test_worker_features(app) -> None:
     folder = tempfile.mkdtemp(prefix="merlin-workers-")
     files = {
         "index.html": "<!DOCTYPE html><html><body><p id=nested>waiting</p><p id=xhr>waiting</p><p id=shared>waiting</p>"
-                      "<p id=cache>waiting</p><p id=sw>waiting</p><p id=pagexhr>waiting</p><p id=tag>waiting</p><p id=style>waiting</p><script>"
+                      "<p id=cache>waiting</p><p id=sw>waiting</p><p id=pagexhr>waiting</p><p id=tag>waiting</p><p id=style>waiting</p>"
+                      "<p id=cycle>waiting</p><div id=outer><span id=inner>x</span></div><p id=listener>waiting</p>"
+                      "<script type=module>import { done } from '/cycle_a.js'; document.getElementById('cycle').textContent = done();</script>"
+                      "<script>"
+                      "{ const outer = document.getElementById('outer'); outer.handlers = { click: () => 'found' }; let seen = '';"
+                      " outer.addEventListener('click', function (e) { seen = (this === outer) + ' ' + this.handlers.click(); });"
+                      " const ev = new MouseEvent('click', { bubbles: true }); document.getElementById('inner').dispatchEvent(ev);"
+                      " document.getElementById('listener').textContent = seen + ' ' + (ev.target && ev.target.id); }"
                       "const out = (id, t) => document.getElementById(id).textContent = t;"
                       "out('tag', [document.createElement('button'), document.querySelectorAll('p'), new Event('x')]"
                       ".map((x) => Object.prototype.toString.call(x)).join(' '));"
@@ -4208,6 +4215,9 @@ def test_worker_features(app) -> None:
                      " port.onmessage = (m) => port.postMessage(m.data + ' from connection ' + mine); };",
         "n.js": "export const n = 42;",
         "lib.js": "export default 'LIB';",
+        # two modules importing each other, as GitHub's do
+        "cycle_a.js": "import { b } from '/cycle_b.js'; export const a = 'A'; export function done() { return 'cycle ' + a + b(); }",
+        "cycle_b.js": "import { a } from '/cycle_a.js'; export function b() { return 'B' + a; }",
     }
     for name, text in files.items():
         open(os.path.join(folder, name), "w").write(text)
@@ -4268,6 +4278,12 @@ def test_worker_features(app) -> None:
               "(Vue had written style=\"undefined:center\" on Square's sites, and the centring was lost)",
               text_of("style") == "true true false undefined text-align:center;-webkit-transform:none;float:left",
               text_of("style"))
+        until(lambda: text_of("cycle") != "waiting", 10)
+        check("modules that import each other run (GitHub's had waited on each other for ever)",
+              text_of("cycle") == "cycle ABA", text_of("cycle"))
+        check("a listener's this is the element it listens on, and the event keeps its target "
+              "(Preact's handlers: Convert to it!'s file button)",
+              text_of("listener") == "true found inner", text_of("listener"))
         check("the DOM's objects say what they are, as in browsers (Tippy tells an element from a selector so)",
               text_of("tag") == "[object HTMLButtonElement] [object NodeList] [object Event]", text_of("tag"))
     finally:
@@ -4502,13 +4518,18 @@ def test_hover(app) -> None:
         "<!DOCTYPE html><html><head><style>body{margin:0;font:16px sans-serif}"
         "nav ul{list-style:none;margin:0;padding:0;display:flex}"
         ".item{position:relative;padding:10px 20px}"
-        ".menu{position:absolute;left:0;top:100%;opacity:0;transform:scaleY(0);background:#eee;width:150px}"
+        ".menu{position:absolute;left:0;top:100%;opacity:0;transform:scaleY(0);background:#eee;width:600px;z-index:5}"
         ".item:hover>.menu{opacity:1;transform:scaleY(1)}"
         ".menu a{display:block;padding:8px}</style></head><body>"
         "<nav><ul><li class=item id=software><a id=top href='/software'>Software</a>"
         "<div class=menu id=menu><a id=first href='/one'>One</a><a id=second href='/two'>Two</a></div></li>"
         "<li class=item><a href='/about'>About</a></li></ul></nav>"
-        "<p id=far style='margin-top:300px'>far below</p></body></html>")
+        # a heading the open menu lies over, smaller than the menu: what is on
+        # top is what the pointer is over, not the smallest box there
+        "<h1 id=hero style='margin:4px 0 0 0;font-size:20px;display:inline-block'>A heading under the menu</h1>"
+        "<p id=far style='margin-top:300px'>far below</p>"
+        # big enough to be laid out in the background, as AlterniTech's is
+        + "<div>" + "<i>.</i>" * 1300 + "</div></body></html>")
 
     class Pages(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *a, **k):
@@ -4539,7 +4560,8 @@ def test_hover(app) -> None:
     view.show()
     try:
         view.setUrl(QUrl(f"http://127.0.0.1:{server.server_address[1]}/index.html"))
-        until(lambda: view._display is not None and view._document is not None, 10)
+        until(lambda: view._display is not None and view._document is not None
+              and any(e.id == "far" for _r, e in view._display.boxes), 15)
         menu = next(e for e in view._document.root.elements() if e.id == "menu")
 
         def opacity():
@@ -4563,21 +4585,348 @@ def test_hover(app) -> None:
         check("at rest the menu is hidden", opacity() == 0.0, str(opacity()))
         top = where("top")
         move(top.center().x(), top.center().y())
-        check("the pointer over the menu's item opens it (.item:hover > .menu)", until(lambda: opacity() == 1.0, 3),
+        check("the pointer over the menu's item opens it (.item:hover > .menu)", until(lambda: opacity() == 1.0, 6),
               str(opacity()))
         second = where("second")
+        # down from the item to the option in small steps, as a mouse moves,
+        # each waiting a moment as events do
+        x = top.center().x()
+        y = top.center().y()
+        while y < second.center().y():
+            move(x, y)
+            until(lambda: False, 0.03)
+            y += 4
         move(second.center().x(), second.center().y())
-        until(lambda: False, 0.4)
+        until(lambda: False, 1.0)
         check("moving down into the menu keeps it open, and its links are there to click",
               opacity() == 1.0 and view._link_at(QPointF(second.center().x(), second.center().y())) == "/two",
               str(opacity()))
         far = where("far")
         move(far.center().x(), far.center().y())
-        check("moving away closes it", until(lambda: opacity() == 0.0, 3), str(opacity()))
+        check("moving away closes it", until(lambda: opacity() == 0.0, 6), str(opacity()))
     finally:
         view.shutdown()
         view.deleteLater()
         server.shutdown()
+
+
+def test_pictures_cascade_and_painting(app) -> None:
+    """A picture filling a positioned box by percentages (Square's product
+    pictures); the ancestor filter matches as matching does; layers out of
+    view are passed over and those in view drawn; scaled pictures kept."""
+    from PyQt6.QtGui import QColor, QImage, QPainter
+
+    from merlin.engine import paint as paint_module
+    from merlin.engine.css import Styler, matches, parse_selector
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+
+    def laid(markup, width=800, height=600, images=None):
+        document = parse("<!DOCTYPE html><style>body{margin:0}</style>" + markup)
+        styles = Styler(document, viewport=(width, height)).compute()
+        return document, styles, Layout(document, styles, width, viewport_height=height, images=images or {}).run()
+
+    def drawn_images(out):
+        found = []
+
+        def walk(items):
+            for item in items:
+                if item and item[0] == "group":
+                    walk(item[1])
+                elif item and item[0] == "image":
+                    found.append(item)
+        walk(out.items)
+        for source in (out.fixed,):
+            if source is not None:
+                walk(source.items)
+        return found
+
+    wide = QImage(600, 300, QImage.Format.Format_RGB32)
+    wide.fill(QColor("red"))
+    _d, _s, out = laid("<div style='width:200px'><span style='display:block;position:relative;width:100%;padding-top:100%;"
+                       "overflow:hidden'><div style='position:absolute;top:0;left:0;width:100%;height:100%'>"
+                       "<img src='w.png' style='position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover'>"
+                       "</div></span></div>", images={"w.png": wide})
+    pictures = drawn_images(out)
+    rect = pictures[0][1] if pictures else None
+    check("a picture of width and height 100% fills its square box (Square's product pictures), cropped to it",
+          rect is not None and abs(rect.width() - 200) < 0.5 and abs(rect.height() - 200) < 0.5
+          and pictures[0][4] is not None and pictures[0][4][0] == "cover", str(rect))
+
+    document = parse("<div class=a><p id=one>x</p><section><p id=two>y</p></section></div>"
+                     "<div class=b><p id=three>z</p></div><h2 class=x>h</h2><div class=y><em id=four>w</em></div>")
+    styler = Styler(document, author_css=[".a > * { background-color: red } .a * em, .a p { margin: 1px } "
+                                          ".x + .y * { background-color: blue } #nope .a { background-color: green }"])
+    styles = styler.compute()
+
+    def element(eid):
+        return next(e for e in document.root.elements() if e.id == eid)
+    agree = all(matches(parse_selector(sel), element(eid)) == want for sel, eid, want in (
+        (".a > *", "one", True), (".a > *", "two", False), (".a p", "two", True), (".a p", "three", False),
+        (".x + .y *", "four", True), ("#nope .a", "one", False)))
+    check("rules needing an ancestor (.a > *, .x + .y *) are passed over only where it is missing",
+          agree and styles[element("one")].get("background-color") == (255, 0, 0, 255)
+          and styles[element("two")].get("background-color") != (255, 0, 0, 255)
+          and styles[element("two")].get("margin-top") == 1.0
+          and styles[element("four")].get("background-color") == (0, 0, 255, 255)
+          and styles[element("three")].get("margin-top") == 16.0, str(styles[element("four")].get("background-color")))
+
+    _d, _s, out = laid("<div style='height:3000px'></div>"
+                       "<div id=low style='position:relative;width:100px;height:50px;background:#00ff00'></div>"
+                       "<div style='position:relative;transform:translateY(100px);width:100px;height:50px;background:#0000ff'></div>")
+    image = QImage(800, 600, QImage.Format.Format_ARGB32)
+
+    def colour_at(scroll, x, y):
+        image.fill(QColor("white"))
+        painter = QPainter(image)
+        painter.translate(0, -scroll)
+        paint_module.paint(painter, out, QRectF(0, scroll, 800, 600), {})
+        painter.end()
+        return image.pixelColor(x, y)
+    check("a positioned box far down is drawn when scrolled to (layers out of view are passed over)",
+          colour_at(2800, 10, 225).green() > 200 and colour_at(0, 10, 225).green() > 200 and colour_at(0, 10, 225).red() > 200)
+    check("and one moved by a transform is drawn where the transform puts it",
+          colour_at(2900, 10, 275).blue() > 200 and colour_at(2900, 10, 275).red() < 60)
+
+    big = QImage(2000, 1000, QImage.Format.Format_RGB32)
+    big.fill(QColor("orange"))
+    canvas = QImage(400, 300, QImage.Format.Format_ARGB32)
+    painter = QPainter(canvas)
+    first = paint_module._scaled(big, QRectF(0, 0, 200, 100), painter)
+    second = paint_module._scaled(big, QRectF(0, 0, 200, 100), painter)
+    painter.end()
+    check("a large picture drawn small is scaled once and kept, not scaled again each frame",
+          first.width() == 200 and first.height() == 100 and first.cacheKey() == second.cacheKey())
+
+
+def test_video_and_audio(app) -> None:
+    """<video> and <audio> in Merlin Engine: sized as browsers size them,
+    played in the page with Merlin's controls, and scripts' HTMLMediaElement;
+    YouTube's videos (and other sites' streamed ones) found by yt-dlp, here a
+    stand-in, and played where the site's player is."""
+    from PyQt6.QtTest import QTest
+
+    from merlin.engine import MerlinView
+    from merlin.engine.css import Styler
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+    from merlin.engine.script import LocalStorage
+    from merlin.engine.siteplay import youtube_video
+
+    # sizes, as Chromium gives them
+    def boxes(markup, media=None):
+        doc = parse(markup)
+        display = Layout(doc, Styler(doc).compute(), 800, media=media or {}).run()
+        return {element.id: (round(r.width()), round(r.height())) for kind, r, element in
+                ((item[0], item[1], item[2]) for item in display.items if item[0] == "media")}
+
+    sizes = boxes("<body style='margin:0'><video id=a></video><video id=b width=640 height=360></video>"
+                  "<video id=c data-mjs=9 style='width:100%'></video><video id=d data-mjs=8 style='height:90px'></video>"
+                  "<audio id=e controls></audio><audio id=f></audio>",
+                  media={"9": (1920, 1080), "8": (1920, 1080)})
+    check("a video with no size is 300 by 150", sizes.get("a") == (300, 150), str(sizes.get("a")))
+    check("width and height attributes size a video", sizes.get("b") == (640, 360), str(sizes.get("b")))
+    check("a video's height follows its picture", sizes.get("c") == (800, 450), str(sizes.get("c")))
+    check("and its width, given a height", sizes.get("d") == (160, 90), str(sizes.get("d")))
+    check("<audio controls> is 300 by 54, <audio> alone hidden",
+          sizes.get("e") == (300, 54) and "f" not in sizes, str(sizes))
+
+    check("YouTube's video pages known",
+          (youtube_video("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=3"), youtube_video("https://youtu.be/dQw4w9WgXcQ"),
+           youtube_video("https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"),
+           youtube_video("https://m.youtube.com/shorts/dQw4w9WgXcQ"), youtube_video("https://www.youtube.com/"),
+           youtube_video("https://example.com/watch?v=dQw4w9WgXcQ"))
+          == (("dQw4w9WgXcQ", False), ("dQw4w9WgXcQ", False), ("dQw4w9WgXcQ", True), ("dQw4w9WgXcQ", False),
+              None, None))
+
+    sample = os.path.join(ROOT, "tests", "data", "h264-sample.mp4")
+    folder = tempfile.mkdtemp(prefix="merlin-video-")
+    shutil.copy(sample, folder)
+    open(os.path.join(folder, "plain.html"), "w").write(
+        "<!DOCTYPE html><body style='margin:0'><video id=a src='h264-sample.mp4' controls style='width:400px'></video>"
+        "<video id=b src='h264-sample.mp4' autoplay muted width=200></video>"
+        "<video id=c src='h264-sample.mp4' autoplay width=200></video></body>")
+    open(os.path.join(folder, "watch.html"), "w").write(
+        "<!DOCTYPE html><body style='margin:0'><div style='height:56px'></div>"
+        "<div id=movie_player style='width:640px;height:360px;margin:20px'></div>"
+        "<video id=s src='blob:http://x/abc' style='width:320px;height:180px'></video></body>")
+    open(os.path.join(folder, "js.html"), "w").write(
+        "<!DOCTYPE html><body><video id=v src='h264-sample.mp4' width=200></video><p id=log>waiting</p><script>"
+        "const v = document.getElementById('v'); const log = [];"
+        "function out() { document.getElementById('log').textContent = log.join(',') + ' | ' + v.videoWidth + 'x'"
+        " + v.videoHeight + ' ended=' + v.ended + ' can=' + v.canPlayType('video/mp4; codecs=\"avc1.42E01E, mp4a.40.2\"')"
+        " + '/' + v.canPlayType('video/x-flv') + ' ms=' + (typeof MediaSource); }"
+        "['loadedmetadata', 'play', 'playing', 'ended'].forEach((n) =>"
+        " v.addEventListener(n, () => { if (!log.includes(n)) log.push(n); out(); }));"
+        "v.muted = true; v.play().then(() => { log.push('resolved'); out(); }); out();</script></body>")
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}/"
+
+    def until(test, seconds):
+        end = time.time() + seconds
+        while time.time() < end and not test():
+            app.processEvents()
+            time.sleep(0.01)
+        return test()
+
+    def by_id(view, name):
+        for key, controller in view._players.items():
+            if controller.element is not None and controller.element.id == name:
+                return controller
+        return None
+
+    view = MerlinView()
+    view.resize(900, 700)
+    view.show()
+    try:
+        view.setUrl(QUrl(base + "plain.html"))
+        until(lambda: by_id(view, "b") is not None and by_id(view, "b").ended, 8)
+        a, b, c = by_id(view, "a"), by_id(view, "b"), by_id(view, "c")
+        check("a muted autoplay video plays", b is not None and b.started and b.ended,
+              str(b and (b.started, b.ended, b.error)))
+        check("a video with sound waits to be asked", c is not None and not c.started)
+        check("a paused video shows its first picture, at its own size",
+              a is not None and a.image is not None and (a.width, a.height) == (96, 64))
+        rects = view._media_view_rects(next((k for k, x in view._players.items() if x is a), None))
+        rect = rects[0] if rects else None
+        if rect is not None:
+            QTest.mouseClick(view, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                             QPoint(int(rect.center().x()), int(rect.center().y())))
+        check("pressing a video's play button plays it", until(lambda: a.ended, 6), str(a.error))
+    finally:
+        view.shutdown()
+    wait(app, 0.3)
+    check("players stopped with the page", not view._players)
+
+    # YouTube, with yt-dlp stood in for
+    asked = []
+
+    def resolver(page, timeout, rows):
+        asked.append(page)
+        return True, base + "h264-sample.mp4"
+
+    MerlinView.site_resolver = staticmethod(resolver)
+    view = MerlinView()
+    view.resize(900, 700)
+    view.show()
+    try:
+        view.setUrl(QUrl(base + "watch.html"))
+        until(lambda: view._display is not None, 5)
+        view._url = QUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        view._site_sync()
+        player = view._players.get("site:yt:dQw4w9WgXcQ")
+        check("a YouTube watch page has Merlin's player", player is not None)
+        place = view._media_site_places.get("site:yt:dQw4w9WgXcQ")
+        check("over YouTube's player box", place is not None and place[0] == QRectF(20, 76, 640, 360),
+              str(place and place[0]))
+        check("YouTube's picture asked for while its stream is found",
+              player.poster_src == "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg" and player.note)
+        check("its stream found and played, as YouTube plays it",
+              until(lambda: player.ended, 8) and asked == ["https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+              str((asked, player.note, player.error)))
+        view._layout()
+        wait(app, 0.3)
+        check("Merlin's YouTube player kept as the page lays out again",
+              view._players.get("site:yt:dQw4w9WgXcQ") is player)
+
+        # an embedded one waits for its play button
+        view._site_end()
+        view._url = QUrl("https://www.youtube.com/embed/abcdefghijk")
+        view._site_sync()
+        embed = view._players.get("site:yt:abcdefghijk")
+        wait(app, 0.4)
+        check("an embedded YouTube video waits to be played", embed is not None and len(asked) == 1
+              and not embed.started)
+        QTest.mouseClick(view, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(450, 350))
+        check("and plays when its play button is pressed", until(lambda: embed.ended, 8) and len(asked) == 2,
+              str((asked, embed.note)))
+
+        # another site's streamed video: found when a person presses play, not a script
+        view._site_end()
+        view._url = QUrl(base + "watch.html")
+        view._layout()
+        wait(app, 0.3)
+        streamed = by_id(view, "s")
+        check("a streamed (blob:) video has a player", streamed is not None and not streamed.source)
+        streamed.play(person=False)
+        wait(app, 0.4)
+        check("a script playing it does not run yt-dlp", len(asked) == 2)
+        streamed.play(person=True)
+        check("a person pressing play finds its page's stream",
+              until(lambda: streamed.ended, 8) and asked[-1] == base + "watch.html", str(asked))
+
+        # without yt-dlp: said, never fetched as a page opens
+        from merlin import media
+
+        del MerlinView.site_resolver
+        real = media.has_ytdlp
+        media.has_ytdlp = lambda: False
+        try:
+            view._site_end()
+            view._url = QUrl("https://www.youtube.com/watch?v=zyxwvutsrqp")
+            view._site_sync()
+            missing = view._players.get("site:yt:zyxwvutsrqp")
+            check("without yt-dlp a YouTube page says what it needs",
+                  missing is not None and "yt-dlp" in missing.note and not missing.site_finding, missing and missing.note)
+        finally:
+            media.has_ytdlp = real
+    finally:
+        if hasattr(MerlinView, "site_resolver"):
+            del MerlinView.site_resolver
+        view.shutdown()
+    wait(app, 0.3)
+
+    # scripts: HTMLMediaElement
+    runtime = _node_for_tests()
+    if not runtime:
+        print("  skip  media scripts: Node.js is not here")
+        return
+
+    class Host:
+        settings = {}
+
+        def javascript_allowed(self, site):
+            return True
+
+        def node_for_scripts(self):
+            return runtime
+
+        def script_cache_dir(self):
+            return os.path.join(folder, "cache")
+
+        def local_storage(self):
+            return LocalStorage(None)
+
+    view = MerlinView()
+    view._host = Host()
+    view.resize(900, 600)
+    view.show()
+
+    def log():
+        found = next((x for x in view._document.root.elements() if x.id == "log"), None) if view._document else None
+        return " ".join(found.text().split()) if found is not None else ""
+
+    try:
+        view.setUrl(QUrl(base + "js.html"))
+        until(lambda: "ended=true" in log(), 10)
+        text = log()
+        check("a script's play() plays, its promise kept, events heard",
+              text.startswith("loadedmetadata,play,playing") or ("play" in text and "resolved" in text and "ended" in text),
+              text)
+        check("videoWidth, videoHeight and ended, as the video has them", "96x64 ended=true" in text, text)
+        check("canPlayType as Merlin can play", "can=probably/" in text and "ms=undefined" in text, text)
+    finally:
+        view.shutdown()
+    wait(app, 0.3)
 
 
 def main() -> int:
@@ -4671,8 +5020,12 @@ def main() -> int:
     test_square_and_convert_layout(app)
     print("test_hover")
     test_hover(app)
+    print("test_pictures_cascade_and_painting")
+    test_pictures_cascade_and_painting(app)
     print("test_view")
     test_view(app)
+    print("test_video_and_audio")
+    test_video_and_audio(app)
     if FAILED:
         print(f"\n{len(FAILED)} FAILED: " + "; ".join(FAILED))
         return 1
