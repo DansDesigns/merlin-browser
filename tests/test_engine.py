@@ -5140,6 +5140,107 @@ def test_border_box_heights_and_centring(app) -> None:
           len(masked) == 1 and masked[0][2] == "icon.svg" and masked[0][3] == "cover", str(masked[:1]))
 
 
+def test_scripts_changes_sent_lightly(app) -> None:
+    """A page whose scripts keep changing words and attributes: only those go
+    to Merlin, not the whole page, and only what they change is styled again;
+    the next change waits until Merlin has shown the last."""
+    from merlin.engine import MerlinView
+    from merlin.engine.script import LocalStorage
+
+    runtime = _node_for_tests()
+    if not runtime:
+        print("  skip  light changes: Node.js is not here")
+        return
+    folder = tempfile.mkdtemp(prefix="merlin-light-")
+    open(os.path.join(folder, "page.html"), "w").write("""<!DOCTYPE html><html><head><style>
+.on { color: rgb(255, 0, 0) } .off { color: rgb(0, 0, 255) } .on + p { font-weight: bold }
+</style></head><body><span id=clock>0</span><b id=word>a</b><p id=lamp class=off>lamp</p><p id=next>next</p>
+<div id=hidden style="display:none"><span id=quiet>0</span></div>
+<script>
+let n = 0;
+setInterval(() => {
+  n++;
+  document.getElementById('clock').firstChild.data = String(n);
+  document.getElementById('word').textContent = 'w' + n;
+  document.getElementById('quiet').textContent = String(n);
+  document.getElementById('lamp').className = n % 2 ? 'on' : 'off';
+}, 100);
+</script></body></html>""")
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    class Host:
+        settings = {}
+
+        def javascript_allowed(self, site):
+            return True
+
+        def node_for_scripts(self):
+            return runtime
+
+        def script_cache_dir(self):
+            return os.path.join(folder, "cache")
+
+        def local_storage(self):
+            return LocalStorage(None)
+
+    view = MerlinView()
+    view._host = Host()
+    view.resize(600, 400)
+    view.show()
+    kinds = []
+
+    def element(name):
+        return next((x for x in view._document.root.elements() if x.id == name), None) if view._document else None
+
+    try:
+        view.setUrl(QUrl(f"http://127.0.0.1:{server.server_address[1]}/page.html"))
+        end = time.time() + 10
+        while time.time() < end and (view._script is None or element("clock") is None):
+            app.processEvents()
+            time.sleep(0.01)
+        original = view._on_script_message
+
+        def spy(message):
+            kinds.append(message.get("type"))
+            return original(message)
+
+        view._script.message.disconnect(original)
+        view._script.message.connect(spy)
+        wait(app, 4)
+        clock = element("clock")
+        first = int(clock.text() or 0)
+        wait(app, 1.5)
+        second = int(element("clock").text() or 0)
+        updates = [k for k in kinds if k in ("dom", "texts")]
+        check("words and attributes changed by scripts come as changes, not the whole page",
+              updates.count("texts") >= 3 and updates.count("dom") <= 2, str(updates))
+        check("Merlin's page follows the words", second > first > 0, f"{first} then {second}")
+        check("and the element whose only text was replaced", (element("word").text() or "").startswith("w"),
+              element("word").text())
+        lamp = element("lamp")
+        colour = (view._styles.get(lamp) or {}).get("color")
+        wanted = (255, 0, 0, 255) if "on" in lamp.attrs.get("class", "") else (0, 0, 255, 255)
+        check("an attribute changed is styled again", colour == wanted and lamp.attrs.get("data-mjs"),
+              f"{lamp.attrs.get('class')} {colour}")
+        bold = (view._styles.get(element("next")) or {}).get("font-weight")
+        check("and so is what follows it, for + rules",
+              bold == (700 if "on" in lamp.attrs.get("class", "") else 400), str(bold))
+        check("no more than about four changes a second reach Merlin",
+              len(updates) <= 4 * 5.5 + 2, str(len(updates)))
+    finally:
+        view.shutdown()
+    wait(app, 0.3)
+
+
 def main() -> int:
     app = QApplication(sys.argv[:1])
     for test in (test_no_chromium, test_without_html_parser, test_parsing, test_cascade, test_layout,
@@ -5241,6 +5342,8 @@ def main() -> int:
     test_dom_for_polyfills_dialogs_and_cssom(app)
     print("test_border_box_heights_and_centring")
     test_border_box_heights_and_centring(app)
+    print("test_scripts_changes_sent_lightly")
+    test_scripts_changes_sent_lightly(app)
     if FAILED:
         print(f"\n{len(FAILED)} FAILED: " + "; ".join(FAILED))
         return 1

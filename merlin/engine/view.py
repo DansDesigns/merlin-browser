@@ -214,6 +214,60 @@ def _registrable(host: str) -> str:
     return ".".join(parts[-2:])
 
 
+_TAG = re.compile(r"""<(?:[^>"']|"[^"]*"|'[^']*')*>""")
+_STYLE_TEXT = re.compile(r"<style\b[^>]*>(.*?)</style>", re.S | re.I)
+_OWN_TEXT = ("option", "textarea", "select", "script", "style", "title", "noscript")
+
+
+def text_only_change(old_document, old_markup: str, markup: str, page_url: str = ""):
+    """When a page's scripts changed only its words, [(text node, new words)]
+    for the document already shown; None when anything else changed (an
+    element, an attribute, a stylesheet), and the page must be styled again."""
+    if old_document is None or not old_markup or not markup:
+        return None
+    if markup == old_markup:
+        return []
+    if _TAG.findall(markup) != _TAG.findall(old_markup):
+        return None
+    if _STYLE_TEXT.findall(markup) != _STYLE_TEXT.findall(old_markup):
+        return None
+    from . import html as html_parser
+    from .dom import Element, Text
+
+    fresh = html_parser.parse(markup, page_url)
+
+    def real(document):
+        root = document.root
+        return [root] + [e for e in root.elements() if not e.pseudo and not _in_pseudo(e)]
+
+    old_elements, new_elements = real(old_document), real(fresh)
+    if len(old_elements) != len(new_elements):
+        return None
+    changes = []
+    for old, new in zip(old_elements, new_elements):
+        if old.tag != new.tag:
+            return None
+        old_texts = [c for c in old.children if isinstance(c, Text)]
+        new_texts = [c for c in new.children if isinstance(c, Text)]
+        if len(old_texts) != len(new_texts):
+            return None
+        for before, after in zip(old_texts, new_texts):
+            if before.data != after.data:
+                if old.tag in _OWN_TEXT:
+                    return None
+                changes.append((before, after.data))
+    return changes
+
+
+def _in_pseudo(element) -> bool:
+    parent = element.parent
+    while parent is not None:
+        if getattr(parent, "pseudo", None):
+            return True
+        parent = getattr(parent, "parent", None)
+    return False
+
+
 def fetch_bytes(url: str, headers: dict | None = None, timeout: int = 20,
                 limit: int = 16 * 1024 * 1024, opener=None) -> tuple:
     """(ok, final url, bytes or reason, content type). Off the UI thread."""
@@ -729,6 +783,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
     _laid_out = pyqtSignal(int, object)              # layout number, the display list
     _script_prepared = pyqtSignal(int, str, object)  # load number, page from scripts, prepared
     _restyled = pyqtSignal(int, object)              # load number, the worker's answer
+    _partial_ready = pyqtSignal(object, object)      # sheets' key, a Styler to restyle parts with
     _icon_fetched = pyqtSignal(int, bytes)           # load number, the icon's data
     _font_fetched = pyqtSignal(int, str, bytes)      # load number, CSS family, the font file
     needsScript = pyqtSignal(str)                    # a page built by JavaScript: its address
@@ -801,6 +856,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
         self._fell_back.connect(self._on_fell_back)
         self._laid_out.connect(self._on_laid_out)
         self._script_prepared.connect(self._apply_script_dom)
+        self._partial_ready.connect(self._on_partial_ready)
         # JavaScript: a Node process for the page, where the site is allowed
         self._script = None
         self._script_waiting: dict = {}
@@ -811,6 +867,9 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
         self._script_rest = QTimer(self)
         self._script_rest.setSingleShot(True)
         self._script_rest.timeout.connect(self._script_rested)
+        self._texts_layout = QTimer(self)           # words changed while resting: laid out after
+        self._texts_layout.setSingleShot(True)
+        self._texts_layout.timeout.connect(self._texts_laid_out)
         self._by_script_id: dict = {}
         from collections import deque
 
@@ -1425,6 +1484,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
         if page.startswith(("http://", "https://")):
             headers["Referer"] = page
         wanted = []
+        failed_before = sum(1 for v in self._images.values() if v is False)
         for element in self._document.root.elements():
             if element.tag != "img" or self._styles.get(element, {}).get("display") == "none":
                 continue
@@ -1457,7 +1517,11 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
                     continue
                 wanted.append(src)
         if not wanted:
-            if any(v is False for v in self._images.values()):
+            # pictures blocked just now take no room: laid out again for them.
+            # Only then: any picture ever blocked had had the whole page laid
+            # out again each time this was asked (after every change a page's
+            # scripts made), and YouTube kept a core busy
+            if sum(1 for v in self._images.values() if v is False) > failed_before:
                 self._layout()
             return
 
@@ -2117,6 +2181,9 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             return
         if kind == "dom":
             self._script_dom(message.get("html", ""), message.get("title", ""))
+        elif kind == "texts":
+            self._script_texts(message.get("items") or [], message.get("title", ""),
+                               message.get("attrs") or [])
         elif kind == "fetch":
             self._script_fetch(host, message)
         elif kind == "handled":
@@ -2263,9 +2330,13 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
         change waiting is shown.
         """
         now = time.monotonic()
-        if self._script_busy or now < self._script_rest_until:
-            self._script_queued = (markup, title)          # only the latest counts
-            if not self._script_busy and not self._script_rest.isActive():
+        if self._script_busy or now < self._script_rest_until or not self.isVisible():
+            # only the latest counts; a tab not shown is styled when it is
+            self._script_queued = (markup, title)
+            if title and title != self._title and not self.isVisible():
+                self._title = title                 # its tab's name, at least, kept up to date
+                self.titleChanged.emit(title)
+            if not self._script_busy and self.isVisible() and not self._script_rest.isActive():
                 self._script_rest.start(max(1, int((self._script_rest_until - now) * 1000)))
             return
         self._script_busy = True
@@ -2280,11 +2351,20 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
         viewport = (self._page_width(), float(max(1, self.height())))
         hiding = self._hiding_css_for(host_name)
 
+        old_document, old_markup = self._document, self._markup
+
         def work():
             try:
-                prepared = self._prepare(markup, page_url, headers, opener, host_name, viewport,
-                                         hiding, plain)
-                prepared["title"] = title
+                # only words changed (a clock, a counter, a title): the page
+                # keeps its styles and those words are put in, rather than the
+                # whole page being styled again
+                texts = text_only_change(old_document, old_markup, markup, page_url)
+                if texts is not None:
+                    prepared = {"texts": texts, "title": title}
+                else:
+                    prepared = self._prepare(markup, page_url, headers, opener, host_name, viewport,
+                                             hiding, plain)
+                    prepared["title"] = title
             except Exception:                              # noqa: BLE001
                 prepared = None
             try:
@@ -2299,13 +2379,235 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             markup, title = self._script_queued
             self._script_queued = None
             self._script_dom(markup, title)
+        elif self._script is not None and not self._script_busy:
+            self._script_ready()                          # ready for the page as it next is
+
+    def _script_texts(self, items: list, title: str = "", attrs: list | None = None) -> None:
+        """Only words and attributes the page's scripts changed: the words
+        put in (each the only text of its element), the attributes set and
+        only what they can change styled again, and the page laid out again
+        if anything drawn changed (no more often than its scripts' other
+        changes are shown). What Merlin cannot place, the whole page is asked
+        for instead."""
+        from .dom import Text
+
+        whole = self._script_busy or self._script_queued is not None
+        shown = False
+        if not whole and attrs:
+            restyled = self._script_attrs(attrs)
+            if restyled is None:
+                whole = True
+            elif restyled:
+                shown = True
+        if not whole:
+            for number, data in items:
+                element = self._by_script_id.get(str(number))
+                texts = [c for c in element.children if isinstance(c, Text)] if element is not None else []
+                if element is not None and not texts and data:
+                    # its text was empty, and so left out: put in now, if it
+                    # has nothing else but its ::before and ::after
+                    if any(not getattr(c, "pseudo", None) for c in element.children):
+                        whole = True
+                        break
+                    node = Text(data)
+                    node.parent = element
+                    at = 1 if element.children and element.children[0].pseudo == "before" else 0
+                    element.children.insert(at, node)
+                    shown = shown or self._shown_text(node)
+                    continue
+                if element is None or len(texts) > 1:
+                    whole = True
+                    break
+                if not texts:
+                    continue
+                if texts[0].data != data:
+                    texts[0].data = data
+                    shown = shown or self._shown_text(texts[0])
+        if title and title != self._title and not whole:
+            self._title = title
+            self.titleChanged.emit(title)
+        if shown and self.isVisible():
+            now = time.monotonic()
+            if now >= self._script_rest_until:
+                self._layout()
+                self._script_rest_until = time.monotonic() + max(self._least_rest(), 2 * (time.monotonic() - now))
+            elif not self._texts_layout.isActive():
+                self._texts_layout.start(max(1, int((self._script_rest_until - now) * 1000)))
+        elif shown:
+            self._texts_hidden = True                 # laid out when the tab is shown
+        if self._script is not None and not self._script_busy and self._script_queued is None:
+            # the page's scripts may send more after a short rest
+            QTimer.singleShot(0 if whole else 250, lambda w=whole: self._script_ready(w))
+        elif whole:
+            self._texts_missed = True                 # the whole page, once ready for it
+
+    # elements whose attributes Merlin does more with than style them
+    _OWN_ATTR_TAGS = {"input", "textarea", "select", "option", "iframe", "frame", "video", "audio", "source",
+                      "link", "style", "script", "meta", "base", "html", "head", "title", "dialog", "details",
+                      "form", "object", "embed", "canvas", "picture"}
+    PARTIAL_LIMIT = 800             # elements styled again in place; past that, the whole page
+
+    def _script_attrs(self, attrs: list):
+        """Attributes the page's scripts set: put in, and the elements they can
+        restyle (each one's parent's box, for + and ~ rules) styled again in
+        place. Whether anything was restyled; None if the whole page must
+        come instead."""
+        if not self._styles or self._document is None:
+            return None
+        changed = []
+        for number, values in attrs:
+            element = self._by_script_id.get(str(number))
+            if element is None or element.tag in self._OWN_ATTR_TAGS:
+                return None
+            fresh = {str(k).lower(): str(v) for k, v in (values or {}).items()}
+            fresh["data-mjs"] = element.attrs.get("data-mjs", str(number))
+            if fresh != element.attrs:
+                changed.append((element, fresh))
+        if not changed:
+            return False
+        styler = self._partial_styler()
+        if styler is None:
+            return None
+        # the element and what it holds; with + or ~ rules, what follows it too
+        siblings = getattr(styler, "_merlin_siblings", None)
+        if siblings is None:
+            siblings = any(combinator in ("+", "~")
+                           for index in styler._index.values() for entries in index.values()
+                           for rule, _base in entries for _compound, combinator in rule.selector.parts)
+            styler._merlin_siblings = siblings
+        tops = []
+        for element, _fresh in changed:
+            group = [element]
+            if siblings and hasattr(element.parent, "attrs"):
+                after = element.parent.children[element.parent.children.index(element) + 1:]
+                group += [c for c in after if hasattr(c, "attrs") and not getattr(c, "pseudo", None)]
+            for top in group:
+                if all(top is not t for t in tops):
+                    tops.append(top)
+        ids = {id(t) for t in tops}
+
+        def held(element) -> bool:
+            node = element.parent
+            while node is not None:
+                if id(node) in ids:
+                    return True
+                node = node.parent
+            return False
+
+        tops = [t for t in tops if not held(t)]
+        if sum(1 + sum(1 for _ in t.elements()) for t in tops) > self.PARTIAL_LIMIT:
+            return None
+        for element, fresh in changed:
+            element.attrs = fresh
+        styles = dict(self._styles)
+        styler.styles = styles
+        styler._above = {}                     # what is above an element may have changed
+        root = self._document.root
+        root_size = (styles.get(root) or {}).get("font-size", 16.0)
+        try:
+            for top in tops:
+                parent = top.parent if hasattr(top.parent, "attrs") else None
+                styler._compute(top, styles.get(parent) if parent is not None else None, root_size)
+        except Exception:                                  # noqa: BLE001
+            return None
+        self._styles = styles
+        if any(k in fresh for _e, fresh in changed for k in ("src", "srcset", "style", "class")):
+            QTimer.singleShot(0, self._load_images)
+        return True
+
+    def _partial_styler(self):
+        """A Styler for the page's sheets, to style parts of it again in place;
+        made off the UI thread the first time (a big site's sheets take a while
+        to read), None until it is ready."""
+        key = (hash(tuple(self._sheets or [])), self._styled_at, self._hiding_css())
+        made = getattr(self, "_partial_kit", None)
+        if made is not None and made[0] == key:
+            made[1].document = self._document
+            return made[1]
+        if getattr(self, "_partial_making", None) == key:
+            return None
+        self._partial_making = key
+        sheets, document = list(self._sheets or []), self._document
+        viewport = self._styled_at or (self._page_width(), float(self.height()))
+        hiding = key[2]
+
+        def work():
+            from .css import Styler
+
+            try:
+                styler = Styler(document, author_css=sheets, viewport=viewport, extra_css=hiding)
+            except Exception:                              # noqa: BLE001
+                styler = None
+            self._partial_ready.emit(key, styler)
+
+        threading.Thread(target=work, daemon=True).start()
+        return None
+
+    def _on_partial_ready(self, key, styler) -> None:
+        if getattr(self, "_partial_making", None) == key:
+            self._partial_making = None
+            if styler is not None:
+                self._partial_kit = (key, styler)
+
+    def _script_ready(self, whole: bool = False) -> None:
+        if self._script is not None and not self._script_busy and self._script_queued is None:
+            whole = whole or getattr(self, "_texts_missed", False)
+            self._texts_missed = False
+            try:
+                self._script.send({"type": "dom_ready", "whole": bool(whole)})
+            except Exception:                              # noqa: BLE001
+                pass
+
+    def _texts_laid_out(self) -> None:
+        self._layout()
+        self._script_rest_until = time.monotonic() + self._least_rest()
+
+    def _least_rest(self) -> float:
+        """The least time between showing one change a page's scripts made and
+        the next: 0.3s, or for a big page (laid out in the background, its
+        time not counted otherwise) twice what laying it out last took."""
+        if self._element_count <= BIG_PAGE:
+            return 0.3
+        return min(3.0, max(0.75, 2 * getattr(self, "_layout_cost", 0.0)))
+
+    def _shown_text(self, node) -> bool:
+        """Whether a text node is in a part of the page that is drawn."""
+        styles = self._styles or {}
+        element = getattr(node, "parent", None)
+        while element is not None:
+            style = styles.get(element)
+            if style is not None and style.get("display") == "none":
+                return False
+            element = getattr(element, "parent", None)
+        return True
+
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        # shown again: what its scripts did meanwhile, now
+        if getattr(self, "_script_queued", None) is not None and not self._script_busy:
+            QTimer.singleShot(0, self._script_rested)
+        if getattr(self, "_texts_hidden", False):
+            self._texts_hidden = False
+            QTimer.singleShot(0, self._layout)
 
     def _apply_script_dom(self, number: int, markup: str, prepared) -> None:
         """Show the page as scripts changed it, keeping the scroll, the fields and
         what is typed in them, and the pictures already fetched."""
         self._script_busy = False
         applied = number == self._load_number and prepared is not None and self._script is not None
-        if number == self._load_number and prepared is not None and self._script is not None:
+        if applied and "texts" in prepared:
+            for node, data in prepared["texts"]:
+                node.data = data
+            self._markup = markup
+            title = prepared.get("title") or ""
+            if title and title != self._title:
+                self._title = title
+                self.titleChanged.emit(title)
+            if any(self._shown_text(node) for node, _data in prepared["texts"]):
+                self._layout()
+            # words changed only where nothing is drawn (YouTube keeps hidden
+            # timers, tooltips and live regions up to date): nothing to lay out
+        elif number == self._load_number and prepared is not None and self._script is not None:
             old = {e.attrs.get("data-mjs"): w for e, w in self._widgets.items() if e.attrs.get("data-mjs")}
             old_frames = dict(self._frames)
             self._document = prepared["document"]
@@ -2343,12 +2645,20 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             self._layout()
             self._load_images()
         if applied:
+            # a rest after each, of at least 0.3s or twice what styling and
+            # laying it out took: a heavy page that keeps changing gets a
+            # third of a core at most
             cost = time.monotonic() - getattr(self, "_script_started", time.monotonic())
-            self._script_rest_until = time.monotonic() + max(0.3, 2 * cost)
-        if self._script_queued is not None:
+            # a big page is laid out in the background, its time not counted
+            # here: it rests at least three quarters of a second
+            self._script_rest_until = time.monotonic() + max(self._least_rest(), 2 * cost)
+        if self._script_queued is not None and self.isVisible():
             markup, title = self._script_queued
             self._script_queued = None
             self._script_dom(markup, title)
+        elif self._script_queued is None:
+            # nothing waiting: once rested, the page's scripts may send more
+            self._script_rest.start(max(1, int((self._script_rest_until - time.monotonic()) * 1000)))
 
     def _page_width(self) -> float:
         if self.is_frame():
@@ -2402,12 +2712,16 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
         height = float(max(1, self.height()))
 
         def work():
+            started = time.monotonic()
             try:
                 out = Layout(document, styles, width, zoom, images=images, media=media_sizes,
                              viewport_height=height, live_controls=True,
                              font_aliases=aliases).run()
             except Exception:                              # noqa: BLE001
                 out = None
+            # how long such a page takes to lay out: its scripts' changes are
+            # shown no more often than twice that apart
+            self._layout_cost = time.monotonic() - started
             try:
                 self._laid_out.emit(number, out)
             except RuntimeError:

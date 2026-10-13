@@ -11945,7 +11945,9 @@ var moCallback = (element, parentNode) => {
           subtree && target.contains(parentNode)) || !parentNode && (subtree && (target === ownerDocument || /* c8 ignore next */
           target.contains(element)) || !subtree && target[characterData ? "childNodes" : "children"].includes(element))) {
             const { callback, records, scheduled } = observer;
-            records.push(createRecord("childList", target, element, parentNode ? [] : [
+            // Merlin: the record's target is the node whose children changed,
+            // as the DOM standard has it; linkedom gave the node observed
+            records.push(createRecord("childList", parentNode || element.parentNode || target, element, parentNode ? [] : [
               element
             ], parentNode ? [
               element

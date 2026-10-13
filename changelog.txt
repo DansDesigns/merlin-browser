@@ -5,6 +5,29 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.33
+  Merlin Engine: far less CPU on pages whose scripts keep changing them, as
+  YouTube's do. On YouTube's home page with a part of it changing ten times a
+  second, Merlin and its helpers together went from about 70% of a core to
+  under 30%; with the changes in a hidden part, from about 55% to under 10%.
+  - Only what changed is sent from the page's scripts to Merlin: changed
+    words and attributes, not the whole page. Merlin puts the words in and
+    styles again only the elements whose attributes changed (and, for + and
+    ~ rules, what follows them), where every change had meant styling the
+    whole page again, a second's work for YouTube's.
+  - The page's scripts send their next change only once Merlin has shown the
+    last. The whole page had been written out every 60ms while it kept
+    changing, every copy but the last thrown away.
+  - Changes where nothing is drawn (hidden timers, tooltips and live regions)
+    are not laid out at all.
+  - A big page's changes are shown no more often than twice what laying it
+    out takes, measured as it goes.
+  - Every change had laid the whole page out twice on any page with a
+    picture that could not be fetched or was blocked (nearly every page).
+    It is laid out once now.
+  - A tab that is not shown does not style or lay out what its scripts change
+    until it is shown again; its tab's title is still kept up to date.
+
 1.8.32
   - Merlin opens on the tab that was open when it was closed, and loads it
     first; the other tabs wait until they are selected, as before. It had

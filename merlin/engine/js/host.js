@@ -2776,14 +2776,105 @@ function pageNow() {
   return out.join("");
 }
 
-let pending = null, lastSent = "";
+// The page as it now is goes to Merlin when it has changed, and only once
+// Merlin has shown the last one and is ready for more ("dom_ready"): the whole
+// page had been written out again every 60ms while a page kept changing
+// (YouTube's), each copy but the last thrown away, a core kept busy for it.
+// Should Merlin not answer, the page goes anyway after a few seconds.
+let pending = null, lastSent = "", awaiting = false, awaitingSince = 0;
+const PATIENCE = 4000;
+// Only words changed since the last time (a clock, a counter, a player's
+// time): those, not the whole page. Each is the only text of its element, so
+// Merlin finds it by the element's number.
+// Attributes changed (a class, a style, hidden) go the same way: the
+// element's attributes as they now are, and Merlin styles only what they
+// can change, not the whole page.
+let structural = true;
+const textDirty = new Set();
+const attrDirty = new Set();
+const OWN_TEXT = new Set(["SCRIPT", "STYLE", "TEXTAREA", "OPTION", "TITLE", "NOSCRIPT", "SELECT"]);
+// what Merlin does more with than style: their changes go as the whole page
+const OWN_ATTRS = new Set(["INPUT", "TEXTAREA", "SELECT", "OPTION", "IFRAME", "FRAME", "VIDEO", "AUDIO", "SOURCE",
+                           "LINK", "STYLE", "SCRIPT", "META", "BASE", "HTML", "HEAD", "TITLE", "DIALOG", "DETAILS",
+                           "FORM", "OBJECT", "EMBED", "CANVAS", "PICTURE"]);
+const onlyText = (nodes) => [...(nodes || [])].every((n) => n && n.nodeType === 3);
+function mutated(records) {
+  for (const record of records) {
+    if (record.type === "characterData" && record.target && record.target.parentNode) {
+      textDirty.add(record.target.parentNode);
+    } else if (record.type === "childList" && record.target && record.target.nodeType === 1
+               && onlyText(record.addedNodes) && onlyText(record.removedNodes)) {
+      // element.textContent = "...": its text node replaced by another
+      textDirty.add(record.target);
+    } else if (record.type === "attributes" && record.target && record.target.nodeType === 1
+               && !OWN_ATTRS.has(record.target.tagName)) {
+      attrDirty.add(record.target);
+    } else {
+      structural = true;
+    }
+  }
+  schedule();
+}
+function attrChanges() {
+  const items = [];
+  for (const element of attrDirty) {
+    if (!element.isConnected) continue;                    // gone: its removal came as a change of its own
+    if (!ids.get(element)) return null;
+    const attrs = {};
+    for (const attr of element.attributes || []) attrs[attr.name] = attr.value;
+    items.push([ids.get(element), attrs]);
+  }
+  return items;
+}
+function textChanges() {
+  const items = [];
+  for (const parent of textDirty) {
+    if (!parent || parent.nodeType !== 1 || !parent.isConnected || OWN_TEXT.has(parent.tagName)) return null;
+    let texts = 0, text = null;
+    for (const child of parent.childNodes) if (child.nodeType === 3) { texts++; text = child; }
+    if (texts > 1 || !ids.get(parent)) return null;        // Merlin has to know the element
+    items.push([ids.get(parent), text ? String(text.data ?? "") : ""]);
+  }
+  return items;
+}
 function changed() {
+  structural = true;
+  schedule();
+}
+function schedule() {
   if (pending) return;
+  const waited = Date.now() - awaitingSince;
+  const delay = awaiting && waited < PATIENCE ? PATIENCE - waited : 60;
   pending = setTimeout(() => {
     pending = null;
+    if (awaiting && Date.now() - awaitingSince < PATIENCE) return;   // dom_ready will ask again
+    if (!structural && lastSent) {
+      if (!textDirty.size && !attrDirty.size) return;
+      const items = textChanges(), attrs = attrChanges();
+      textDirty.clear(); attrDirty.clear();
+      if (items && attrs) {
+        if (items.length || attrs.length) {
+          awaiting = true; awaitingSince = Date.now();
+          lastSent = "\u0000changed";                  // the next whole page always goes
+          send({ type: "texts", items, attrs, title: document_.title || "" });
+        }
+        return;
+      }
+    }
+    structural = false;
+    textDirty.clear(); attrDirty.clear();
     const html = pageNow();
-    if (html !== lastSent) { lastSent = html; send({ type: "dom", html, title: document_.title || "" }); }
-  }, 60);
+    if (html !== lastSent) {
+      lastSent = html; awaiting = true; awaitingSince = Date.now();
+      send({ type: "dom", html, title: document_.title || "" });
+    }
+  }, delay);
+}
+function domReady(whole) {
+  awaiting = false;
+  if (pending) { clearTimeout(pending); pending = null; }
+  if (whole) structural = true;      // Merlin could not place some words: the whole page
+  schedule();                        // sent only if the page has changed since
 }
 
 // ------------------------------------------------------------------ events from Merlin
@@ -2841,6 +2932,7 @@ function dispatch(message) {
     for (const observer of resizers) observer._check();
     return;
   }
+  if (message.type === "dom_ready") { domReady(!!message.whole); return; }
   if (message.type === "resize") {
     state.width = message.width; state.height = message.height; fire(globalThis, "resize"); return;
   }
@@ -3012,7 +3104,7 @@ async function main() {
         for (const [id, box] of Object.entries(message.geometry || {})) geometry.set(Number(id), box);
         send({ type: "ready" });
         watchForScripts();
-        new globalThis.MutationObserver(changed).observe(document_, { childList: true, subtree: true, attributes: true, characterData: true });
+        new globalThis.MutationObserver(mutated).observe(document_, { childList: true, subtree: true, attributes: true, characterData: true });
         runScripts().then(changed).catch(e => reportError(e));
       } else if (message.type === "answer") {
         const resolve = waiting.get(message.id); waiting.delete(message.id); resolve?.(message);
