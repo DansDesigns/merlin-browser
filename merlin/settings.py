@@ -110,7 +110,7 @@ DEFAULTS = {
         {"title": "Convert Files", "url": "http://convert.to.it/"},
         {"title": "Hacker News", "url": "https://news.ycombinator.com"},
         {"title": "GitHub", "url": "https://github.com"},
-        {"title": "Codeberg", "url": "https://codeberg.org"},
+        {"title": "Cover Your Tracks", "url": "https://coveryourtracks.eff.org"},
     ],
     "window_geometry": None,
     "window_maximized": False,
@@ -161,6 +161,7 @@ DEFAULTS = {
     "engine_switched": False,          # existing settings moved to Merlin Engine, once
     "ponder_default": False,           # Ponder became the search engine, once
     "tiles_convert": False,            # the Wikipedia tile became Convert Files, once
+    "tiles_tracks": False,             # the Codeberg tile became Cover Your Tracks, once
     "offer_save_passwords": True,      # after a login in a Merlin Engine tab
     "ui_scale": 1.0,                   # interface size, 1.0 = 100%: applied at start
     "web_fonts": True,                 # Merlin Engine uses sites' own fonts
@@ -223,6 +224,17 @@ class Settings(QObject):
                             and str(t.get("title", "")).lower() == "wikipedia" else t
                             for t in tiles]
                     self._data["tiles_convert"] = True
+                # 1.8.35: the Codeberg tile is Cover Your Tracks (EFF's test of
+                # how well the browser hides from trackers); once, as above
+                if not stored.get("tiles_tracks"):
+                    tiles = self._data.get("start_tiles")
+                    if isinstance(tiles, list):
+                        self._data["start_tiles"] = [
+                            {"title": "Cover Your Tracks", "url": "https://coveryourtracks.eff.org"}
+                            if isinstance(t, dict) and "codeberg.org" in str(t.get("url", ""))
+                            and str(t.get("title", "")).lower() == "codeberg" else t
+                            for t in tiles]
+                    self._data["tiles_tracks"] = True
                 # 1.8.23: Ponder, built in, is the search engine; once, so
                 # another chosen afterwards stays chosen
                 if not stored.get("ponder_default"):

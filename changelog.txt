@@ -5,6 +5,33 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.35
+  - The start page's Codeberg tile is now Cover Your Tracks, EFF's test of
+    how well the browser hides from trackers. Changed once on an existing
+    start page; a Codeberg tile added back afterwards stays.
+  Merlin Engine:
+  - Google's "I'm not a robot" check gets going. Its box talks to the page
+    over postMessage, addressed to https://www.google.com:443 with the port
+    spelled out; Merlin compared that as written with the page's origin and
+    dropped the message, so the box waited, timed out and stayed greyed out.
+    Origins are now compared as a browser reads them.
+  - A frame with nothing in it (no src) has a window the page can use, as
+    in a browser: reCAPTCHA takes its JSON from one, and had stopped there.
+  - document.createElement("IFRAME") makes an <iframe>: names are lower
+    case in an HTML document, whatever case they are asked for in.
+  - Cover Your Tracks gets past "Testing your browser":
+    * window.location = "..." (and document.location =) now goes to the
+      address, as location.href = does; it had done nothing.
+    * Its test frames are made empty and then given their trackers'
+      addresses by script; the one the content blocker stops had stopped
+      every frame of the page being loaded or placed. It is now left out,
+      as blocked, and the others load.
+    * navigator.plugins and navigator.mimeTypes are Chrome's (its PDF
+      viewer, under five names), with navigator.productSub and the rest;
+      the fingerprinting script stopped on them missing.
+  - A debugging zip now keeps each frame's stylesheets too, so a frame's
+    look can be told from it.
+
 1.8.34
   - Right-click the back or forward button for the pages that way in the
     tab, the nearest first, as Brave lists them; pick one to go straight

@@ -18543,6 +18543,10 @@ var HTMLDocument = class extends Document2 {
   }
   createElement(localName, options) {
     const builtin = !!(options && options.is);
+    // an HTML document's names are lower case, however they are asked for:
+    // reCAPTCHA's createElement("IFRAME") had made an element no frame code
+    // knew as an <iframe>
+    localName = String(localName).toLowerCase();
     const element = createHTMLElement(this, builtin, localName, options);
     if (builtin) element.setAttribute("is", options.is);
     return element;

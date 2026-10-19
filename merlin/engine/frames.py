@@ -241,6 +241,15 @@ class FramesMixin:
         for element in present:
             view = self._frames.get(element)
             wanted = self._frame_source(element)
+            if wanted is None and view is not None:
+                # a frame given a blocked address after it was made (Cover
+                # Your Tracks' tracker frames, made empty and given their
+                # tracker's address by script): it goes, as the content
+                # blocker stops it. Taken as an address to load, it had
+                # stopped every frame of the page being loaded or placed
+                self._end_frame(self._frames.pop(element))
+                self._places.pop(element, None)
+                continue
             if view is None:
                 if wanted is None or self._frame_depth + 1 > MAX_DEPTH or budget <= 0:
                     continue
@@ -368,7 +377,13 @@ class FramesMixin:
         receiver = origin_of(target._url) if target._url.scheme() in ("http", "https") else target._inherited_origin()
         if wanted == "/":
             wanted = sender
-        if wanted != "*" and wanted.rstrip("/") != receiver:
+        elif wanted != "*":
+            # an origin, as a browser reads it: reCAPTCHA's frame writes its
+            # parent's as https://www.google.com:443, the port spelled out,
+            # and its "recaptcha-setup" had gone undelivered (the check then
+            # timed out, never shown)
+            wanted = origin_of(QUrl(wanted)) if QUrl(wanted).scheme() in ("http", "https") else wanted.rstrip("/")
+        if wanted != "*" and wanted != receiver:
             return                                     # meant for another page
         self._carry_ports(message.get("ports"), target)
         target._deliver({"type": "message", "data": message.get("data"), "origin": sender,

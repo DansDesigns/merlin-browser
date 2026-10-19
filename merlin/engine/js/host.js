@@ -231,6 +231,38 @@ class MerlinStorage {
   _save() { if (this._persist) send({ type: "storage", items: Object.fromEntries(this._items) }); }
 }
 
+// navigator.plugins and mimeTypes as Chrome has them: since Chrome 94 the
+// same five PDF viewers on every computer, each taking application/pdf and
+// text/pdf
+let pluginLists = null;
+function chromePlugins() {
+  if (pluginLists) return pluginLists;
+  const listOf = (items, tag) => {
+    const list = Object.create(null);
+    items.forEach((item, i) => { list[i] = item; });
+    Object.defineProperties(list, {
+      length: { value: items.length }, item: { value: (i) => items[i] ?? null },
+      namedItem: { value: (name) => items.find(x => x.name === name || x.type === name) || null },
+      refresh: { value: () => {} }, [Symbol.iterator]: { value: () => items[Symbol.iterator]() },
+      [Symbol.toStringTag]: { value: tag },
+    });
+    for (const item of items) { const key = item.name || item.type; if (!(key in list)) Object.defineProperty(list, key, { value: item }); }
+    return list;
+  };
+  const names = ["PDF Viewer", "Chrome PDF Viewer", "Chromium PDF Viewer", "Microsoft Edge PDF Viewer", "WebKit built-in PDF"];
+  const kinds = [["application/pdf", "Portable Document Format"], ["text/pdf", "Portable Document Format"]];
+  const mimes = kinds.map(([type, description]) => ({ type, description, suffixes: "pdf", enabledPlugin: null }));
+  const plugins = names.map((name) => {
+    const plugin = listOf(mimes, "Plugin");
+    Object.defineProperties(plugin, { name: { value: name }, description: { value: "Portable Document Format" },
+                                      filename: { value: "internal-pdf-viewer" } });
+    return plugin;
+  });
+  for (const mime of mimes) mime.enabledPlugin = plugins[0];
+  pluginLists = { plugins: listOf(plugins, "PluginArray"), mimeTypes: listOf(mimes, "MimeTypeArray") };
+  return pluginLists;
+}
+
 function makeLocation() {
   const current = () => new URL(state.url);
   const location = {
@@ -378,8 +410,16 @@ function install(html) {
   g.Image = function Image(width, height) { const img = document_.createElement("img"); if (width) img.width = width; if (height) img.height = height; return img; };
   g.Option = function Option(text = "", value) { const o = document_.createElement("option"); o.textContent = text; if (value !== undefined) o.value = value; return o; };
   g.window = g; g.self = g; g.globalThis = g; g.document = document_; g.top = g; g.parent = g; g.frames = g;
-  g.location = makeLocation();
-  document_.location = g.location;
+  // window.location = "..." and document.location = "..." go there, as
+  // location.href = "..." does: Cover Your Tracks' test moves on to its
+  // results so, and had stayed on "Testing your browser" for ever
+  const pageLocation = makeLocation();
+  for (const holder of [g, document_]) {
+    try {
+      Object.defineProperty(holder, "location", { configurable: true, enumerable: true,
+        get: () => pageLocation, set: (v) => navigate(v) });
+    } catch (_) { holder.location = pageLocation; }
+  }
   try { Object.defineProperty(document_, "defaultView", { get: () => g, configurable: true }); } catch (_) {}
   try { Object.defineProperty(document_, "URL", { get: () => state.url, configurable: true }); } catch (_) {}
   try { Object.defineProperty(document_, "baseURI", { get: () => state.url, configurable: true }); } catch (_) {}
@@ -456,6 +496,7 @@ function install(html) {
   };
   g.navigator = {
     userAgent: state.userAgent, appVersion: state.userAgent.replace(/^Mozilla\//, ""), appName: "Netscape",
+    appCodeName: "Mozilla", product: "Gecko", productSub: "20030107", vendorSub: "",
     platform: state.userAgent.includes("Windows") ? "Win32" : state.userAgent.includes("Macintosh") ? "MacIntel"
       : "Linux x86_64", vendor: "Google Inc.",
     language: state.language, languages: [state.language, state.language.split("-")[0]], onLine: true,
@@ -464,6 +505,9 @@ function install(html) {
     sendBeacon(url, data) { merlinFetch(url, { method: "POST", body: data ?? null }).catch(() => {}); return true; },
     permissions: { query: async () => ({ state: "prompt", addEventListener() {} }) },
     mediaDevices: undefined, geolocation: undefined,
+    // the plugins Chrome lists (its PDF viewer, under five names), which
+    // fingerprinting scripts read: missing, Cover Your Tracks' threw
+    plugins: chromePlugins().plugins, mimeTypes: chromePlugins().mimeTypes, pdfViewerEnabled: true,
     // no serviceWorker at all: a site then does without, as in a browser with
     // them off; one there, but never taking requests, left sites waiting
   };
@@ -2685,11 +2729,50 @@ function installFrames(g, made) {
   const isFrame = (el) => el && (el.tagName === "IFRAME" || el.tagName === "FRAME");
   try {
     Object.defineProperty(target, "contentWindow", { configurable: true,
-      get() { return isFrame(this) ? frameWindow(this) : undefined; } });
-    // another site's document is not this page's to read
+      get() { return !isFrame(this) ? undefined : isBlank(this) ? blankWindow(this) : frameWindow(this); } });
+    // another site's document is not this page's to read; a blank frame's is
     Object.defineProperty(target, "contentDocument", { configurable: true,
-      get() { return isFrame(this) ? null : undefined; } });
+      get() { return !isFrame(this) ? undefined : isBlank(this) ? blankWindow(this).document : null; } });
   } catch (_) {}
+}
+
+// A frame with nothing in it (no src, or about:blank) is the page's own
+// origin, and its window is the page's to use: scripts take what they need
+// from it, such as an untouched JSON (reCAPTCHA's does, and had stopped on
+// undefined.parse, its check never shown). Its window here is this one's
+// built-ins, with a document of its own.
+const blankWindows = new WeakMap();
+function isBlank(iframe) {
+  if (iframe.hasAttribute && iframe.hasAttribute("srcdoc")) return false;
+  const src = (iframe.getAttribute && iframe.getAttribute("src") || "").trim().toLowerCase();
+  return !src || src === "about:blank" || src.startsWith("javascript:");
+}
+function blankWindow(iframe) {
+  let found = blankWindows.get(iframe);
+  if (found) return found;
+  let doc = null;
+  const documentOf = () => doc || (doc = document_.implementation.createHTMLDocument(""));
+  const own = {
+    document: documentOf, window: () => found, self: () => found, frames: () => found, globalThis: () => found,
+    parent: () => globalThis, top: () => globalThis.top || globalThis, frameElement: () => iframe, opener: () => null,
+    location: () => ({ href: "about:blank", origin: globalThis.location ? globalThis.location.origin : "null",
+                       protocol: "about:", host: "", hostname: "", pathname: "blank", search: "", hash: "",
+                       toString() { return "about:blank"; }, assign() {}, replace() {}, reload() {} }),
+    length: () => 0, closed: () => false,
+  };
+  const set = {};
+  found = new Proxy(set, {
+    get(_, key) {
+      if (Object.prototype.hasOwnProperty.call(set, key)) return set[key];
+      if (typeof key === "string" && Object.prototype.hasOwnProperty.call(own, key)) return own[key]();
+      const value = Reflect.get(globalThis, key);
+      return typeof value === "function" && !/^[A-Z]/.test(String(key)) ? value.bind(globalThis) : value;
+    },
+    set(_, key, value) { set[key] = value; return true; },
+    has(_, key) { return key in set || key in own || key in globalThis; },
+  });
+  blankWindows.set(iframe, found);
+  return found;
 }
 
 // a message's data, as structured cloning carries it: JSON with what JSON

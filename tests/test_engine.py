@@ -3844,7 +3844,7 @@ def test_frames(app) -> None:
     Pages.pages = {
         "parent.html": (
             "<!DOCTYPE html><html><head><title>P</title></head><body style='margin:0;background:#ffffff'>"
-            "<p id=got>waiting</p><p id=port>waiting</p><p id=loads>0</p>"
+            "<p id=got>waiting</p><p id=port>waiting</p><p id=loads>0</p><p id=blank>waiting</p>"
             f"<iframe id=f src='{other}/child.html' width=320 height=90 frameborder=0></iframe>"
             f"<iframe id=deny src='{other}/deny.html' width=200 height=60></iframe>"
             "<script>let loads = 0; const frame = document.getElementById('f');"
@@ -3859,13 +3859,22 @@ def test_frames(app) -> None:
             " channel.port1.onmessage = (m) => { document.getElementById('port').textContent = 'port: ' + m.data; };"
             " e.source.postMessage('take this port', '*', [channel.port2]);"
             " frame.contentWindow.postMessage('not for you', 'https://elsewhere.test');"
-            "});</script></body></html>", {}),
+            # an origin written as an address, as reCAPTCHA's frame writes its parent's
+            f" frame.contentWindow.postMessage('with a path', '{other}/some/path?x=1');"
+            "});"
+            # a blank frame's window is the page's own origin: its JSON is there
+            "const blank = document.createElement('IFRAME'); document.body.appendChild(blank);"
+            "document.getElementById('blank').textContent = 'blank: ' + blank.localName + ' '"
+            " + (typeof blank.contentWindow.JSON.parse) + ' ' + (blank.contentDocument !== null)"
+            " + ' ' + (document.querySelector('iframe:last-of-type') === blank);"
+            "</script></body></html>", {}),
         "child.html": (
             "<!DOCTYPE html><html><body style='margin:0;background:#f9f9f9'><p id=c>child</p>"
             "<script>const c = document.getElementById('c');"
             "c.textContent = 'top is another window: ' + (window.top !== window);"
             "window.addEventListener('message', (e) => {"
             " if (e.data === 'not for you') { c.textContent = 'wrong: a message meant for another origin came'; return; }"
+            " if (e.data === 'with a path') { document.title = 'with a path came'; return; }"
             " if (e.ports && e.ports[0]) { e.ports[0].postMessage('hello from ' + location.host); c.textContent = 'got a port from ' + e.origin; }"
             "});"
             "window.parent.postMessage({hello: 'world', list: [1, undefined, new Uint8Array([7, 8])]}, '*');"
@@ -3934,6 +3943,11 @@ def test_frames(app) -> None:
         check("the frame got the port from the parent's origin, and no message meant for another origin",
               text_of(child, "c") == "got a port from " + top, text_of(child, "c"))
         check("the iframe's load event fired in the parent", text_of(view, "loads") != "0", text_of(view, "loads"))
+        until(lambda: child.title() == "with a path came", 5)
+        check("a message whose target origin is written as an address (path, port) reaches that origin",
+              child.title() == "with a path came", child.title())
+        check("a blank frame made by script is an <iframe> whose window has the page's JSON and a document",
+              text_of(view, "blank") == "blank: iframe function true true", text_of(view, "blank"))
         until(lambda: frame_of(view, "deny") is not None and frame_of(view, "deny")._document is not None, 10)
         denied = frame_of(view, "deny")
         check("a page that says X-Frame-Options: DENY is not shown in the frame",
@@ -5388,6 +5402,99 @@ const report = () => { document.getElementById('log').textContent = out.join(' '
         server.shutdown()
 
 
+def test_tracker_test_pages(app) -> None:
+    """Cover Your Tracks' first step: frames made empty and given a tracker's
+    address by script, one the content blocker stops, then window.location
+    = "..." to the next step. The blocked frame had stopped every frame being
+    loaded, and window.location = had gone nowhere. Also navigator.plugins,
+    which its fingerprinting reads."""
+    from merlin.engine import MerlinView
+    from merlin.engine.script import LocalStorage
+
+    runtime = _node_for_tests()
+    if not runtime:
+        print("  skip  tracker test pages: Node.js is not here")
+        return
+    folder = tempfile.mkdtemp(prefix="merlin-tracks-")
+    asked = []
+    open(os.path.join(folder, "start.html"), "w").write("""<!DOCTYPE html><html><body>
+<p id=log>testing</p><iframe id=a style="width:1px;height:1px"></iframe><iframe id=t style="width:1px;height:1px"></iframe>
+<script>
+document.getElementById('log').textContent = 'plugins ' + navigator.plugins.length + ' ' + navigator.plugins[0].name
+  + ' ' + navigator.mimeTypes['application/pdf'].type + ' ' + navigator.productSub;
+window.onload = function () {
+  setTimeout(function () {
+    document.getElementById('a').src = '/frame.html?tracker';
+    document.getElementById('t').src = '/frame.html?allowed';
+  }, 700);
+  setTimeout(function () { window.location = '/next.html?a=1'; }, 2200);
+};
+</script></body></html>""")
+    open(os.path.join(folder, "frame.html"), "w").write("<p>frame</p>")
+    open(os.path.join(folder, "next.html"), "w").write("<title>next</title><p>next step</p>")
+
+    class Pages(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def do_GET(self):
+            asked.append(self.path)
+            super().do_GET()
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Pages)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    class Host:
+        settings = {}
+
+        def javascript_allowed(self, site):
+            return True
+
+        def node_for_scripts(self):
+            return runtime
+
+        def script_cache_dir(self):
+            return os.path.join(folder, "cache")
+
+        def local_storage(self):
+            return LocalStorage(None)
+
+    view = MerlinView()
+    view._host = Host()
+    view._blocked = lambda url, kind="": "tracker" in url      # the content blocker's say
+    view.resize(800, 600)
+    view.show()
+
+    def until(test, seconds):
+        end = time.time() + seconds
+        while time.time() < end and not test():
+            app.processEvents()
+            time.sleep(0.01)
+        return test()
+
+    def log():
+        found = next((x for x in view._document.root.elements() if x.id == "log"), None) if view._document else None
+        return " ".join(found.text().split()) if found is not None else ""
+
+    try:
+        view.setUrl(QUrl(f"http://127.0.0.1:{server.server_address[1]}/start.html"))
+        until(lambda: "plugins" in log(), 10)
+        check("navigator.plugins and mimeTypes are Chrome's PDF viewers",
+              log() == "plugins 5 PDF Viewer application/pdf 20030107", log())
+        until(lambda: "/frame.html?allowed" in asked, 8)
+        check("a frame given an address by script loads, beside one the blocker stops",
+              "/frame.html?allowed" in asked and "/frame.html?tracker" not in asked, str(asked))
+        until(lambda: view.title() == "next", 8)
+        check("window.location = '...' goes there", view.url().toString().endswith("/next.html?a=1"),
+              view.url().toString())
+    finally:
+        view.shutdown()
+        server.shutdown()
+
+
 def main() -> int:
     app = QApplication(sys.argv[:1])
     for test in (test_no_chromium, test_without_html_parser, test_parsing, test_cascade, test_layout,
@@ -5493,6 +5600,8 @@ def main() -> int:
     test_scripts_changes_sent_lightly(app)
     print("test_requests_as_a_browser_makes_them")
     test_requests_as_a_browser_makes_them(app)
+    print("test_tracker_test_pages")
+    test_tracker_test_pages(app)
     if FAILED:
         print(f"\n{len(FAILED)} FAILED: " + "; ".join(FAILED))
         return 1

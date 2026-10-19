@@ -1828,6 +1828,35 @@ def test_javascript_permission(app) -> None:
           [t["title"] for t in fresh.get("start_tiles")][0] == "Convert Files"
           and fresh.get("start_tiles")[0]["url"] == "http://convert.to.it/",
           str([t["title"] for t in fresh.get("start_tiles")]))
+    check("and Cover Your Tracks where Codeberg was",
+          [t["title"] for t in fresh.get("start_tiles")][-1] == "Cover Your Tracks"
+          and fresh.get("start_tiles")[-1]["url"] == "https://coveryourtracks.eff.org"
+          and not any("codeberg" in t["url"] for t in fresh.get("start_tiles")),
+          str(fresh.get("start_tiles")))
+    import json as _json
+
+    os.makedirs(os.path.dirname(cfg.SETTINGS_FILE), exist_ok=True)
+    kept_file = open(cfg.SETTINGS_FILE, encoding="utf-8").read() if os.path.exists(cfg.SETTINGS_FILE) else None
+    try:
+        with open(cfg.SETTINGS_FILE, "w", encoding="utf-8") as handle:
+            _json.dump({"tiles_convert": True, "start_tiles": [
+                {"title": "Mine", "url": "https://mine.example/"},
+                {"title": "Codeberg", "url": "https://codeberg.org"}]}, handle)
+        moved = cfg.Settings()
+        check("an existing start page's Codeberg tile becomes Cover Your Tracks, the others kept",
+              [t["title"] for t in moved.get("start_tiles")] == ["Mine", "Cover Your Tracks"],
+              str(moved.get("start_tiles")))
+        with open(cfg.SETTINGS_FILE, "w", encoding="utf-8") as handle:
+            _json.dump({"tiles_convert": True, "tiles_tracks": True, "start_tiles": [
+                {"title": "Codeberg", "url": "https://codeberg.org"}]}, handle)
+        check("once only: a Codeberg tile added back afterwards stays",
+              [t["title"] for t in cfg.Settings().get("start_tiles")] == ["Codeberg"])
+    finally:
+        if kept_file is None:
+            os.remove(cfg.SETTINGS_FILE)
+        else:
+            with open(cfg.SETTINGS_FILE, "w", encoding="utf-8") as handle:
+                handle.write(kept_file)
     runtime = os.environ.get("MERLIN_NODE") or node_path()
     if not runtime or not os.path.exists(runtime):
         print("  skip  JavaScript: Node.js is not here (set MERLIN_NODE)")
@@ -2455,7 +2484,7 @@ def test_web_apps_leave_the_session_alone(app) -> None:
     os.makedirs(os.path.dirname(cfg.SETTINGS_FILE), exist_ok=True)
     with open(cfg.SETTINGS_FILE, "w", encoding="utf-8") as handle:
         _json.dump({"last_session": ["https://one.example/", "https://two.example/"],
-                    "tiles_convert": True, "ponder_default": True, "engine_switched": True}, handle)
+                    "tiles_convert": True, "tiles_tracks": True, "ponder_default": True, "engine_switched": True}, handle)
     # two Merlins, as two processes would be: the browser, and a web app
     browser = cfg.Settings()
     web_app = cfg.Settings()

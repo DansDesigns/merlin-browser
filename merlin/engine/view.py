@@ -3672,7 +3672,11 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
                     "scripts": getattr(child, "script_status", ""),
                     "console": "\n".join(f"[{level}] {text}" for level, text in child.console_lines),
                     "network": "\n".join(child.network_lines), "page": child._markup or "",
-                    "original": getattr(child, "_arrived_markup", "")}))
+                    "original": getattr(child, "_arrived_markup", ""),
+                    # its stylesheets too: a frame's look (reCAPTCHA's box)
+                    # could not be told from the zip without them
+                    "sheets": list(child._sheets if child._sheets is not None else (
+                        child._document.stylesheets() if child._document is not None else []))}))
                 gather(child, name + "-")
         gather(self, "frame-")
 
@@ -3708,6 +3712,8 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
                     bundle.writestr(f"frames/{name}/original.html", frame.pop("original"))
                     bundle.writestr(f"frames/{name}/console.txt", frame.pop("console"))
                     bundle.writestr(f"frames/{name}/network.txt", frame.pop("network"))
+                    for number, text in enumerate(frame.pop("sheets")):
+                        bundle.writestr(f"frames/{name}/sheets/{number:03d}.css", text or "")
                     bundle.writestr(f"frames/{name}/frame.json", json.dumps(frame, indent=2))
 
         if done is None:
