@@ -900,12 +900,9 @@ class Layout:
         # nothing around it moves
         dx = dy = 0.0
         if position == "relative":
-            left = self._length(style.get("left"), available)
-            right = self._length(style.get("right"), available)
-            top = self._length(style.get("top"), 0.0, vertical=True)
-            bottom = self._length(style.get("bottom"), 0.0, vertical=True)
-            dx = left if left is not None else (-right if right is not None else 0.0)
-            dy = top if top is not None else (-bottom if bottom is not None else 0.0)
+            # top and bottom percentages of the containing block's height, when
+            # it has one; with none they count as auto, as in browsers
+            dx, dy = self._relative_shift(style, available, self._height_base(element))
         translate = style.get("transform")
         if isinstance(translate, tuple):
             tx, ty = translate
@@ -1257,6 +1254,17 @@ class Layout:
         return cursor - y, first_baseline
 
     # ------------------------------------------------------------ lengths
+    def _relative_shift(self, style: dict, width: float, height: float) -> tuple:
+        """How far position: relative moves a box: (dx, dy), from left (or
+        right) and top (or bottom), percentages of the containing block."""
+        left = self._length(style.get("left"), width)
+        right = self._length(style.get("right"), width)
+        top = self._length(style.get("top"), height, vertical=True)
+        bottom = self._length(style.get("bottom"), height, vertical=True)
+        dx = left if left is not None else (-right if right is not None else 0.0)
+        dy = top if top is not None else (-bottom if bottom is not None else 0.0)
+        return dx, dy
+
     def _length(self, value, reference: float, vertical: bool = False):
         """A computed length in page pixels, zoom included; None for auto.
 
@@ -2245,6 +2253,18 @@ class Layout:
                     if part[0] == "image":
                         _k, w, element, style, link, h, _d, _lh, _f = part
                         rect = QRectF(pen, baseline - h, w, h)
+                        if style.get("position") == "relative":
+                            # moved by its left and top, percentages of its
+                            # containing block: reCAPTCHA shows each tile of
+                            # its picture grid so, one picture three times as
+                            # big, shifted in a small window (every tile had
+                            # shown the same corner)
+                            holder = element.parent
+                            while holder is not None and hasattr(holder, "attrs") and \
+                                    (self.styles.get(holder) or {}).get("display") in ("inline", "contents"):
+                                holder = holder.parent
+                            rect = rect.translated(*self._relative_shift(
+                                style, width, self._definite.get(id(holder), 0.0) if holder is not None else 0.0))
                         self.out.items.append(("image", rect, element.attrs.get("src", "").strip(),
                                                element.attrs.get("alt", ""), _object_fit(style)))
                         if link:

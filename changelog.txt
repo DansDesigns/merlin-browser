@@ -5,6 +5,16 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.37
+  Merlin Engine:
+  - reCAPTCHA's picture puzzles show each square's own part of the picture.
+    The puzzle is one picture, three (or four) times a square's size, placed
+    in each square with position: relative and left/top percentages; Merlin
+    did not move pictures by them, and every square showed the same corner.
+    Pictures (and anything inline) at position: relative now move by left,
+    top, right and bottom, and a block's top and bottom percentages are of
+    its containing block's height, as in browsers.
+
 1.8.36
   Merlin Engine:
   - AlterniTech's menus stay open while you move down into them. A menu

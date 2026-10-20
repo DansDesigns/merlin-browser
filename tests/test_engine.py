@@ -259,6 +259,23 @@ def test_tables() -> None:
           got.get("ib1", (0, -1))[1] == 1 and got.get("ib2", (0, -1))[1] == 1, str(got))
     check("vertical-align: top puts a box at the top of its line", got.get("footer", (0, -1))[1] == 1, str(got))
 
+    # reCAPTCHA's picture grid: one picture three times a tile's size, moved
+    # by position: relative and percentages in each tile's window (every
+    # tile had shown the same corner of it)
+    doc = parse("""<!DOCTYPE html><style>body{margin:0}.w{overflow:hidden;position:relative;width:126px;height:126px}
+.w img{position:relative;width:300%;height:300%}</style>
+<div class=w><img src="a.png" style="top:0%; left: -100%"></div><div class=w><img src="a.png" style="top:-200%; left:-200%"></div>
+<div class=w style="height:auto"><img src="a.png" style="top:-50%; left:10px"></div>""")
+    from PyQt6.QtGui import QImage
+    picture = QImage(300, 300, QImage.Format.Format_RGB32)
+    out = Layout(doc, Styler(doc, viewport=(400, 600)).compute(), 400, images={"a.png": picture}).run()
+    pictures = [i[1] for i in out.items if i and i[0] == "image"]
+    places = [(round(r.x()), round(r.y()), round(r.width())) for r in pictures]
+    check("a picture at position: relative moves by its left and top, percentages of its box's size",
+          len(places) == 3 and places[0] == (-126, 0, 378) and places[1] == (-252, 126 - 252, 378), str(places))
+    check("and a top percentage of a box with no set height counts for nothing, as in browsers",
+          len(places) == 3 and places[2][0] == 10 and places[2][1] == 252, str(places))
+
 
 def test_images(app) -> None:
     from PyQt6.QtGui import QColor, QImage
