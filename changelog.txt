@@ -5,6 +5,16 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.38
+  Merlin Engine:
+  - Solving Google's "I'm not a robot" check lets you through. reCAPTCHA
+    puts its answer in a hidden textarea by script and sends the form with
+    form.submit(); a value set by script changes nothing Merlin's copy of
+    the page holds, so the form went with the answer empty and Google asked
+    again. A form sent by its page's scripts (form.submit(), requestSubmit(),
+    or a submit its handlers let through) now carries its fields' values as
+    the scripts left them.
+
 1.8.37
   Merlin Engine:
   - reCAPTCHA's picture puzzles show each square's own part of the picture.

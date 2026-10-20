@@ -5376,6 +5376,7 @@ def test_requests_as_a_browser_makes_them(app) -> None:
     folder = tempfile.mkdtemp(prefix="merlin-requests-")
     open(os.path.join(folder, "page.html"), "w").write("""<!DOCTYPE html><html><body>
 <form id=f name=consent method=post action=/save style="margin:0"><input type=hidden name=set_ytc value=false>
+<textarea name=answer style="display:none"></textarea>
 <button id=send style="width:120px;height:30px">Confirm</button></form><p id=log>waiting</p>
 <script>
 const out = []; const say = (k, v) => out.push(k + '=' + v);
@@ -5396,10 +5397,18 @@ const report = () => { document.getElementById('log').textContent = out.join(' '
   say('forms', document.forms.length + ':' + [...document.forms].length + ':' + (document.forms.consent === document.getElementById('f'))
       + ':' + (document.forms.namedItem('consent') === document.forms[0]));
   document.querySelector('input[name=set_ytc]').value = 'true';
+  document.querySelector('textarea[name=answer]').value = 'token-123';
   report();
 })();
 </script></body></html>""")
     open(os.path.join(folder, "after.html"), "w").write("<title>after</title><p>saved</p>")
+    # reCAPTCHA's way: the answer put in a hidden textarea by script, and
+    # the form sent by form.submit()
+    open(os.path.join(folder, "captcha.html"), "w").write(
+        "<form id=c method=post action=/verify><input type=hidden name=q value=abc>"
+        "<textarea name=g-recaptcha-response style='display:none'></textarea></form>"
+        "<script>setTimeout(function () { document.querySelector('textarea').value = 'solved-456';"
+        " document.getElementById('c').submit(); }, 300);</script>")
 
     class Recorder(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *a, **k):
@@ -5480,7 +5489,13 @@ const report = () => { document.getElementById('log').textContent = out.join(' '
         check("a form the page sends carries it as referrer, its origin and same-origin",
               headers.get("referer") == origin + "/page.html" and headers.get("origin") == origin
               and headers.get("sec-fetch-site") == "same-origin", str(headers))
-        check("with the value its script set", b"set_ytc=true" in body, str(body))
+        check("with the values its script set, a hidden textarea's too", b"set_ytc=true" in body
+              and b"answer=token-123" in body, str(body))
+        view.setUrl(QUrl(origin + "/captcha.html"))
+        until(lambda: "/verify" in sent, 10)
+        _headers, body = sent.get("/verify", ({}, b""))
+        check("form.submit() sends what the page's scripts put in its fields (reCAPTCHA's answer)",
+              b"g-recaptcha-response=solved-456" in body and b"q=abc" in body, str(body))
     finally:
         view.shutdown()
         server.shutdown()

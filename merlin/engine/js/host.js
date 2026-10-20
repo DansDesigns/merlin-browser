@@ -277,6 +277,15 @@ function makeLocation() {
   };
   return location;
 }
+// a form's fields as its scripts left them, for Merlin to send: a value set
+// by script changes no attribute, and Merlin's copy of the page lacks it
+function formFieldValues(form) {
+  return [...form.querySelectorAll("input, textarea, select")].map((field) => {
+    const type = (field.getAttribute("type") || "").toLowerCase();
+    if (type === "file") return null;
+    return [idOf(field), type === "checkbox" || type === "radio" ? !!field.checked : String(field.value ?? "")];
+  }).filter(Boolean);
+}
 function navigate(target, replace = false) {
   send({ type: "navigate", url: new URL(String(target), state.url).href, replace });
 }
@@ -769,13 +778,19 @@ function install(html) {
   // HTMLFormElement, and methods put there never reached a form
   const formProto = (g.HTMLElement || made.HTMLElement).prototype;
   {
-    formProto.submit = function () { if (this.tagName === "FORM") send({ type: "form", target: idOf(this) }); };
+    // the form's fields as its scripts left them go with it: a value set by
+    // script changes no attribute, and Merlin's copy of the page lacks it
+    const fieldValues = formFieldValues;
+    formProto.submit = function () {
+      if (this.tagName === "FORM") send({ type: "form", target: idOf(this), values: fieldValues(this) });
+    };
     formProto.requestSubmit = function (submitter) {
       if (this.tagName !== "FORM") return;
       const event = new g.Event("submit", { bubbles: true, cancelable: true });
       try { event.submitter = submitter || null; } catch (_) {}
       this.dispatchEvent(event);
-      if (!event.defaultPrevented) send({ type: "form", target: idOf(this), submitter: submitter ? idOf(submitter) : null });
+      if (!event.defaultPrevented) send({ type: "form", target: idOf(this), submitter: submitter ? idOf(submitter) : null,
+                                         values: fieldValues(this) });
     };
   }
   // performance.timing and .navigation, the older page timings YouTube reads
@@ -3156,6 +3171,10 @@ function dispatch(message) {
     const by = message.submitter != null ? nodeOf(message.submitter) : null;
     try { Object.defineProperty(submit, "submitter", { value: by || null, configurable: true }); } catch (_) {}
     target.dispatchEvent(submit); prevented = submit.defaultPrevented;
+    if (!prevented && target.tagName === "FORM") {
+      send({ type: "handled", id: message.id, prevented, values: formFieldValues(target) });
+      return;
+    }
   } else if (message.type === "key") {
     const init = { key: message.key, code: message.code || "", keyCode: message.keyCode || 0 };
     const down = make("keydown", init); target.dispatchEvent(down); target.dispatchEvent(make("keyup", init));

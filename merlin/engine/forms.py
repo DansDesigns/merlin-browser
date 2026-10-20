@@ -103,6 +103,8 @@ def default_value(element: Element):
     if kind in ("checkbox", "radio"):
         return "checked" in element.attrs
     if kind == "textarea":
+        if "data-mjs-value" in element.attrs:
+            return element.attrs["data-mjs-value"]          # as the page's scripts left it
         text = element.text()
         return text[1:] if text.startswith("\n") else text     # as browsers do
     if kind == "select":

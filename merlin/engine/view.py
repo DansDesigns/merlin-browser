@@ -2282,7 +2282,12 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
         elif kind == "fetch":
             self._script_fetch(host, message)
         elif kind == "handled":
-            self._script_answered(message.get("id"), bool(message.get("prevented")))
+            # a form's submit event: its fields as its handlers left them
+            self._answered_values = {str(n): v for n, v in (message.get("values") or [])}
+            try:
+                self._script_answered(message.get("id"), bool(message.get("prevented")))
+            finally:
+                self._answered_values = {}
         elif kind == "want_image":
             src = str(message.get("src", ""))
             if src and not self._images.get("__pending__" + src):
@@ -2324,8 +2329,14 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             # having run in the page already
             form = self._by_script_id.get(str(message.get("target")))
             submitter = self._by_script_id.get(str(message.get("submitter"))) if message.get("submitter") else None
+            # its fields' values as the page's scripts left them, sent with
+            # it: a value set by script (reCAPTCHA's answer, put in a hidden
+            # textarea) changes nothing in the page Merlin has, and had gone
+            # unsent, so Google asked again and again
+            fields = {str(number): value for number, value in (message.get("values") or [])}
             if form is not None:
-                QTimer.singleShot(0, lambda f=form, b=submitter: self._submit(f, b, scripts_asked=True))
+                QTimer.singleShot(0, lambda f=form, b=submitter, v=fields:
+                                  self._submit(f, b, scripts_asked=True, script_values=v))
         elif kind == "url":
             self._url = QUrl(message.get("url", ""))
             self.urlChanged.emit(self.url())
@@ -3446,7 +3457,8 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
                 values[element] = widget.text()
         return values
 
-    def _submit(self, element, submitter=None, scripts_asked: bool = False) -> None:
+    def _submit(self, element, submitter=None, scripts_asked: bool = False,
+                script_values: dict | None = None) -> None:
         """Send the form element belongs to, as its button or Enter asks."""
         from . import forms
 
@@ -3462,13 +3474,18 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
                 message["submitter"] = int(submitter.attrs["data-mjs"])     # event.submitter
             self._script_event(message,
                                lambda prevented: None if prevented else
-                               self._submit(element, submitter, scripts_asked=True))
+                               self._submit(element, submitter, scripts_asked=True,
+                                            script_values=dict(getattr(self, "_answered_values", {}) or {})))
             return
         if submitter is None:
             # Enter in a field: the form's first submit button sends it
             submitter = next((c for c in forms.controls_of(form)
                               if forms.kind_of(c) in ("submit", "image")), None)
         values = self._values()
+        for number, value in (script_values or {}).items():
+            control = self._by_script_id.get(number)
+            if control is not None and forms.kind_of(control) != "file":
+                values[control] = value
         pairs = forms.form_data(form, values, submitter)
         login = self._login_in(form, values)
         if login is not None:
