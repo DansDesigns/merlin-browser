@@ -131,6 +131,8 @@ function safeString(value) {
 // ------------------------------------------------------------------ requests
 let nextId = 1;
 const waiting = new Map();
+const streams = new Map();       // a streamed fetch's id -> its body's controller
+const streamed = new Map();      // pieces of a stream that came before its controller (null: its end)
 function ask(message) {
   const id = nextId++;
   return new Promise((resolve) => { waiting.set(id, resolve); send({ ...message, id }); });
@@ -184,9 +186,28 @@ async function merlinFetch(input, init = {}) {
       if (kind) { for (const key of Object.keys(headers)) if (key.toLowerCase() === "content-type") delete headers[key]; headers["content-type"] = kind; }
     } else bodyB64 = toBase64(encoder.encode(String(body)));
   }
-  const answer = await ask({ type: "fetch", url, method, headers, body: bodyB64, credentials: init.credentials || "same-origin" });
+  const answer = await ask({ type: "fetch", url, method, headers, body: bodyB64, credentials: init.credentials || "same-origin",
+                             stream_ok: true });
   if (answer.error) throw new TypeError(`Failed to fetch: ${answer.error}`);
-  const response = new NativeResponse([101, 204, 205, 304].includes(answer.status) ? null : fromBase64(answer.body),
+  let content = [101, 204, 205, 304].includes(answer.status) ? null : fromBase64(answer.body);
+  if (answer.stream) {
+    // a streamed answer (Ponder's results, a source at a time): its body
+    // read as it arrives, through response.body.getReader()
+    content = new ReadableStream({
+      start(controller) {
+        // pieces that came before the page took up the answer, first
+        const early = streamed.get(answer.id) || [];
+        streamed.delete(answer.id);
+        for (const piece of early) {
+          if (piece === null) { controller.close(); return; }
+          controller.enqueue(piece);
+        }
+        streams.set(answer.id, controller);
+      },
+      cancel() { streams.delete(answer.id); },
+    });
+  }
+  const response = new NativeResponse(content,
     { status: answer.status, statusText: answer.statusText || "", headers: answer.headers || {} });
   Object.defineProperty(response, "url", { value: answer.url || url });
   return response;
@@ -559,6 +580,24 @@ function install(html) {
       return inline[name] || (name === "display" ? "block" : name === "visibility" ? "visible" : "");
     } });
   };
+  // the entries' own class, as browsers have it: polyfills test for it
+  // ("IntersectionObserverEntry" in window, intersectionRatio in its
+  // prototype), and without it YouTube's put its own observer in place of
+  // this one, which never heard that the page was laid out, so no thumbnail
+  // was ever loaded
+  class IntersectionObserverEntry {
+    constructor(init) { Object.assign(this, { _init: init }); }
+    get target() { return this._init.target; }
+    get time() { return this._init.time; }
+    get isIntersecting() { return this._init.isIntersecting; }
+    get intersectionRatio() { return this._init.intersectionRatio; }
+    get boundingClientRect() { return this._init.boundingClientRect; }
+    get rootBounds() { return this._init.rootBounds; }
+    get intersectionRect() { return this._init.intersectionRect; }
+  }
+  g.IntersectionObserverEntry = IntersectionObserverEntry;
+  g.ResizeObserverEntry = class ResizeObserverEntry {};
+  g.ResizeObserverSize = class ResizeObserverSize {};
   g.IntersectionObserver = class {
     // Worked out from Merlin Engine's layout and the scroll: an entry each
     // time a target comes into or goes out of view, past a threshold, as in a
@@ -598,10 +637,12 @@ function install(html) {
         const band = this.thresholds.filter((t) => ratio >= t && (t > 0 || visible)).length;
         if (last === null || last !== band) {
           this._targets.set(target, band);
-          entries.push({ target, isIntersecting: visible, intersectionRatio: visible ? ratio : 0, time: performance.now(),
+          entries.push(new IntersectionObserverEntry({ target, isIntersecting: visible, intersectionRatio: visible ? ratio : 0, time: performance.now(),
             boundingClientRect: rect, rootBounds: { top: view.top, left: view.left, bottom: view.bottom, right: view.right,
               width: view.right - view.left, height: view.bottom - view.top },
-            intersectionRect: { top: Math.max(rect.top, view.top), left: Math.max(rect.left, view.left), width: w, height: h } });
+            intersectionRect: { top: Math.max(rect.top, view.top), left: Math.max(rect.left, view.left), width: w, height: h,
+              right: Math.max(rect.left, view.left) + w, bottom: Math.max(rect.top, view.top) + h, x: Math.max(rect.left, view.left),
+              y: Math.max(rect.top, view.top) } }));
         }
       }
       if (entries.length) { try { this._cb(entries, this); } catch (e) { reportError(e); } }
@@ -1044,6 +1085,13 @@ function install(html) {
     // takes the number back once it has been asked for)
     const numbered = (timer) => (timer && typeof timer[Symbol.toPrimitive] === "function" ? timer[Symbol.toPrimitive]() : timer);
     const guarded = function (callback, delay, ...rest) {
+      if (typeof callback === "string" || (callback !== null && typeof callback === "object" && typeof callback !== "function")) {
+        // a string of code, run as the page's own (setTimeout("go()", 1000)):
+        // it had been dropped, and Cover Your Tracks never asked for its
+        // results, its fingerprint check begun that way
+        const code = String(callback);
+        callback = function () { return (0, g.eval)(code); };
+      }
       if (typeof callback !== "function") return numbered(original.call(this, () => {}, delay));
       return numbered(original.call(this, function () { try { return callback.apply(this, arguments); } catch (e) { reportError(e); } }, delay, ...rest));
     };
@@ -2921,8 +2969,18 @@ function receiveMessage(message) {
 const VOID = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"]);
 function escapeText(t) { return t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
 function escapeAttr(t) { return t.replace(/&/g, "&amp;").replace(/"/g, "&quot;"); }
+// text a browser writes out as it is, not escaped: a stylesheet's "a > b"
+// written as "a &gt; b" is no longer CSS, and every child selector in a
+// page's own <style> (Google's results page's layout) had been lost
+const RAW_TEXT = new Set(["style", "xmp", "noembed", "noframes", "plaintext"]);
 function serialize(node, out) {
-  if (node.nodeType === 3) { out.push(escapeText(node.data)); return; }
+  if (node.nodeType === 3) {
+    const parent = node.parentNode;
+    const holder = parent && parent.nodeType === 1 ? (parent.localName || "").toLowerCase() : "";
+    out.push(RAW_TEXT.has(holder) ? node.data.replace(/<\/(style|xmp|noembed|noframes|plaintext)/gi, "<\\/$1")
+                                  : escapeText(node.data));
+    return;
+  }
   if (node.nodeType !== 1) return;
   const tag = node.localName || node.tagName.toLowerCase();
   out.push("<", tag, ' data-mjs="', String(idOf(node)), '"');
@@ -3283,6 +3341,19 @@ async function main() {
         runScripts().then(changed).catch(e => reportError(e));
       } else if (message.type === "answer") {
         const resolve = waiting.get(message.id); waiting.delete(message.id); resolve?.(message);
+      } else if (message.type === "chunk") {
+        const controller = streams.get(message.id);
+        if (!controller) {
+          const early = streamed.get(message.id) || [];
+          if (message.data) early.push(fromBase64(message.data));
+          if (message.done) early.push(null);
+          streamed.set(message.id, early);
+        } else {
+          try {
+            if (message.data) controller.enqueue(fromBase64(message.data));
+            if (message.done) { streams.delete(message.id); controller.close(); }
+          } catch (_) { streams.delete(message.id); }
+        }
       } else if (state.blurTiming && PEOPLE.has(message.type)) {
         // what a person does reaches the page a little late, by a different
         // amount each time and never out of order: the rhythm of typing and

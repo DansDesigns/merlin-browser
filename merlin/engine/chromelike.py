@@ -84,6 +84,74 @@ class _Response(io.BytesIO):
         self.close()
 
 
+class _StreamResponse:
+    """An answer still arriving, in the shape urllib gives one: read1() hands
+    on what has come so far (a page's streamed fetch()), read() the rest.
+    Its session is given back once it is closed."""
+
+    def __init__(self, answer, url: str, pairs: list, release):
+        self._answer = answer
+        self._pieces = answer.iter_content(chunk_size=None) if hasattr(answer, "iter_content") else iter(())
+        self._release = release
+        self._left = b""
+        self.url = url
+        self.status = self.code = answer.status_code
+        self.reason = getattr(answer, "reason", "") or ""
+        message = email.message.Message()
+        for name, value in pairs:
+            if name.lower() in ("content-encoding", "content-length"):
+                continue                            # curl unpacks the body as it comes
+            message[name] = value
+        self.headers = self.msg = message
+
+    def read1(self, n: int = -1) -> bytes:
+        if self._left:
+            piece, self._left = self._left, b""
+            return piece
+        for piece in self._pieces:
+            if piece:
+                return piece
+        return b""
+
+    def read(self, n: int = -1) -> bytes:
+        parts = [self._left]
+        have = len(self._left)
+        self._left = b""
+        for piece in self._pieces:
+            parts.append(piece)
+            have += len(piece)
+            if n is not None and 0 <= n <= have:
+                break
+        data = b"".join(parts)
+        if n is not None and n >= 0 and len(data) > n:
+            data, self._left = data[:n], data[n:]
+        return data
+
+    def geturl(self) -> str:
+        return self.url
+
+    def getcode(self) -> int:
+        return self.status
+
+    def info(self):
+        return self.headers
+
+    def close(self) -> None:
+        try:
+            self._answer.close()
+        except Exception:                                  # noqa: BLE001
+            pass
+        release, self._release = self._release, None
+        if release is not None:
+            release()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+
 # Sessions are kept and lent out, so their connections are kept too: a page's
 # stylesheets, scripts and images reuse the site's connection (HTTP/2, many
 # requests on one), as Chrome does. A session a request had made and closed
@@ -131,7 +199,9 @@ class ChromeOpener:
         wanted = securedns._enabled if self.secure_dns is None else self.secure_dns
         return DOH_URL if wanted and not securedns._local(host) else None
 
-    def open(self, request, data=None, timeout: float = 30):
+    def open(self, request, data=None, timeout: float = 30, stream: bool = False):
+        """stream: the answer is handed back as it starts to arrive, its body
+        read as it comes (a _StreamResponse), for a page's streamed fetch()."""
         if isinstance(request, str):
             request = urllib.request.Request(request, data=data)
         method = request.get_method()
@@ -141,6 +211,7 @@ class ChromeOpener:
         identity = identity_headers()            # this computer's system, not a Mac's
         session = _borrow()
         broken = False
+        lent = {"out": False}               # a stream keeps the session till it closes
         try:
             for _hop in range(MAX_REDIRECTS + 1):
                 ask = urllib.request.Request(url, data=body, method=method, headers=headers)
@@ -154,7 +225,8 @@ class ChromeOpener:
                     answer = session.request(method, url, data=body, headers=sent, timeout=timeout,
                                              allow_redirects=False,
                                              verify=False if self.lenient else _trust_bundle(),
-                                             doh_url=self._doh(host), discard_cookies=True)
+                                             doh_url=self._doh(host), discard_cookies=True,
+                                             **({"stream": True} if stream else {}))
                 except Exception as exc:                   # noqa: BLE001
                     broken = True                          # its connection may be in any state
                     reason = _reason(exc)
@@ -163,7 +235,22 @@ class ChromeOpener:
                     raise urllib.error.URLError(reason) from exc
                 pairs = list(answer.headers.multi_items()) if hasattr(answer.headers, "multi_items") \
                     else list(answer.headers.items())
-                response = _Response(answer.content or b"", url, answer.status_code, pairs)
+                if stream and answer.status_code < 300:
+                    response = _StreamResponse(answer, url, pairs, lambda: _give_back(session))
+                    if self.jar is not None:
+                        self.jar.extract_cookies(response, ask)
+                    lent["out"] = True
+                    return response
+                if stream:
+                    content = b"".join(answer.iter_content(chunk_size=None)) if hasattr(answer, "iter_content") \
+                        else (answer.content or b"")
+                    try:
+                        answer.close()
+                    except Exception:                      # noqa: BLE001
+                        pass
+                else:
+                    content = answer.content or b""
+                response = _Response(content, url, answer.status_code, pairs)
                 if self.jar is not None:
                     self.jar.extract_cookies(response, ask)
                 location = response.headers.get("Location")
@@ -175,11 +262,12 @@ class ChromeOpener:
                     continue
                 if answer.status_code >= 400:
                     raise urllib.error.HTTPError(url, answer.status_code, answer.reason or "",
-                                                 response.headers, io.BytesIO(answer.content or b""))
+                                                 response.headers, io.BytesIO(content))
                 return response
             raise urllib.error.URLError("too many redirects")
         finally:
-            _give_back(session, broken)
+            if not lent["out"]:
+                _give_back(session, broken)
 
 
 def _not_a_navigation(sent: dict) -> dict:

@@ -138,12 +138,58 @@ def _layer_ends(display: DisplayList) -> dict:
     return ends
 
 
+def corner_path(rect: QRectF, corners):
+    """A rectangle with each corner rounded by its own radius: (top left,
+    top right, bottom right, bottom left), as CSS's border-radius gives."""
+    from PyQt6.QtGui import QPainterPath
+
+    x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
+    tl, tr, br, bl = (max(0.0, min(r, w / 2, h / 2)) for r in corners)
+    path = QPainterPath()
+    path.moveTo(x + tl, y)
+    path.lineTo(x + w - tr, y)
+    if tr:
+        path.arcTo(QRectF(x + w - 2 * tr, y, 2 * tr, 2 * tr), 90, -90)
+    path.lineTo(x + w, y + h - br)
+    if br:
+        path.arcTo(QRectF(x + w - 2 * br, y + h - 2 * br, 2 * br, 2 * br), 0, -90)
+    path.lineTo(x + bl, y + h)
+    if bl:
+        path.arcTo(QRectF(x, y + h - 2 * bl, 2 * bl, 2 * bl), 270, -90)
+    path.lineTo(x, y + tl)
+    if tl:
+        path.arcTo(QRectF(x, y, 2 * tl, 2 * tl), 180, -90)
+    path.closeSubpath()
+    return path
+
+
+def _shape_path(shape, rect: QRectF):
+    """A clip-path shape (layout's _clip_shape) as a path, placed at rect."""
+    from PyQt6.QtCore import QPointF
+    from PyQt6.QtGui import QPainterPath, QPolygonF
+
+    x, y = rect.x(), rect.y()
+    path = QPainterPath()
+    if shape[0] == "polygon":
+        path.addPolygon(QPolygonF([QPointF(x + px, y + py) for px, py in shape[1]]))
+        path.closeSubpath()
+    elif shape[0] == "ellipse":
+        _k, cx, cy, rx, ry = shape
+        path.addEllipse(QPointF(x + cx, y + cy), rx, ry)
+    else:
+        _k, left, top, w, h, r = shape
+        path.addRoundedRect(QRectF(x + left, y + top, w, h), r, r)
+    return path
+
+
 def _apply(painter, display: DisplayList, item, shown: list, scroll: float) -> None:
     """One clip, opacity or sticky offset, after painter.save()."""
     kind = item[0]
     if kind == "clip_push":
         rect, radius = item[1], item[2]
-        if radius > 0.5:
+        if len(item) > 4 and item[4]:
+            painter.setClipPath(_shape_path(item[4], rect), Qt.ClipOperation.IntersectClip)
+        elif radius > 0.5:
             from PyQt6.QtGui import QPainterPath
 
             path = QPainterPath()
@@ -419,7 +465,45 @@ def _draw(painter, item, visible: QRectF, images) -> None:
             painter.setRenderHint(painter.RenderHint.Antialiasing, True)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(_colour(rgba))
-            painter.drawRoundedRect(rect, radius, radius)
+            if len(item) > 4 and item[4]:
+                painter.drawPath(corner_path(rect, item[4]))
+            else:
+                painter.drawRoundedRect(rect, radius, radius)
+            painter.restore()
+    elif kind == "rframe":
+        rect, rgba, widths, corners = item[1], item[2], item[3], item[4]
+        if rect.intersects(visible) and rgba:
+            top, right, bottom, left = widths
+            inner = rect.adjusted(left, top, -right, -bottom)
+            inner_corners = (max(0.0, corners[0] - max(top, left)), max(0.0, corners[1] - max(top, right)),
+                             max(0.0, corners[2] - max(bottom, right)), max(0.0, corners[3] - max(bottom, left)))
+            path = corner_path(rect, corners)
+            if inner.width() > 0 and inner.height() > 0:
+                path = path.subtracted(corner_path(inner, inner_corners))
+            painter.save()
+            painter.setRenderHint(painter.RenderHint.Antialiasing, True)
+            painter.setPen(Qt.PenStyle.NoPen)
+            colours = item[5] if len(item) > 5 else None
+            if not colours:
+                painter.setBrush(_colour(rgba))
+                painter.drawPath(path)
+            else:
+                # each side in its own colour, meeting the next on the
+                # diagonal from the corner, as browsers draw them
+                from PyQt6.QtGui import QPainterPath, QPolygonF
+
+                c = rect.center()
+                tl, tr = rect.topLeft(), rect.topRight()
+                br, bl = rect.bottomRight(), rect.bottomLeft()
+                for corner_a, corner_b, colour, width in ((tl, tr, colours[0], top), (tr, br, colours[1], right),
+                                                          (br, bl, colours[2], bottom), (bl, tl, colours[3], left)):
+                    if width <= 0 or not colour or colour[3] == 0:
+                        continue
+                    wedge = QPainterPath()
+                    wedge.addPolygon(QPolygonF([corner_a, corner_b, c]))
+                    wedge.closeSubpath()
+                    painter.setBrush(_colour(colour))
+                    painter.drawPath(path.intersected(wedge))
             painter.restore()
     elif kind == "media":
         rect, element = item[1], item[2]
@@ -837,7 +921,19 @@ def _stop_positions(stops: list, length: float) -> list:
         index += 1
     for k in range(1, len(places)):
         places[k] = max(places[k], places[k - 1])    # never back along the line
-    return [min(1.0, max(0.0, p)) for p in places]
+    places = [min(1.0, max(0.0, p)) for p in places]
+    # Two stops at one place make a hard edge in CSS; Qt keeps only the last
+    # colour given for a place, so the second is put a hair further on (or
+    # the first a hair back, at the end). Google's star ratings, a gradient
+    # from gold to grey at 56px, had come out all grey.
+    for k in range(1, len(places)):
+        if places[k] <= places[k - 1]:
+            places[k] = places[k - 1] + 1e-6
+    if places and places[-1] > 1.0:
+        top = len(places) - 1
+        for k in range(top, -1, -1):
+            places[k] = min(places[k], 1.0 - (top - k) * 1e-6)
+    return places
 
 
 def gradient_brush(rect: QRectF, spec):

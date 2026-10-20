@@ -10,6 +10,7 @@ nothing here waits on Chromium starting.
 from __future__ import annotations
 
 import http.server
+import json
 import os
 import sys
 import urllib.request
@@ -5594,6 +5595,379 @@ window.onload = function () {
         server.shutdown()
 
 
+def test_google_results_layout(app) -> None:
+    """Google's results page, against Chrome: margins that join (negative
+    ones, a parent's with its first and last child's, through empty blocks),
+    a picture grid whose tiles are height: 100% in rows of 1fr, a flex row
+    held to max-height: 0, an inline span's margin, display: contents round
+    a block, @container rules, media queries asking the window's width, skip
+    links clipped to nothing, and a script's <style> keeping its ">"."""
+    from merlin.engine import MerlinView
+    from merlin.engine.css import Styler, container_matches, media_matches
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout, _clipped_away
+    from merlin.engine.script import LocalStorage
+
+    def rects(markup, width=600):
+        doc = parse("<body style='margin:0'>" + markup)
+        styles = Styler(doc).compute()
+        out = Layout(doc, styles, width).run()
+        found = {}
+        for r, e in out.boxes:
+            name = getattr(e, "attrs", {}).get("id")
+            if name and name not in found:
+                found[name] = (round(r.x()), round(r.y()), round(r.width()), round(r.height()))
+        return found
+
+    got = rects("<div id=top style='height:96px'></div><div id=e1></div>"
+                "<div id=e2 style='position:relative;height:0;top:42px'><span></span></div>"
+                "<div id=tabs style='margin-top:-12px;height:54px'></div>")
+    check("a negative margin-top pulls a block up past empty ones (Google's tabs)",
+          got.get("tabs") == (0, 84, 600, 54), str(got))
+    got = rects("<div id=a style='margin-top:20px'><h1 id=h style='margin:30px 0;height:10px'></h1></div>"
+                "<div id=b style='margin-top:10px;padding-top:1px'><p id=p style='margin:10px 0;height:10px'></p></div>"
+                "<div id=k style='margin-bottom:20px'></div><div id=l style='margin-top:10px;height:5px'></div>")
+    check("a first child's top margin joins its parent's, and the last one's bottom",
+          got.get("a") == (0, 30, 600, 10) and got.get("h") == (0, 30, 600, 10)
+          and got.get("b") == (0, 70, 600, 21) and got.get("p") == (0, 81, 600, 10), str(got))
+    check("an empty block's margins join through it with the next one's",
+          got.get("l") == (0, 111, 600, 5), str(got))
+    got = rects("<div style='position:relative;height:240px;width:372px'>"
+                "<div style='position:absolute;top:0;bottom:0;left:0;right:0;display:grid;gap:2px;"
+                "grid-template-columns:repeat(10,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr))'>"
+                + "".join(f"<div id=t{i} style='grid-column:span 5;height:100%;position:relative'>"
+                          f"<div style='display:contents'><div id=in{i} style='height:100%'></div></div></div>"
+                          for i in range(4)) + "</div></div>")
+    check("tiles of height: 100% in rows of 1fr share the grid's height (Google's pictures)",
+          got.get("t0", (0, 0, 0, 0))[3] == 119 and got.get("t2", (0, 0, 0, 0))[1] == 121, str(got))
+    check("and a height: 100% inside a display: contents wrapper is the tile's",
+          got.get("in0", (0, 0, 0, 0))[3] == 119, str(got))
+    got = rects("<div style='display:flex;flex-direction:column-reverse'>"
+                "<span style='display:block;height:74px'></span>"
+                "<div id=hid style='display:flex;align-items:center;max-height:0;position:relative;top:19px'>"
+                "<div id=tall style='height:38px;width:50px'></div>"
+                "<div id=btn style='margin-top:16px;height:18px;width:30px'></div></div></div>")
+    check("a flex row held to max-height: 0 centres its items on that line (Google's ⋮ button)",
+          got.get("tall") == (0, 0, 50, 38) and got.get("btn") == (50, 18, 30, 18), str(got))
+    got = rects("<div style='display:flex;align-items:center'><span id=item><span style='margin-right:12px'>"
+                "<div style='display:inline-block;width:28px;height:28px'></div></span></span>"
+                "<div id=name>Wikipedia</div></div>"
+                "<div><span style='padding:0 10px'>ab</span><span id=next>x</span></div>")
+    check("an inline element's margin takes room on its line (Google's favicon and site name)",
+          got.get("item", (0, 0, 0, 0))[2] == 40 and got.get("name", (0, 0, 0, 0))[0] == 40, str(got))
+    check("and its padding", got.get("next", (0, 0, 0, 0))[0] >= 30, str(got))
+    got = rects("<div style='height:50px;position:relative'><div style='display:contents'>"
+                "<div id=blk style='height:100%'></div></div></div>")
+    check("a block in a display: contents wrapper goes on no line of its own",
+          got.get("blk") == (0, 0, 600, 50), str(got))
+
+    check("@container (min-width) holds by the container's width, or the page's",
+          container_matches("@container srp (min-width: 868px)", (1446, 700), {})
+          and not container_matches("@container srp (min-width: 868px)", (1446, 700), {"srp": (600, 400)})
+          and not container_matches("@container style(--x: 1)", (1446, 700), {}))
+    check("a media query asks the window's width, its scroll bar in it",
+          media_matches("(min-width: 1461px)", (1446.0, 700.0, 1461.0))
+          and not media_matches("(min-width: 1461px)", (1446.0, 700.0)))
+    check("a box clipped to nothing is hidden (skip links), one clipped to a rect is not",
+          _clipped_away({"clip": "rect(0, 0, 0, 0)"}) and _clipped_away({"clip-path": "inset(50%)"})
+          and not _clipped_away({"clip": "rect(0px, 10px, 10px, 0px)"}) and not _clipped_away({}))
+
+    runtime = _node_for_tests()
+    if not runtime:
+        print("  skip  a script's style: Node.js is not here")
+        return
+    folder = tempfile.mkdtemp(prefix="merlin-raw-")
+
+    class Host:
+        settings = {}
+
+        def javascript_allowed(self, site):
+            return True
+
+        def node_for_scripts(self):
+            return runtime
+
+        def script_cache_dir(self):
+            return os.path.join(folder, "cache")
+
+        def local_storage(self):
+            return LocalStorage(None)
+
+    view = MerlinView()
+    view._host = Host()
+    view.resize(600, 400)
+    view.show()
+
+    def element(name):
+        return next((x for x in view._document.root.elements() if x.id == name), None) if view._document else None
+
+    try:
+        view._load_markup("<div class=a><b id=b>bold</b></div><p id=log>wait</p><script>"
+                     "var s = document.createElement('style');"
+                     "s.textContent = '.a > b { color: rgb(0, 128, 0) } .a>b:after { content: \"<&>\" }';"
+                     "document.head.appendChild(s); document.getElementById('log').textContent = 'done';"
+                     "</script>", QUrl("http://example.test/"))
+        end = time.time() + 10
+        while time.time() < end and not (element("log") is not None and element("log").text() == "done"
+                                         and (view._styles.get(element("b")) or {}).get("color")
+                                         == (0, 128, 0, 255)):
+            app.processEvents()
+            time.sleep(0.01)
+        colour = (view._styles.get(element("b")) or {}).get("color") if element("b") is not None else None
+        check("a <style> a script writes keeps its \">\" (Google's rules had been lost)",
+              colour == (0, 128, 0, 255), f"{colour} {element('log').text() if element('log') is not None else None}")
+    finally:
+        view.shutdown()
+    wait(app, 0.3)
+
+
+def test_google_icons_ratings_and_ellipsis(app) -> None:
+    """The rest of Google's results page, against Chrome: star ratings (a
+    gradient with a hard stop, clipped by a polygon), round site icons,
+    grey icons by an inherited fill, play triangles sized by their own
+    attributes, auto margins that centre rather than stretch, calc() of a
+    share and a length, and long names ending in "…"."""
+    from merlin.engine.css import Styler
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout, _clip_shape, svg_markup
+    from merlin.engine.paint import _stop_positions
+
+    def laid(markup, width=600):
+        doc = parse("<body style='margin:0'>" + markup)
+        styles = Styler(doc).compute()
+        return doc, styles, Layout(doc, styles, width).run()
+
+    def by_id(doc, name):
+        return next(x for x in doc.root.elements() if x.id == name)
+
+    def rects(out):
+        found = {}
+        for r, e in out.boxes:
+            name = getattr(e, "attrs", {}).get("id")
+            if name and name not in found:
+                found[name] = (round(r.x()), round(r.y()), round(r.width()), round(r.height()))
+        return found
+
+    places = _stop_positions([((1, 1, 1, 255), 56.0), ((2, 2, 2, 255), ("%", 0.0))], 68.0)
+    check("two gradient stops at one place make a hard edge, both kept (Google's stars)",
+          places[0] < places[1] and places[1] - places[0] < 0.001, str(places))
+    shape = _clip_shape("polygon(6px 0,4.31px 3.98px,0 4.34px)", 68, 12)
+    check("clip-path: polygon() is a shape to clip by",
+          shape and shape[0] == "polygon" and shape[1][1] == (4.31, 3.98), str(shape))
+    check("and circle(), ellipse() and inset() too",
+          _clip_shape("circle(50%)", 40, 40)[0] == "ellipse"
+          and _clip_shape("inset(2px round 4px)", 40, 40) == ("inset", 2.0, 2.0, 36.0, 36.0, 4.0)
+          and _clip_shape("url(#a)", 40, 40) is None)
+    doc, styles, out = laid("<span id=s style='display:inline-block;width:68px;height:12px;"
+                            "background:linear-gradient(to right, gold 40px, #dadbe5 0%);"
+                            "clip-path:polygon(0 0, 68px 0, 34px 12px)'></span>")
+    clips = [i for i in out.items if i and i[0] == "clip_push" and len(i) > 4]
+    check("a box with clip-path: polygon() is drawn through it",
+          len(clips) == 1 and clips[0][4][0] == "polygon", str(clips))
+
+    pixel = ("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQ"
+             "AAAABJRU5ErkJggg==")
+    doc, styles, out = laid(f"<img src='{pixel}' style='display:block;width:40px;height:40px;"
+                            f"border-radius:50%'><p><img src='{pixel}' style='width:20px;height:20px;"
+                            f"border-radius:50%'></p>")
+    rounded = [i for i in out.items if i and i[0] == "clip_push" and i[2] >= 9.5]
+    check("a picture with border-radius: 50% is round, as a block or on a line (site icons)",
+          len(rounded) == 2, str([(i[1], i[2]) for i in rounded]))
+
+    doc, styles, out = laid("<style>.z{display:inline-block;fill:currentColor}.y{color:#747878}</style>"
+                            "<span class='y z'><svg id=s viewBox='0 0 10 10'><path d='M0 0h10v10z'/></svg>"
+                            "<svg id=t fill=none viewBox='0 0 10 10'><path/></svg></span>")
+    markup = svg_markup(by_id(doc, "s"), styles[by_id(doc, "s")])
+    check("an <svg> takes the fill: currentColor of the element round it (Google's grey icons)",
+          'fill="#747878"' in markup, markup)
+    markup = svg_markup(by_id(doc, "t"), styles[by_id(doc, "t")])
+    check("but its own fill attribute comes first", 'fill="none"' in markup, markup)
+
+    doc, styles, out = laid("<div style='display:flex;height:20px'><svg id=tri width=7.5 height=9 "
+                            "viewBox='0 0 7 8' style='margin-block:auto'><path d='M0 0L7 4L0 8z'/></svg>"
+                            "<span>21:43</span></div>"
+                            "<div style='display:flex;height:40px'><div id=mid style='margin:auto 0;"
+                            "width:10px'>x</div></div>")
+    got = rects(out)
+    check("an <svg> in a flex row keeps its height attribute, centred by auto margins (play triangles)",
+          got.get("tri", (0, 0, 0, 0))[3] == 9 and got.get("tri", (0, 0, 0, 0))[1] in (5, 6), str(got))
+    check("and a flex item with auto margins across is centred, not stretched",
+          got.get("mid", (0, 0, 0, 0))[3] < 40, str(got))
+
+    doc, styles, out = laid("<div style='width:180px'><div id=c style='max-width:calc(100% - 36px);"
+                            "height:10px'></div><div id=w style='width:calc(50% + 2px);height:10px'></div></div>")
+    got = rects(out)
+    check("calc() of a share and a length sizes a box (max-width: calc(100% - 36px))",
+          got.get("c", (0, 0, 0, 0))[2] == 144 and got.get("w", (0, 0, 0, 0))[2] == 92, str(got))
+
+    doc, styles, out = laid("<div style='width:120px;overflow:hidden;white-space:nowrap;"
+                            "text-overflow:ellipsis'>Surviving The Survivor: #BestGuests in True Crime</div>"
+                            "<div style='width:200px;overflow:hidden;-webkit-line-clamp:2;display:-webkit-box;"
+                            "-webkit-box-orient:vertical;line-height:20px'>Charlie Duke, the youngest man to "
+                            "walk on the moon, says his Christian faith was renewed by the trip</div>")
+    texts = [i[3] for i in out.items if i and i[0] == "text"]
+    first = next((t for t in texts if t.startswith("Surv")), "")
+    check("text-overflow: ellipsis ends a line too long in \u2026, within its box",
+          first.endswith("\u2026") and len(first) < 30, str(texts))
+    check("and a line clamp's last line ends in \u2026 when more follows",
+          sum(t.endswith("\u2026") for t in texts) == 2, str(texts))
+
+    def painted(out):
+        found = []
+        for item in out.items:
+            if item and item[0] == "group":
+                found.extend(sub for sub in item[1] if sub)
+            elif item:
+                found.append(item)
+        return found
+
+    doc, styles, out = laid("<div style='width:300px;height:38px;border:1px solid #c6c6c6;border-right:none;"
+                            "border-radius:40px 0 0 40px;background:#fff'></div>"
+                            "<span style='display:inline-block;width:11px;height:11px;border:2px solid #444;"
+                            "border-top-color:#2c2;border-radius:50%'></span>")
+    frames = [i for i in painted(out) if i[0] == "rframe"]
+    filled = [i for i in painted(out) if i[0] == "rrect" and len(i) > 4]
+    check("each corner takes its own radius, and a border missing a side goes round them (YouTube's search box)",
+          len(filled) == 1 and filled[0][4] == (20.0, 0.0, 0.0, 20.0)
+          and frames and frames[0][3] == (1.0, 0.0, 1.0, 1.0), str(frames[:1]) + str(filled))
+    check("a rounded border of two colours keeps both (Ponder's spinners)",
+          len(frames) == 2 and frames[1][5] and frames[1][5][0] != frames[1][5][1], str(frames[1:]))
+    doc, styles, out = laid("<div style='width:300px;height:200px;position:relative'><a style='position:absolute;"
+                            "inset:0;display:block'><span><img id=lazy style='width:100%;height:100%;"
+                            "display:inline-block;min-width:1px;min-height:1px'></span></a></div>")
+    got = rects(out)
+    check("a picture not yet loaded takes the size CSS gives it, so lazy pages see it (YouTube's thumbnails)",
+          got.get("lazy") == (0, 0, 300, 200), str(got))
+
+
+def test_streams_timers_and_templates(app) -> None:
+    """Page scripts, as YouTube, Ponder and Cover Your Tracks use them: a
+    fetch() streamed as it arrives, setTimeout() given a string of code,
+    templates whose content is inert and is cloned as scripts changed it,
+    innerText set, and IntersectionObserverEntry there to be found."""
+    from merlin.engine import MerlinView
+    from merlin.engine.script import LocalStorage
+
+    runtime = _node_for_tests()
+    if not runtime:
+        print("  skip  streams, timers and templates: Node.js is not here")
+        return
+    folder = tempfile.mkdtemp(prefix="merlin-streams-")
+    open(os.path.join(folder, "page.html"), "w").write(r"""<!DOCTYPE html><html><body>
+<p id=log>wait</p><p id=first>-</p><p id=timer>-</p><p id=tpl>-</p><div id=box><b>x</b></div>
+<template id=t><x-card v="[[bound]]"><span>hi</span></x-card><template id=inner><i c="[[z]]">i</i></template></template>
+<script>
+var made = 0, heard = [];
+class Card extends HTMLElement { constructor(){ super(); made++; }
+  static get observedAttributes(){ return ['v']; } attributeChangedCallback(n, o, v){ heard.push(v); } }
+customElements.define('x-card', Card);
+var t = document.getElementById('t');
+var beforeImport = made;
+t.content.querySelector('x-card').removeAttribute('v');
+t.content.querySelector('template').content.firstChild.removeAttribute('c');
+var copy = document.importNode(t.content, true);
+document.body.appendChild(copy);
+var placed = document.body.querySelector('x-card');
+var innerCopy = document.body.querySelector('template#inner').content.firstChild.outerHTML;
+var box = document.getElementById('box'); box.innerText = 'one\ntwo';
+document.getElementById('tpl').textContent = [beforeImport, made, heard.length, placed instanceof Card,
+  innerCopy, box.innerHTML, typeof IntersectionObserverEntry,
+  'intersectionRatio' in IntersectionObserverEntry.prototype].join(' ');
+setTimeout("document.getElementById('timer').textContent = 'string ran'", 50);
+(async function () {
+  var resp = await fetch('/stream');
+  var reader = resp.body.getReader(), decoder = new TextDecoder(), seen = 0, text = '';
+  while (true) {
+    var part = await reader.read();
+    if (part.done) break;
+    text += decoder.decode(part.value, {stream: true});
+    if (!seen && text.indexOf('\n') >= 0) { seen = 1; document.getElementById('first').textContent = 'first ' + text.split('\n')[0]; }
+  }
+  document.getElementById('log').textContent = 'done ' + text.trim().split('\n').length;
+})();
+</script></body></html>""")
+
+    class Pages(http.server.SimpleHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def do_GET(self):
+            if self.path != "/stream":
+                return super().do_GET()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            for n, pause in ((1, 0.0), (2, 3.0)):
+                time.sleep(pause)
+                line = (json.dumps({"n": n}) + "\n").encode()
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(line), line))
+                self.wfile.flush()
+            self.wfile.write(b"0\r\n\r\n")
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Pages)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    class Host:
+        settings = {}
+
+        def javascript_allowed(self, site):
+            return True
+
+        def node_for_scripts(self):
+            return runtime
+
+        def script_cache_dir(self):
+            return os.path.join(folder, "cache")
+
+        def local_storage(self):
+            return LocalStorage(None)
+
+    view = MerlinView()
+    view._host = Host()
+    view.resize(600, 400)
+    view.show()
+
+    def text(name):
+        found = next((x for x in view._document.root.elements() if x.id == name), None) if view._document else None
+        return " ".join(found.text().split()) if found is not None else ""
+
+    try:
+        view.setUrl(QUrl(f"http://127.0.0.1:{server.server_address[1]}/page.html"))
+        end = time.time() + 10
+        while time.time() < end and not text("first").startswith("first"):
+            app.processEvents()
+            time.sleep(0.01)
+        early = text("log")
+        check("a streamed fetch() hands its first line on before the rest has come (Ponder's results)",
+              text("first").startswith('first {"n": 1}') and early == "wait",
+              f"{text('first')} / {early} / {list(view.console_lines)[-3:]}")
+        end = time.time() + 8
+        while time.time() < end and not text("log").startswith("done"):
+            app.processEvents()
+            time.sleep(0.01)
+        check("and its end", text("log") == "done 2", text("log"))
+        check("setTimeout() given a string runs it (Cover Your Tracks' fingerprint check)",
+              text("timer") == "string ran", text("timer"))
+        parts = text("tpl").split(" ")
+        check("a template's custom elements are made only when its content is copied, their [[bindings]] unread",
+              parts[:4] == ["0", "1", "0", "true"], text("tpl"))
+        check("a template inside a template is copied with its content as a script left it (YouTube's)",
+              "i</i>" in text("tpl") and "[[z]]" not in text("tpl"), text("tpl"))
+        check("innerText can be set, a line break a <br>", "one<br>two" in text("tpl"), text("tpl"))
+        check("IntersectionObserverEntry is there, as polyfills look for it",
+              text("tpl").endswith("function true"), text("tpl"))
+    finally:
+        view.shutdown()
+        server.shutdown()
+    wait(app, 0.3)
+
+
 def main() -> int:
     app = QApplication(sys.argv[:1])
     for test in (test_no_chromium, test_without_html_parser, test_parsing, test_cascade, test_layout,
@@ -5701,6 +6075,12 @@ def main() -> int:
     test_requests_as_a_browser_makes_them(app)
     print("test_tracker_test_pages")
     test_tracker_test_pages(app)
+    print("test_google_results_layout")
+    test_google_results_layout(app)
+    print("test_google_icons_ratings_and_ellipsis")
+    test_google_icons_ratings_and_ellipsis(app)
+    print("test_streams_timers_and_templates")
+    test_streams_timers_and_templates(app)
     if FAILED:
         print(f"\n{len(FAILED)} FAILED: " + "; ".join(FAILED))
         return 1

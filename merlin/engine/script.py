@@ -181,11 +181,33 @@ def _kill(process) -> None:
         pass
 
 
-def page_fetch(url: str, method: str, headers: dict, body, opener=None, timeout: int = 20) -> dict:
+STREAMED_TYPES = ("ndjson", "event-stream", "jsonl", "jsonlines", "x-json-stream")
+
+
+def _streams(response) -> bool:
+    """Whether a response is one to hand on as it comes, not when complete:
+    a stream of lines or events, or chunked with no length given."""
+    kind = str(response.headers.get("Content-Type", "") or "").lower()
+    if any(word in kind for word in STREAMED_TYPES):
+        return True
+    chunked = "chunked" in str(response.headers.get("Transfer-Encoding", "") or "").lower()
+    return chunked and not response.headers.get("Content-Length") and (
+        kind.startswith("text/plain") or "json" in kind or "octet-stream" in kind)
+
+
+def page_fetch(url: str, method: str, headers: dict, body, opener=None, timeout: int = 20,
+               on_start=None, on_chunk=None) -> dict:
     """A request made for a page's script: status, headers and body, as fetch() wants.
 
     An HTTP error is an answer like any other, as in a browser; only a failure
     to reach the server is an error.
+
+    With on_start and on_chunk, a streamed response (NDJSON, server-sent
+    events, chunked text) is handed on as it arrives: on_start(answer) with
+    its status and headers and no body, then on_chunk(bytes) for each piece
+    and on_chunk(None) at its end. Ponder sends its results so, a source at a
+    time; given only once the slowest had answered, a search had taken as
+    long as its slowest source.
     """
     data = base64.b64decode(body) if body else None
     sent = {k: v for k, v in (headers or {}).items()
@@ -197,8 +219,11 @@ def page_fetch(url: str, method: str, headers: dict, body, opener=None, timeout:
 
         if opener is None and chromelike.usable():
             opener = chromelike.ChromeOpener()              # as Chrome connects
-        response = (opener.open(request, timeout=timeout) if opener is not None
-                    else urllib.request.urlopen(request, timeout=timeout))
+        if opener is not None and on_chunk is not None and isinstance(opener, chromelike.ChromeOpener):
+            response = opener.open(request, timeout=timeout, stream=True)
+        else:
+            response = (opener.open(request, timeout=timeout) if opener is not None
+                        else urllib.request.urlopen(request, timeout=timeout))
     except urllib.error.HTTPError as error:
         response = error
     except Exception as exc:                               # noqa: BLE001
@@ -206,9 +231,39 @@ def page_fetch(url: str, method: str, headers: dict, body, opener=None, timeout:
     with response:
         from .view import _body
 
-        raw = _body(response, 32 * 1024 * 1024)
         answer_headers = {k.lower(): v for k, v in response.headers.items()
                           if k.lower() not in ("content-encoding", "content-length", "set-cookie")}
+        if on_chunk is not None and on_start is not None and _streams(response):
+            import zlib
+
+            encoding = (response.headers.get("Content-Encoding", "") or "").strip().lower()
+            unpack = (zlib.decompressobj(16 + zlib.MAX_WBITS) if encoding in ("gzip", "x-gzip")
+                      else zlib.decompressobj() if encoding == "deflate" else None)
+            started = {"status": getattr(response, "status", None) or response.getcode() or 200,
+                       "statusText": getattr(response, "reason", "") or "",
+                       "headers": answer_headers, "url": response.geturl(), "stream": True}
+            on_start(started)
+            read = getattr(response, "read1", None) or response.read
+            total = 0
+            try:
+                while True:
+                    piece = read(64 * 1024)
+                    if not piece:
+                        break
+                    if unpack is not None:
+                        piece = unpack.decompress(piece)
+                    total += len(piece)
+                    if piece:
+                        on_chunk(piece)
+                if unpack is not None:
+                    rest = unpack.flush()
+                    if rest:
+                        on_chunk(rest)
+            except Exception:                              # noqa: BLE001
+                pass                                       # what came, came; the stream ends
+            on_chunk(None)
+            return dict(started, size=total)
+        raw = _body(response, 32 * 1024 * 1024)
         return {"status": getattr(response, "status", None) or response.getcode() or 200,
                 "statusText": getattr(response, "reason", "") or "",
                 "headers": answer_headers, "url": response.geturl(),

@@ -27,6 +27,7 @@ from .dom import Element, Text
 _IMAGE, _ANCHOR, _BREAK = object(), object(), object()
 _FLOAT, _ABSOLUTE = object(), object()
 _BOX = object()                          # an inline-block, or an inline <svg>
+_GAP = object()                          # an inline element's margin, border and padding
 
 INLINE_BOXES = ("inline-block", "inline-flex", "inline-grid", "inline-table")
 MEDIA_TAGS = ("video", "audio")
@@ -175,6 +176,13 @@ class _Fonts:
 
 
 FIELD_TAGS = ("input", "textarea", "select")
+# boxes whose margins never join their contents': what they hold is not laid
+# out in the flow of their parent
+NO_MARGIN_JOINING = ("img", "svg", "iframe", "video", "audio", "canvas", "input", "textarea",
+                     "select", "button", "fieldset", "object", "embed", "hr", "html")
+# inline elements that put something on a line however empty they are
+LINE_MAKERS = ("img", "svg", "input", "textarea", "select", "button", "iframe", "video",
+               "audio", "canvas", "object", "embed", "br")
 _FAMILIES = None
 _FOR_GENERIC = {
     "sans-serif": ["Segoe UI", "Arial", "Helvetica", "Liberation Sans", "DejaVu Sans", "Noto Sans", "Ubuntu", "Cantarell"],
@@ -213,7 +221,8 @@ def _px(value, reference: float = 0.0, auto: float | None = 0.0) -> float | None
     if value == "auto" or value is None:
         return auto
     if isinstance(value, tuple):
-        return reference * value[1] / 100
+        # ("%", share) or ("%", share, px), calc() of a share and a length
+        return reference * value[1] / 100 + (value[2] if len(value) > 2 else 0.0)
     return float(value)
 
 
@@ -317,6 +326,151 @@ def _object_fit(style: dict):
         x, y = part(first, 0.5), part(second, 0.5)
     return (fit, x, y)
 
+def _auto_height(style: dict) -> dict:
+    """The style with its height left to its content (min and max kept)."""
+    plain = dict(style)
+    plain["height"] = None
+    return plain
+
+
+def _sized_by_attribute(element, name: str) -> bool:
+    """An <svg> given its width or height by attribute, which is its size
+    as CSS sees it: not stretched by a flex line or grid area."""
+    if getattr(element, "tag", None) != "svg":
+        return False
+    value = str(element.attrs.get(name, "")).strip()
+    return bool(value) and not value.endswith("%")
+
+
+def _cut_with_ellipsis(runs: list, limit: float, always: bool = False) -> list:
+    """A line's runs of text cut to end in "…" by limit, as text-overflow:
+    ellipsis has it: Google's long site names and video titles. always: the
+    last run is cut for the "…" even if it fits (a line clamp's last line)."""
+    kept = []
+    for run in runs:
+        style, link, start_x, text, advance, font = run
+        metrics = QFontMetricsF(font)
+        mark = metrics.horizontalAdvance("\u2026")
+        if start_x + advance <= limit - mark or (
+                run is runs[-1] and start_x + advance <= limit and not always):
+            kept.append(run)
+            continue
+        room = limit - start_x - mark
+        low, high = 0, len(text)                 # the most characters that fit
+        while low < high:
+            middle = (low + high + 1) // 2
+            if metrics.horizontalAdvance(text[:middle]) <= room:
+                low = middle
+            else:
+                high = middle - 1
+        cut = text[:low].rstrip()
+        if cut or room > 0:
+            kept.append([style, link, start_x, cut + "\u2026",
+                         metrics.horizontalAdvance(cut + "\u2026"), font])
+        break
+    return kept
+
+
+def _collapse_margins(a: float, b: float) -> float:
+    """Two adjoining vertical margins collapsed (CSS 2.1 8.3.1): the larger
+    of the positive ones less the most negative one, so a negative
+    margin-top still pulls a block up past an empty sibling."""
+    return max(a, b, 0.0) + min(a, b, 0.0)
+
+
+def _shape_length(text: str, reference: float, zoom: float, font: float):
+    """A length in a clip-path shape, in page pixels from the box's corner."""
+    text = text.strip()
+    try:
+        if text.endswith("%"):
+            return reference * float(text[:-1]) / 100
+        if text.endswith("px"):
+            return float(text[:-2]) * zoom
+        if text.endswith("rem"):
+            return float(text[:-3]) * 16.0 * zoom
+        if text.endswith("em"):
+            return float(text[:-2]) * font * zoom
+        return float(text) * zoom
+    except ValueError:
+        return None
+
+
+def _clip_shape(value, width: float, height: float, zoom: float = 1.0, font: float = 16.0):
+    """clip-path's shape, relative to the border box's corner: ("polygon",
+    [(x, y), ...]), ("ellipse", cx, cy, rx, ry) or ("inset", x, y, w, h,
+    radius); None when it is not a shape Merlin draws. Google draws its
+    star ratings as a bar clipped by a polygon of five stars."""
+    text = str(value or "").strip().lower()
+    found = re.match(r"^(polygon|circle|ellipse|inset)\((.*)\)", text)
+    if not found:
+        return None
+    kind, inner = found.group(1), found.group(2).strip()
+    if kind == "polygon":
+        inner = re.sub(r"^(nonzero|evenodd)\s*,", "", inner).strip()
+        points = []
+        for pair in inner.split(","):
+            parts = pair.split()
+            if len(parts) != 2:
+                return None
+            px = _shape_length(parts[0], width, zoom, font)
+            py = _shape_length(parts[1], height, zoom, font)
+            if px is None or py is None:
+                return None
+            points.append((px, py))
+        return ("polygon", points) if len(points) >= 3 else None
+    if kind in ("circle", "ellipse"):
+        size, _at, place = inner.partition(" at ")
+        place = place.split() or ["50%", "50%"]
+        if len(place) == 1:
+            place.append("50%")
+        cx = _shape_length(place[0].replace("center", "50%").replace("left", "0%").replace("right", "100%"),
+                           width, zoom, font)
+        cy = _shape_length(place[1].replace("center", "50%").replace("top", "0%").replace("bottom", "100%"),
+                           height, zoom, font)
+        radii = size.split()
+        if kind == "circle":
+            reference = ((width ** 2 + height ** 2) / 2) ** 0.5
+            r = _shape_length(radii[0], reference, zoom, font) if radii and radii[0] not in (
+                "closest-side", "farthest-side") else min(width, height) / 2
+            rx = ry = r
+        else:
+            rx = _shape_length(radii[0], width, zoom, font) if len(radii) > 0 else width / 2
+            ry = _shape_length(radii[1], height, zoom, font) if len(radii) > 1 else height / 2
+        if None in (cx, cy, rx, ry):
+            return None
+        return ("ellipse", cx, cy, rx, ry)
+    rounded, _round, radius = inner.partition(" round ")
+    sides = rounded.split()
+    if not sides or len(sides) > 4:
+        return None
+    sides = (sides * 4)[:4] if len(sides) == 1 else (
+        sides + sides[:2] if len(sides) == 2 else (sides + [sides[1]] if len(sides) == 3 else sides))
+    top = _shape_length(sides[0], height, zoom, font)
+    right = _shape_length(sides[1], width, zoom, font)
+    bottom = _shape_length(sides[2], height, zoom, font)
+    left = _shape_length(sides[3], width, zoom, font)
+    r = _shape_length(radius.split()[0], width, zoom, font) if radius.strip() else 0.0
+    if None in (top, right, bottom, left, r):
+        return None
+    return ("inset", left, top, max(0.0, width - left - right), max(0.0, height - top - bottom), r)
+
+
+def _clipped_away(style: dict) -> bool:
+    """Whether clip (or clip-path) leaves nothing of a box to be seen."""
+    clip = str(style.get("clip") or "").strip().lower()
+    found = re.match(r"^rect\(\s*([^,\s)]+)[\s,]+([^,\s)]+)[\s,]+([^,\s)]+)[\s,]+([^,\s)]+)\s*\)$", clip)
+    if found:
+        try:
+            top, right, bottom, left = (float(re.sub(r"px$", "", v)) for v in found.groups())
+        except ValueError:
+            return False                         # "auto" for an edge: the box's own
+        if right <= left or bottom <= top:
+            return True
+    path = str(style.get("clip-path") or "").strip().lower()
+    found = re.match(r"^inset\(\s*(\d+(?:\.\d+)?)%", path)
+    return bool(found) and float(found.group(1)) >= 50
+
+
 class Layout:
     def __init__(self, document, styles: dict, width: float, zoom: float = 1.0,
                  images: dict | None = None, viewport_height: float = 768.0,
@@ -329,6 +483,9 @@ class Layout:
         self.media = media or {}
         self.viewport_height = viewport_height
         self._definite = {}            # id(element) -> its content height, where definite
+        self._tops = {}                # (id(element), width) -> its top margin, children's joined
+        self._escaped_bottom = 0.0     # the last child's bottom margin, passed out by _contents
+        self._last_margins = (0.0, 0.0)   # the top and bottom margins _block last used
         self._floats: list = []           # floats in the current formatting context
         self._absolute: list = [[]]       # waiting for their containing block
         self._fixed: list = []            # waiting for the window
@@ -592,7 +749,12 @@ class Layout:
                 m_left = margin[3] or 0.0
         box_x = x + m_left
         content_x = box_x + border[3] + padding[3]
-        box_y = y + (margin[0] or 0.0)
+        # margins that meet join (collapse), as CSS has them: a first child's
+        # top margin with its parent's, when nothing (border, padding, a new
+        # formatting context) is between them
+        joins_top = self._joins_top(element, style, available, root_level)
+        top_margin = self._effective_top(element, style, available, root_level)
+        box_y = y + top_margin
         content_y = box_y + border[0] + padding[0]
         if element.id:
             self.out.anchors.setdefault(element.id, box_y)
@@ -712,6 +874,12 @@ class Layout:
         if depth:
             perspective = {"depth": depth, "origin": style.get("perspective-origin"), "box": None}
             self._perspectives.append(perspective)
+        # clip-path with a shape: the box and all in it seen only inside it
+        shape_index = None
+        if style.get("clip-path") not in (None, "", "none") and not self._measuring \
+                and not _visually_hidden(style):
+            shape_index = len(self.out.items)
+            self.out.items.append(None)          # ("clip_push", box, 0, record, shape), once known
         # the background goes under the children, so its place is kept now
         background_index = len(self.out.items)
         links_before = len(self.out.links)
@@ -746,6 +914,7 @@ class Layout:
                                       "flex", "inline-flex", "grid", "inline-grid"))
         if new_context:
             outer_floats, self._floats = self._floats, []
+        escaped = 0.0
 
         if style.get("display") == "table":
             if width_value is None:
@@ -776,9 +945,17 @@ class Layout:
         elif style.get("display") in ("flex", "inline-flex") and element.tag not in FIELD_TAGS:
             inner_height, first_baseline = self._flex(
                 element, style, content_x, content_y, content_width,
-                room=fixed_height, least=min_height)
+                room=fixed_height, least=min_height, most=max_height)
         else:
-            inner_height, first_baseline = self._contents(element, style, content_x, content_y, content_width)
+            self._escaped_bottom = 0.0
+            inner_height, first_baseline = self._contents(
+                element, style, content_x, content_y, content_width, joins_top=joins_top,
+                joins_bottom=self._joins_margins(element, style, root_level)
+                and not padding[2] and not border[2] and fixed_height is None
+                and not min_height and max_height is None
+                and style.get("-merlin-clear-after") not in ("left", "right", "both"))
+            escaped = self._escaped_bottom
+            self._escaped_bottom = 0.0
         # where this block's first line of text sits, for a list marker outside it.
         # A table gives none to what holds it, as in Chrome: an inline-block
         # holding one sits on its bottom edge (reCAPTCHA's checkbox and its
@@ -838,8 +1015,10 @@ class Layout:
         if element.tag == "img" and not self._measuring:
             content_box = QRectF(box_x + border[3] + padding[3], box_y + border[0] + padding[0],
                                  content_width, inner_height)
-            self.out.items.append(("image", content_box, element.attrs.get("src", "").strip(),
-                                   element.attrs.get("alt", ""), _object_fit(style)))
+            self._rounded_image(content_box, element, style, min(
+                self._length(style.get("border-top-left-radius"), content_width + horizontal_extra) or 0.0,
+                (content_width + horizontal_extra) / 2, (inner_height + padding[0] + padding[2]
+                                                         + border[0] + border[2]) / 2) - max(border))
 
         colour = style.get("background-color")
         radius = self._length(style.get("border-top-left-radius"), box_width) or 0.0
@@ -852,9 +1031,22 @@ class Layout:
         shadows = None if hidden or self._measuring else self._box_shadows(style)
         if shadows and shadows[0]:
             paint.append(("shadow", box, shadows[0], radius, False))     # under the box
+        # each corner's own radius: YouTube's search box is rounded on the
+        # left only, and its button on the right only; taken all round from
+        # the top left, the box had come out rounded at both ends, its border
+        # a square box round it
+        corners = [min(self._length(style.get(f"border-{name}-radius"), box_width) or 0.0,
+                       box_width / 2, box_height / 2)
+                   for name in ("top-left", "top-right", "bottom-right", "bottom-left")]
+        uneven = max(corners) > 0.5 and max(corners) - min(corners) > 0.5
+        if uneven:
+            radius = min(corners)
         if colour and colour[3] > 0 and not owns_canvas \
                 and not (root_level and self.out.canvas == colour):
-            paint.append(("rrect", box, colour, radius) if radius > 0.5 else ("rect", box, colour))
+            if uneven:
+                paint.append(("rrect", box, colour, radius, tuple(corners)))
+            else:
+                paint.append(("rrect", box, colour, radius) if radius > 0.5 else ("rect", box, colour))
         gradients = style.get("background-image")
         if gradients and not hidden and not owns_canvas:
             count = len(gradients)
@@ -871,7 +1063,18 @@ class Layout:
             paint.append(("shadow", box, shadows[1], radius, True))
         if hidden:
             border = [0.0, 0.0, 0.0, 0.0]
-        if radius > 0.5 and len(set(border)) == 1 and border[0] > 0:
+        sides = ("top", "right", "bottom", "left")
+        side_colours = tuple(style.get(f"border-{side}-color") or style.get("color") for side in sides)
+        two_toned = len({c for c, w in zip(side_colours, border) if w > 0}) > 1
+        if (uneven or (max(corners) > 0.5 and (len(set(border)) > 1 or two_toned))) and max(border) > 0:
+            # borders round corners of their own, of their own widths, or of
+            # their own colours (a spinner: a ring one quarter green, Ponder's
+            # "Searching..."): the ring between the outer edge and the inner
+            # one, each side in its colour
+            shown = next((i for i in range(4) if border[i] > 0), 0)
+            paint.append(("rframe", box, side_colours[shown], tuple(border), tuple(corners),
+                          side_colours if two_toned else None))
+        elif radius > 0.5 and len(set(border)) == 1 and border[0] > 0:
             # one border all round, drawn along the rounded edge
             paint.append(("rborder", box, style.get("border-top-color") or style.get("color"),
                           border[0], radius, style.get("border-top-style")))
@@ -963,6 +1166,12 @@ class Layout:
                 del self.out.links[clip_links:]
                 self.out.links.extend(kept)
             self.out.items.append(("clip_pop",))
+        if shape_index is not None:
+            shape = _clip_shape(style.get("clip-path"), box.width(), box.height(), self.zoom,
+                                float(style.get("font-size") or 16.0))
+            if shape is not None:
+                self.out.items[shape_index] = ("clip_push", QRectF(box), 0.0, {"area": QRectF(box)}, shape)
+                self.out.items.append(("clip_pop",))
         if perspective is not None:
             perspective["box"] = (box.x(), box.y(), box.width(), box.height())
             self._perspectives.pop()
@@ -999,7 +1208,19 @@ class Layout:
 
         if style.get("display") == "list-item" and first_baseline is not None:
             self._marker(element, style, content_x, first_baseline)
-        return (margin[0] or 0.0) + box_height + (margin[2] or 0.0)
+        if position in ("absolute", "fixed") and _clipped_away(style):
+            # clip: rect(1px, 1px, 1px, 1px) (or clip-path: inset(50%)) shows
+            # nothing of the box: the way pages hide a "Skip to main content"
+            # link until it is tabbed to. It had been drawn, over Google's tabs
+            for index in range(background_index, len(self.out.items)):
+                item = self.out.items[index]
+                if item is not None and not str(item[0]).endswith(("_push", "_pop")):
+                    self.out.items[index] = None
+            del self.out.links[links_before:]
+        # and the last child's bottom margin, with its parent's
+        bottom_margin = _collapse_margins(margin[2] or 0.0, escaped)
+        self._last_margins = (top_margin, bottom_margin)
+        return top_margin + box_height + bottom_margin
 
     def _box_shadows(self, style: dict):
         """box-shadow as (outer, inset), each a list of (dx, dy, blur, spread,
@@ -1106,6 +1327,117 @@ class Layout:
                                style.get("color", (0, 0, 0, 255)), "none"))
 
     # ---------------------------------------------------------- contents
+    def _rounded_image(self, rect: QRectF, element, style: dict, radius: float) -> None:
+        """A picture, its corners rounded by its border-radius: Google's
+        round site icons (border-radius: 50%) had been square."""
+        item = ("image", rect, element.attrs.get("src", "").strip(),
+                element.attrs.get("alt", ""), _object_fit(style))
+        if radius > 0.5 and not self._measuring:
+            self.out.items.append(("clip_push", QRectF(rect), radius, {"area": QRectF(rect)}))
+            self.out.items.append(item)
+            self.out.items.append(("clip_pop",))
+        else:
+            self.out.items.append(item)
+
+    def _joins_margins(self, element, style: dict, root_level: bool = False) -> bool:
+        """Whether a block's margins can join its children's: an ordinary
+        block in the flow, not one starting a formatting context of its own."""
+        return not (root_level or style.get("_bfc")
+                    or element.tag in NO_MARGIN_JOINING
+                    or style.get("float") in ("left", "right")
+                    or style.get("position") in ("absolute", "fixed")
+                    or style.get("overflow") not in (None, "", "visible")
+                    or style.get("display") not in ("block", "list-item"))
+
+    def _joins_top(self, element, style: dict, width: float, root_level: bool = False) -> bool:
+        _margin, padding, border = self._edges(style, width)
+        return self._joins_margins(element, style, root_level) and not padding[0] and not border[0]
+
+    def _effective_top(self, element, style: dict, width: float, root_level: bool = False,
+                       depth: int = 0) -> float:
+        """A block's top margin joined with its first child's, and that
+        child's with its own, as far down as they meet."""
+        key = (id(element), round(width, 1), root_level)
+        found = self._tops.get(key)
+        if found is not None:
+            return found
+        margin, _padding, _border = self._edges(style, width)
+        result = margin[0] or 0.0
+        if depth < 40 and self._joins_top(element, style, width, root_level):
+            first = self._first_in_flow(element)
+            if first is not None:
+                result = _collapse_margins(result, self._effective_top(
+                    first, self.styles[first], width, depth=depth + 1))
+        self._tops[key] = result
+        return result
+
+    def _first_in_flow(self, element):
+        """The block a block's first line or block would be, if a block:
+        None when text or an inline box comes first."""
+        for node in self._unwrapped(element.children, blocks_only=True):
+            if isinstance(node, Text):
+                if node.data.strip():
+                    return None
+                continue
+            if not isinstance(node, Element):
+                continue
+            node_style = self.styles.get(node, {})
+            if node_style.get("display") == "none" or self._out_of_flow(node_style):
+                continue
+            if self._is_block(node):
+                return node
+            if self._makes_a_line(node):
+                return None
+        return None
+
+    def _makes_a_line(self, node) -> bool:
+        """Whether inline content puts anything on a line: text, a picture,
+        a box. An empty <span> does not."""
+        if isinstance(node, Text):
+            return bool(node.data.strip())
+        if not isinstance(node, Element):
+            return False
+        node_style = self.styles.get(node, {})
+        if node_style.get("display") == "none" or self._out_of_flow(node_style):
+            return False
+        if node.tag in LINE_MAKERS or node_style.get("display") in INLINE_BOXES:
+            return True
+        return any(self._makes_a_line(c) for c in node.children)
+
+    def _collapses_through(self, element, style: dict, width: float) -> bool:
+        """An empty block whose top and bottom margins meet through it."""
+        if not self._joins_margins(element, style):
+            return False
+        _margin, padding, border = self._edges(style, width)
+        if padding[0] or padding[2] or border[0] or border[2]:
+            return False
+        if style.get("height") not in (None, "auto") and self._length(style.get("height"), 1.0, vertical=True):
+            return False
+        if self._length(style.get("min-height"), 1.0, vertical=True):
+            return False
+        return not self._makes_a_line(element) and self._first_in_flow(element) is None \
+            and not any(isinstance(c, Element) and self._is_block(c)
+                        for c in self._unwrapped(element.children, blocks_only=True))
+
+    def _unwrapped(self, nodes, blocks_only: bool = False) -> list:
+        """Children with each display: contents element replaced by its own
+        children, as it has no box. In block flow (blocks_only) only one
+        holding a block is unwrapped; one holding inline content stays, laid
+        out inline with its own style. Kept whole, a wrapper round a block
+        was taken for inline content: the block went on a line of its own
+        after an empty one, and Google's pictures sat a line low in their
+        tiles."""
+        out = []
+        for node in nodes:
+            if isinstance(node, Element) and self.styles.get(node, {}).get("display") == "contents" \
+                    and node.tag not in FIELD_TAGS:
+                inner = self._unwrapped(node.children, blocks_only)
+                if not blocks_only or any(self._is_block(c) for c in inner):
+                    out.extend(inner)
+                    continue
+            out.append(node)
+        return out
+
     def _is_block(self, node) -> bool:
         """A block in the normal flow: floats and positioned boxes are not."""
         if not isinstance(node, Element):
@@ -1154,8 +1486,14 @@ class Layout:
         # a non-breaking space still gives an empty box the height of a line
         return (placeholder or "\u00a0", softer)
 
-    def _contents(self, element: Element, style: dict, x: float, y: float, width: float):
-        """Children of a block: returns (height, baseline of the first line)."""
+    def _contents(self, element: Element, style: dict, x: float, y: float, width: float,
+                  joins_top: bool = False, joins_bottom: bool = False):
+        """Children of a block: returns (height, baseline of the first line).
+
+        joins_top: the first child's top margin is joined with the block's own
+        (already in where the block was put); joins_bottom: the last child's
+        bottom margin is left out of the height and passed out instead, in
+        self._escaped_bottom, to join the block's own."""
         if element.tag in ("input", "textarea", "select"):
             shown = self._control_text(element, style)
             if shown is None:
@@ -1184,7 +1522,7 @@ class Layout:
                 self.out.items.append(("control", QRectF(x, y, width, height), element,
                                        font, style.get("color", (0, 0, 0, 255))))
             return height, baseline
-        children = [c for c in element.children
+        children = [c for c in self._unwrapped(element.children, blocks_only=True)
                     if not (isinstance(c, Element) and self.styles[c].get("display") == "none")]
         if not any(self._is_block(c) for c in children):
             return self._inline(children, style, x, y, width)
@@ -1194,6 +1532,7 @@ class Layout:
         pending_margin = 0.0
         first_baseline = None
         run: list = []
+        absorbed = self._first_in_flow(element) if joins_top else None
 
         def flush_run():
             nonlocal cursor, pending_margin, first_baseline
@@ -1218,16 +1557,17 @@ class Layout:
             if self._is_block(child):
                 flush_run()
                 child_style = self.styles[child]
-                margin, _p, _b = self._edges(child_style, width)
-                top = margin[0] or 0.0
-                bottom = margin[2] or 0.0
-                collapsed = max(pending_margin, top)
+                top = self._effective_top(child, child_style, width)
+                # the first child's top margin is its parent's, joined
+                collapsed = 0.0 if child is absorbed else _collapse_margins(pending_margin, top)
                 start = cursor + collapsed - top
+                cleared = False
                 clear = child_style.get("clear")
                 if clear in ("left", "right", "both"):
                     below = self._floats_bottom(clear)
                     if below is not None and start + top < below:
                         start = below - top
+                        cleared = True
                 # a block starting its own context sits beside floats, not under them
                 block_x, block_width = x, width
                 if self._floats and (child_style.get("overflow") not in (None, "", "visible")
@@ -1239,12 +1579,22 @@ class Layout:
                 used = self._block(child, child_style, block_x, start, block_width)
                 if first_baseline is None:
                     first_baseline = self._last_baseline
+                top, bottom = self._last_margins
+                if used - top - bottom < 0.01 and not cleared and child is not absorbed \
+                        and self._collapses_through(child, child_style, width):
+                    # an empty block: its margins join through it with those
+                    # either side (Google's empty dividers before its tabs)
+                    pending_margin = _collapse_margins(collapsed, bottom)
+                    continue
                 cursor = start + used - bottom
                 pending_margin = bottom
             else:
                 run.append(child)
         flush_run()
-        cursor += pending_margin
+        if joins_bottom:
+            self._escaped_bottom = pending_margin
+        else:
+            cursor += pending_margin
         if style.get("-merlin-clear-after") in ("left", "right", "both"):
             # its ::after clears floats (the clearfix): the box ends below them,
             # and they go no further
@@ -1277,7 +1627,7 @@ class Layout:
         if isinstance(value, tuple):
             if vertical and reference <= 0:
                 return None
-            return reference * value[1] / 100
+            return reference * value[1] / 100 + (value[2] * self.zoom if len(value) > 2 else 0.0)
         try:
             return float(value) * self.zoom
         except (TypeError, ValueError):
@@ -1287,7 +1637,7 @@ class Layout:
     def _flex_items(self, element: Element):
         """The container's items, in order: its elements, and loose text."""
         items = []
-        for child in element.children:
+        for child in self._unwrapped(element.children):
             if isinstance(child, Element):
                 child_style = self.styles[child]
                 if child_style.get("display") == "none":
@@ -1303,7 +1653,7 @@ class Layout:
                 anonymous = Element("span")
                 anonymous.append(Text(child.data))
                 anonymous.parent = element
-                inherited = {k: v for k, v in self.styles[element].items()
+                inherited = {k: v for k, v in self.styles.get(child.parent, self.styles[element]).items()
                              if k in ("color", "font-family", "font-size", "font-weight",
                                       "font-style", "line-height", "text-align",
                                       "white-space", "text-decoration")}
@@ -1412,6 +1762,13 @@ class Layout:
             return self.viewport_height
         if self.styles.get(element, {}).get("position") == "fixed":
             return self.viewport_height
+        # a display: contents parent has no box: the block is the one above
+        # it (Google's picture tiles sit in such a wrapper, height: 100%)
+        while parent is not None and getattr(parent, "tag", None) not in (None, "#document") \
+                and self.styles.get(parent, {}).get("display") == "contents":
+            parent = parent.parent
+        if parent is None:
+            return self.viewport_height
         return self._definite.get(id(parent), 0.0)
 
     def _item_box(self, element: Element, style: dict, x: float, y: float,
@@ -1477,7 +1834,8 @@ class Layout:
             self._floats, self._absolute, self._fixed = held
 
     def _flex(self, element: Element, style: dict, x: float, y: float, width: float,
-              room: float | None = None, least: float | None = None):
+              room: float | None = None, least: float | None = None,
+              most: float | None = None):
         """Lay out a flex container's items; returns (height, first baseline)."""
         self._flex_origin = (x, y)
         items = self._flex_items(element)
@@ -1487,7 +1845,7 @@ class Layout:
         if direction.startswith("column"):
             return self._flex_column(items, style, x, y, width, room, least,
                                      reverse=direction.endswith("reverse"))
-        return self._flex_row(items, style, x, y, width, room, least,
+        return self._flex_row(items, style, x, y, width, room, least, most=most,
                               reverse=direction.endswith("reverse"))
 
     @staticmethod
@@ -1510,7 +1868,7 @@ class Layout:
             return spare / (count + 1), spare / (count + 1)
         return 0.0, 0.0
 
-    def _flex_row(self, items, style, x, y, width, room, least, reverse=False):
+    def _flex_row(self, items, style, x, y, width, room, least, reverse=False, most=None):
         wrap = style.get("flex-wrap", "nowrap") in ("wrap", "wrap-reverse")
         column_gap = self._length(style.get("column-gap"), width) or 0.0
         row_gap = self._length(style.get("row-gap"), width) or 0.0
@@ -1595,6 +1953,13 @@ class Layout:
                          for h, e in zip(heights, line)), default=0.0)
             if single:
                 # one line fills the container's height, if it has one
+                if room is None and most is not None:
+                    # a max-height holds the container, and so its one
+                    # line: items are aligned in that, overflowing it. Google's
+                    # hidden copy of a result's site name, max-height: 0 and
+                    # centred, puts the "About this result" button beside the
+                    # name; aligned in its content's height it fell 19 lower
+                    cross = min(cross, most)
                 cross = max(cross, room or 0.0, least or 0.0)
 
             pen = x + start
@@ -1608,8 +1973,12 @@ class Layout:
                     align = align_items
                 top_margin, bottom_margin = m[0] or 0.0, m[2] or 0.0
                 forced = None
-                if align in ("stretch", "normal") and \
+                if align in ("stretch", "normal") and m[0] is not None and m[2] is not None \
+                        and not _sized_by_attribute(entry["element"], "height") and \
                         self._length(entry["style"].get("height"), 0.0, vertical=True) is None:
+                    # stretched across the line, unless auto margins centre it
+                    # or it is an <svg> with a height of its own (Google's
+                    # play triangles, height="9", had grown to the line)
                     forced = max(height, cross - top_margin - bottom_margin)
                     if single and room is not None and entry["style"].get("overflow") in (
                             "hidden", "clip", "auto", "scroll"):
@@ -1653,7 +2022,8 @@ class Layout:
             fixed = self._length(item_style.get("width"), width)
             if fixed is not None:
                 border_width = max(fixed + sized, edges)
-            elif align in ("stretch", "normal") and not (margin[3] is None and margin[1] is None):
+            elif align in ("stretch", "normal") and not (margin[3] is None and margin[1] is None) \
+                    and not _sized_by_attribute(element, "width"):
                 border_width = width - left - right
             else:
                 border_width = min(self._natural_width(element, item_style, False) + edges,
@@ -1789,7 +2159,14 @@ class Layout:
         elif h is not None and w is None:
             w = h * natural[0] / natural[1] if natural and natural[1] else 0.0
         if w is None or h is None:
-            return 0.0, 0.0                     # not loaded yet, and no size given
+            # not loaded yet, and no size given: as small as its min-width
+            # and min-height, which keep it on the page (a lazy picture seen
+            # by an IntersectionObserver must have a place to be seen in)
+            low_w = self._length(style.get("min-width"), available) or 0.0
+            low_h = self._length(style.get("min-height"), 0.0, vertical=True) or 0.0
+            if low_w > 0 and low_h > 0 and picture is None:
+                return max(low_w, (w or 0.0) * self.zoom), max(low_h, (h or 0.0) * self.zoom)
+            return 0.0, 0.0
         # a percentage is of page pixels, zoom already in them: only the rest
         # are zoomed, or at 125% a picture of width 100% was 25% too wide
         zoom = self.zoom or 1.0
@@ -2057,7 +2434,7 @@ class Layout:
                 return (kind, item[1].translated(dx, dy)) + tuple(item[2:6]) + ([moved(sub) for sub in item[6]],)
             if kind == "clip_push" and len(item) > 3:
                 item[3]["area"] = item[3]["area"].translated(dx, dy)
-            if kind in ("rect", "image", "rrect", "rborder", "svg", "control", "button",
+            if kind in ("rect", "image", "rrect", "rborder", "rframe", "svg", "control", "button",
                         "gradient", "bgimage", "shadow", "dashed", "clip_push", "frame", "media"):
                 return (kind, item[1].translated(dx, dy)) + tuple(item[2:])
             if kind == "text":
@@ -2127,8 +2504,23 @@ class Layout:
                     out.append(("break", "", node_style, href))
                     self._items(node.children, node_style, href, out)
                     out.append(("break", "", node_style, href))
-                else:
+                elif display == "contents":
                     self._items(node.children, node_style, href, out)
+                else:
+                    # an inline element's horizontal margin, border and padding
+                    # take room on the line at its start and its end. They had
+                    # been left out, and Google's favicon (in a span with
+                    # margin-right: 12px) sat against the site's name
+                    margin, padding, border = self._edges(node_style, 0.0)
+                    start_paint = padding[3] + border[3]
+                    end_paint = padding[1] + border[1]
+                    start = (margin[3] or 0.0) + start_paint
+                    end = (margin[1] or 0.0) + end_paint
+                    if start:
+                        out.append(("gap", (start, margin[3] or 0.0, start_paint, True), node_style, href))
+                    self._items(node.children, node_style, href, out)
+                    if end:
+                        out.append(("gap", (end, 0.0, end_paint, False), node_style, href))
 
     def _inline(self, nodes, block_style: dict, x: float, y: float, width: float):
         """Lay out inline content, a line at a time; returns (height, first baseline).
@@ -2160,6 +2552,9 @@ class Layout:
                 pieces.append((_BOX, payload, style, link))
                 at_line_start = False
                 continue
+            if kind == "gap":
+                pieces.append((_GAP, payload, style, link))
+                continue
             text = payload
             if style.get("white-space") in ("pre", "pre-wrap", "break-spaces"):
                 for index, line in enumerate(text.split("\n")):
@@ -2188,7 +2583,15 @@ class Layout:
         else:
             strut = guess
         align = block_style.get("text-align", "left")
-        state = {"cursor": y, "first": None}
+        # text-overflow: ellipsis, in a box that hides what overflows: a line
+        # too long ends in "…" at the box's edge
+        ellipsis = block_style.get("text-overflow") == "ellipsis" and \
+            block_style.get("overflow") not in (None, "", "visible")
+        # -webkit-line-clamp: the last line shown ends in "…" when more follows
+        clamp_lines = 0
+        if self._line_clamp(block_style):
+            clamp_lines = int(str(block_style.get("-webkit-line-clamp") or block_style.get("line-clamp")).strip())
+        state = {"cursor": y, "first": None, "lines": 0, "last": False}
         line: list = []
         used = 0.0
         anchors_here: list = []
@@ -2250,6 +2653,19 @@ class Layout:
                         pen += w
                         run = None
                         continue
+                    if part[0] == "gap":
+                        _k, w, _e, style, link, _a, _d, _lh, (skip, paint, _opens) = part
+                        background = style.get("background-color")
+                        if paint > 0 and background and background[3] > 0 \
+                                and not self._measuring and style.get("visibility") not in ("hidden", "collapse"):
+                            # the padding is the element's own: its background
+                            _f, metrics = self.fonts.get(style)
+                            self.out.items.append(("rect", QRectF(
+                                pen + skip, baseline - metrics.ascent(), paint,
+                                metrics.ascent() + metrics.descent()), background))
+                        pen += w
+                        run = None
+                        continue
                     if part[0] == "image":
                         _k, w, element, style, link, h, _d, _lh, _f = part
                         rect = QRectF(pen, baseline - h, w, h)
@@ -2265,8 +2681,12 @@ class Layout:
                                 holder = holder.parent
                             rect = rect.translated(*self._relative_shift(
                                 style, width, self._definite.get(id(holder), 0.0) if holder is not None else 0.0))
-                        self.out.items.append(("image", rect, element.attrs.get("src", "").strip(),
-                                               element.attrs.get("alt", ""), _object_fit(style)))
+                        if style.get("visibility") not in ("hidden", "collapse"):
+                            self._rounded_image(rect, element, style, min(
+                                self._length(style.get("border-top-left-radius"), w) or 0.0, w / 2, h / 2))
+                        if not self._measuring:
+                            # its box, for scripts' measurements and observers
+                            self.out.boxes.append((rect, element))
                         if link:
                             self.out.links.append((rect, link))
                         pen += w
@@ -2286,6 +2706,20 @@ class Layout:
                     # margin was lost, and a table cell holding reCAPTCHA's
                     # checkbox (28 wide, 12 either side) came out 40 wide
                     self._line_reach = max(getattr(self, "_line_reach", 0.0), pen)
+                elif ellipsis and runs and pen > span[1] + 0.5:
+                    runs = _cut_with_ellipsis(runs, span[1])
+                elif clamp_lines and runs and state["lines"] == clamp_lines - 1 and not state["last"]:
+                    # the clamp's last line, with more to come: it ends in "…"
+                    # (Google's three-line post snippets)
+                    end = runs[-1]
+                    room_left = span[1] - (end[2] + end[4])
+                    mark = QFontMetricsF(end[5]).horizontalAdvance("\u2026")
+                    if room_left >= mark:
+                        end[3] = end[3].rstrip() + "\u2026"
+                        end[4] = QFontMetricsF(end[5]).horizontalAdvance(end[3])
+                    else:
+                        runs = _cut_with_ellipsis(runs, span[1], always=True)
+                state["lines"] += 1
                 for style, link, start_x, text, advance, font in runs:
                     if style.get("visibility") in ("hidden", "collapse"):
                         continue                   # its room is kept, nothing drawn
@@ -2345,6 +2779,11 @@ class Layout:
             if kind is _ABSOLUTE:
                 self._wait_for_placement(piece[1], piece[2], span[0] + used, state["cursor"])
                 continue
+            if kind is _GAP:
+                w, skip, paint, opens = piece[1]
+                line.append(("gap", w, None, piece[2], piece[3], 0.0, 0.0, 0.0, (skip, paint, opens)))
+                used += w
+                continue
             if kind is _BOX:
                 part = self._inline_box(piece[1], piece[2], piece[3], width)
                 if part is None:
@@ -2356,7 +2795,15 @@ class Layout:
                 continue
             if kind is _IMAGE:
                 element, style, link = piece[1], piece[2], piece[3]
-                w, h = self._image_size(element, style, width)
+                # a percentage height is of the block the line is in, when
+                # that has a definite height (YouTube's thumbnails: an image
+                # 100% high in an inline wrapper in a sized box)
+                holder = element.parent
+                while holder is not None and hasattr(holder, "attrs") and \
+                        (self.styles.get(holder) or {}).get("display") in ("inline", "contents", None):
+                    holder = holder.parent
+                tall = self._definite.get(id(holder)) if holder is not None else None
+                w, h = self._image_size(element, style, width, tall)
                 if w <= 0 or h <= 0:
                     continue
                 if line and used + w > span[1] - span[0]:
@@ -2374,7 +2821,15 @@ class Layout:
             # more than the phrase measured whole, and text given exactly its
             # own width had wrapped ("All / Products" on AlterniTech's buttons)
             if wraps and text != " " and line and used + advance > span[1] - span[0] + 1.0:
+                # an element opening just before the word goes down with it
+                opening = []
+                while line and line[-1][0] == "gap" and line[-1][8][2]:
+                    opening.insert(0, line.pop())
+                    used -= opening[0][1]
                 emit(False)
+                for part in opening:
+                    line.append(part)
+                    used += part[1]
             # a word with no room beside floats goes down below them
             steps = 0
             while (wraps and not line and advance > span[1] - span[0] + 0.01
@@ -2393,6 +2848,7 @@ class Layout:
             line.append(("text", advance, text, style, link, metrics.ascent(),
                          metrics.descent(), line_height, font))
             used += advance
+        state["last"] = True
         emit(False)
         return state["cursor"] - y, state["first"]
 
@@ -2538,7 +2994,7 @@ class Layout:
     # ---------------------------------------------------------------- grid
     def _grid_items(self, element: Element, x: float, y: float):
         items = []
-        for child in element.children:
+        for child in self._unwrapped(element.children):
             if isinstance(child, Element):
                 child_style = self.styles[child]
                 if child_style.get("display") == "none":
@@ -2551,7 +3007,7 @@ class Layout:
                 anonymous = Element("span")
                 anonymous.append(Text(child.data))
                 anonymous.parent = element
-                inherited = {k: v for k, v in self.styles[element].items()
+                inherited = {k: v for k, v in self.styles.get(child.parent, self.styles[element]).items()
                              if k in ("color", "font-family", "font-size", "font-weight",
                                       "font-style", "line-height", "text-align",
                                       "white-space", "text-decoration")}
@@ -2856,6 +3312,12 @@ class Layout:
                 height = self._svg_size(child, child_style, border_width)[1]
             elif fixed_height is not None:
                 height = fixed_height
+            elif isinstance(child_style.get("height"), tuple):
+                # a percentage height is of the grid area, which is what is
+                # being sized: it counts as auto here. Measured as a
+                # percentage of the grid itself, Google's picture tiles
+                # (height: 100% in rows of 1fr) made each row the whole grid
+                height = self._scratch_height(child, _auto_height(child_style), border_width)
             else:
                 height = self._scratch_height(child, child_style, border_width)
             measured[index] = (border_width, height, justify, margin)
@@ -2902,9 +3364,19 @@ class Layout:
             if align in ("auto", "normal", ""):
                 align = style.get("align-items", "stretch") or "stretch"
             forced = None
+            share = child_style.get("height")
+            if isinstance(share, tuple) and child.tag != "svg":
+                # a percentage of the grid area, now that it is known
+                _m, padding, border = self._edges(child_style, cell_w)
+                edges_y = padding[0] + padding[2] + border[0] + border[2]
+                height = self._outer(child_style, self._length(share, cell_h) or 0.0, edges_y)
+                forced = height
             spare_y = cell_h - height - m_top - m_bottom
             offset_y = 0.0
-            if align in ("stretch", "normal") and \
+            if forced is not None:
+                offset_y = {"center": spare_y / 2, "end": spare_y,
+                            "flex-end": spare_y}.get(align, 0.0)
+            elif align in ("stretch", "normal") and not _sized_by_attribute(child, "height") and \
                     self._length(child_style.get("height"), 0.0, vertical=True) is None:
                 forced = max(height, cell_h - m_top - m_bottom)
             else:
@@ -3305,7 +3777,7 @@ def _bottom_edge(item) -> float:
         return max((_bottom_edge(sub) for sub in item[1]), default=0.0)
     if item[0] == "masked":
         return item[1].bottom()
-    if item[0] in ("rect", "image", "rrect", "rborder", "svg", "gradient", "dashed", "frame", "media"):
+    if item[0] in ("rect", "image", "rrect", "rborder", "rframe", "svg", "gradient", "dashed", "frame", "media"):
         return item[1].bottom()
     if item[0] == "text":
         return item[2] + QFontMetricsF(item[4]).descent()
@@ -3319,7 +3791,7 @@ def _right_edge(item) -> float:
         return max((_right_edge(sub) for sub in item[1]), default=0.0)
     if item[0] == "masked":
         return item[1].right()
-    if item[0] in ("rect", "image", "rrect", "rborder", "svg", "gradient", "bgimage", "dashed", "frame", "media"):
+    if item[0] in ("rect", "image", "rrect", "rborder", "rframe", "svg", "gradient", "bgimage", "dashed", "frame", "media"):
         return item[1].right()
     if item[0] == "extent":
         return item[1]
@@ -3377,6 +3849,11 @@ def svg_markup(element: Element, style: dict) -> str:
                 value = style.get(name)
                 if isinstance(value, str) and value.strip():
                     attrs[name] = value.strip()
+                    continue
+                handed = style.get("-merlin-inherited-" + name)
+                if isinstance(handed, str) and handed.strip() and name not in attrs:
+                    # inherited from the page round it, under its own attribute
+                    attrs[name] = handed.strip()
             if "viewbox" not in attrs and attrs.get("width") and attrs.get("height"):
                 attrs["viewbox"] = f"0 0 {attrs['width']} {attrs['height']}"
         parts = []

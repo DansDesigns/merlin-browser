@@ -1564,6 +1564,62 @@ var CHANGED = Symbol("changed");
 var CLASS_LIST = Symbol("classList");
 var CUSTOM_ELEMENTS = Symbol("CustomElements");
 var CONTENT = Symbol("content");
+// Merlin: a template's content goes with it when it is cloned (see
+// HTMLTemplateElement), the templates inside a clone matched to the
+// original's in document order
+var TEMPLATE_CONTENT = { moved: false };
+var INERT = Symbol("inert");
+function adoptFromInert(node, home) {
+  const registry = home[CUSTOM_ELEMENTS];
+  const live = registry && registry.active;
+  const adopt = (element) => {
+    element.ownerDocument = home;
+    if (live && element.nodeType === ELEMENT_NODE) registry.upgrade(element);
+  };
+  adopt(node);
+  if (node.nodeType === ELEMENT_NODE || node.nodeType === DOCUMENT_FRAGMENT_NODE) {
+    let next = node[NEXT];
+    const end = node[END];
+    while (next && next !== end) {
+      if (next.nodeType === ELEMENT_NODE) adopt(next);
+      else if (next.nodeType === TEXT_NODE || next.nodeType === COMMENT_NODE) next.ownerDocument = home;
+      next = next[NEXT];
+    }
+  }
+}
+function inertDocument(document) {
+  if (!document || document[INERT] === true) return document;
+  if (!document[INERT]) {
+    const made = new document.constructor();
+    made[INERT] = true;
+    document[INERT] = made;
+  }
+  return document[INERT];
+}
+function templatesIn(node) {
+  const found = [];
+  if (node.localName === "template") found.push(node);
+  let next = node[NEXT];
+  const end = node[END];
+  while (next && next !== end) {
+    if (next.nodeType === 1 && next.localName === "template") found.push(next);
+    next = next[NEXT];
+  }
+  return found;
+}
+function carryTemplateContent(source, clone) {
+  const from = templatesIn(source);
+  if (!from.length) return;
+  const to = templatesIn(clone);
+  if (to.length !== from.length) return;
+  for (let i = 0; i < from.length; i++) {
+    const own = from[i][CONTENT];
+    if (!own || !own.hasChildNodes()) continue;
+    const target = to[i][CONTENT];
+    while (target.firstChild) target.removeChild(target.firstChild);
+    for (const node of Array.from(own.childNodes)) target.appendChild(node.cloneNode(true));
+  }
+}
 var DATASET = Symbol("dataset");
 var DOCTYPE = Symbol("doctype");
 var DOM_PARSER = Symbol("DOMParser");
@@ -11761,8 +11817,16 @@ var attribute = (element, end, attribute2, value, active) => {
   if (attribute2.name === "class") element.className = value;
   if (active) attributeChangedCallback(element, attribute2.name, null, value);
 };
-var parseFromString = (document, isHTML, markupLanguage) => {
-  const { active, registry } = document[CUSTOM_ELEMENTS];
+var parseFromString = (document, isHTML, markupLanguage, inert = false) => {
+  const { active: reactive2, registry } = document[CUSTOM_ELEMENTS];
+  // Merlin: what is inside a <template> is inert, as in browsers: its custom
+  // elements are not made or told of their attributes until the content is
+  // cloned. Made as they were parsed, Polymer's elements took their own
+  // [[binding]] text as values ("couldn't decode Array as JSON"), and
+  // YouTube's results were drawn with no titles or pictures
+  const floor = inert ? 1 : 0;
+  let templates = floor;
+  let active = reactive2 && templates === 0;
   let node = document;
   let ownerSVGElement = null;
   let parsingCData = false;
@@ -11794,9 +11858,20 @@ var parseFromString = (document, isHTML, markupLanguage) => {
           }
         }
       }
+      if (create3 && isHTML && reactive2 && !active) {
+        // inside a template: a plain element, not yet a custom one
+        const lower = String(name).toLowerCase();
+        const Plain = htmlClasses.has(lower) ? htmlClasses.get(lower) : HTMLElement;
+        node = append2(node, new Plain(document, lower), false);
+        create3 = false;
+      }
       if (create3) node = append2(node, document.createElement(name), false);
       let end = node[END];
       for (const name2 of keys(attributes)) attribute(node, end, document.createAttribute(name2), attributes[name2], active);
+      if (isHTML && node.localName === "template") {
+        templates++;
+        active = false;
+      }
     },
     // #text, #comment
     oncomment(data) {
@@ -11819,6 +11894,10 @@ var parseFromString = (document, isHTML, markupLanguage) => {
     // </tagName>
     onclosetag() {
       if (isHTML && node === ownerSVGElement) ownerSVGElement = null;
+      if (isHTML && node.localName === "template" && templates > floor) {
+        templates--;
+        active = reactive2 && templates === 0;
+      }
       node = node.parentNode;
     }
   }, {
@@ -15259,6 +15338,13 @@ var ParentNode = class extends Node2 {
   insertBefore(node, before2 = null) {
     if (node === before2) return node;
     if (node === this) throw new Error("unable to append a node to itself");
+    // Merlin: a template's content, cloned and put in the page, is adopted
+    // by it and its custom elements made, as a browser's would be
+    const owner = node && node.ownerDocument;
+    if (owner && owner[INERT] === true) {
+      const home = this.nodeType === DOCUMENT_NODE ? this : this.ownerDocument;
+      if (home && home !== owner && home[INERT] !== true) adoptFromInert(node, home);
+    }
     const next = before2 || this[END];
     switch (node.nodeType) {
       case ELEMENT_NODE:
@@ -15407,7 +15493,7 @@ var setInnerHtml = (node, html) => {
   const { constructor } = ownerDocument;
   const document = new constructor();
   document[CUSTOM_ELEMENTS] = ownerDocument[CUSTOM_ELEMENTS];
-  const { childNodes } = parseFromString(document, ignoreCase(node), html);
+  const { childNodes } = parseFromString(document, ignoreCase(node), html, node.localName === "template");
   node.replaceChildren(...childNodes.map(setOwnerDocument, ownerDocument));
 };
 function setOwnerDocument(node) {
@@ -15914,6 +16000,22 @@ var Element2 = class extends ParentNode {
     }
     return text.join("");
   }
+  // Merlin: innerText can be set, as in browsers: the element's children
+  // become its text, each line break a <br>. With only a getter, setting it
+  // threw in strict code: YouTube sets it in a custom element's
+  // disconnectedCallback, and the throw stopped its video titles from being
+  // written
+  set innerText(value) {
+    const lines = String(value ?? "").split(/\r\n|\r|\n/);
+    this.textContent = lines[0];
+    for (let i = 1; i < lines.length; i++) {
+      this.appendChild(this.ownerDocument.createElement("br"));
+      if (lines[i]) this.appendChild(this.ownerDocument.createTextNode(lines[i]));
+    }
+  }
+  get outerText() {
+    return this.innerText;
+  }
   /**
    * @returns {String}
    */
@@ -16104,6 +16206,11 @@ var Element2 = class extends ParentNode {
   }
   // </insertAdjacent>
   cloneNode(deep = false) {
+    const clone = this._mjsCloneTree(deep);
+    if (deep && TEMPLATE_CONTENT.moved) carryTemplateContent(this, clone);
+    return clone;
+  }
+  _mjsCloneTree(deep = false) {
     const { ownerDocument, localName } = this;
     const addNext = (next2) => {
       next2.parentNode = parentNode;
@@ -16892,14 +16999,35 @@ var tagName = "template";
 var HTMLTemplateElement = class extends HTMLElement {
   constructor(ownerDocument) {
     super(ownerDocument, tagName);
-    const content = this.ownerDocument.createDocumentFragment();
+    // Merlin: the content belongs to a document of its own with no custom
+    // elements, as in browsers, so what scripts make in it stays plain until
+    // it is imported: Polymer turns <template is="dom-repeat"> into a
+    // <dom-repeat> made by the content's ownerDocument, and made live it
+    // read its [[bindings]] as values
+    const content = inertDocument(this.ownerDocument).createDocumentFragment();
     (this[CONTENT] = content)[PRIVATE] = this;
   }
   get content() {
+    // Merlin: what the parser put in the template goes into its content (as
+    // in browsers, where a template has no children), moved, not copied:
+    // a copy left the children as the template's own, and a clone of the
+    // template (or of anything round it) copied those, not the content as a
+    // script had changed it. Polymer strips its [[bindings]] from template
+    // content and clones it; YouTube's results came out with no titles
     if (this.hasChildNodes() && !this[CONTENT].hasChildNodes()) {
-      for (const node of this.childNodes) this[CONTENT].appendChild(node.cloneNode(true));
+      const inert = this[CONTENT].ownerDocument;
+      for (const node of Array.from(this.childNodes)) this[CONTENT].appendChild(setOwnerDocument.call(inert, node));
+      TEMPLATE_CONTENT.moved = true;
     }
     return this[CONTENT];
+  }
+  get innerHTML() {
+    return Array.from(this.content.childNodes).map(String).join("");
+  }
+  set innerHTML(html) {
+    const content = this[CONTENT];
+    while (content.firstChild) content.removeChild(content.firstChild);
+    super.innerHTML = html;
   }
 };
 registerHTMLClass(tagName, HTMLTemplateElement);

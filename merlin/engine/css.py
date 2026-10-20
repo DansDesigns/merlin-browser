@@ -1124,6 +1124,10 @@ def parse_stylesheet(text: str, start_order: int = 0, media: tuple = ()) -> list
                     parse_stylesheet(body, order, media)
             elif lowered.startswith("@layer") or lowered.startswith("@document"):
                 inner = parse_stylesheet(body, order, media)
+            elif lowered.startswith("@container"):
+                # kept as a condition of its own, decided as @media's are, for
+                # the container's size (see container_matches)
+                inner = parse_stylesheet(body, order, media + ("@container " + lowered[10:].strip(),))
             else:
                 inner = []          # @font-face, @keyframes, @container, @page...
             rules.extend(inner)
@@ -1240,8 +1244,36 @@ def _compare(a: float, op: str, b: float) -> bool:
     return {"<": a < b, "<=": a <= b, ">": a > b, ">=": a >= b, "=": a == b}[op]
 
 
+def container_matches(query: str, viewport=(1024, 768), sizes: dict | None = None,
+                      scheme: str = "light") -> bool:
+    """Whether an @container condition ("@container srp (min-width: 868px)")
+    holds. A container's size is known only once laid out, so it is taken
+    from sizes (a container's name to its (width, height)) when given, and
+    otherwise as the window's: Google's results page sets its whole grid by
+    @container srp, a container as wide as the page, and without these rules
+    its results had spread across the window with no side panel."""
+    condition = query.strip()[len("@container"):].strip()
+    name = ""
+    found = re.match(r"^([a-z_-][\w-]*)\s+(.*)$", condition)
+    if found and found.group(1) not in ("not", "style"):
+        name, condition = found.group(1), found.group(2)
+    if condition.startswith("style(") or "style(" in condition:
+        return False                           # style queries: not matched, as unknown
+    size = (sizes or {}).get(name) or (viewport[0], viewport[1])
+    # a container's conditions are written as a media query's are
+    return media_matches(condition, size, scheme)
+
+
 def media_matches(query: str, viewport=(1024, 768), scheme: str = "light") -> bool:
-    """Whether a media query list holds for a screen of this size."""
+    """Whether a media query list holds for a screen of this size.
+
+    viewport is (width, height), or (page width, height, window width): a
+    media query asks the window's width, its scroll bar in it, as Chrome's
+    does, where the page is laid out beside it. Google's search box sits by
+    @media (min-width: 1461px) in a window 1461 wide; asked the page's 1446,
+    it had been pushed 156 pixels to the right."""
+    if len(viewport) > 2:
+        viewport = (viewport[2], viewport[1])
     query = query.strip().lower()
     if not query:
         return True
@@ -1470,13 +1502,18 @@ class Styler:
     def _holds(self, query: str) -> bool:
         found = self._media.get(query)
         if found is None:
-            found = media_matches(query, self.viewport, self.scheme)
+            found = self._query_holds(query, self.viewport)
             self._media[query] = found
         return found
 
+    def _query_holds(self, query: str, viewport) -> bool:
+        if query.startswith("@container"):
+            return container_matches(query, viewport, getattr(self, "container_sizes", None), self.scheme)
+        return media_matches(query, viewport, self.scheme)
+
     def media_changed(self, viewport) -> bool:
         """Whether a window of this size would choose different @media rules."""
-        return any(media_matches(q, viewport, self.scheme) != held
+        return any(self._query_holds(q, viewport) != held
                    for q, held in self._media.items())
 
     def restyle(self, viewport) -> dict:
@@ -1644,6 +1681,14 @@ class Styler:
         for name in INHERITED:
             if name in parent:
                 style[name] = parent[name]
+        # an SVG's fill and stroke are inherited too, but below its own fill
+        # and stroke attributes, so they are kept apart: Google's icons, grey
+        # by fill: currentColor on the <span> round them, had been black
+        for name in ("fill", "stroke"):
+            if name not in declared:
+                handed = parent.get(name) or parent.get("-merlin-inherited-" + name)
+                if handed:
+                    style["-merlin-inherited-" + name] = handed
         parent_font = parent.get("font-size", 16.0)
         # font-size first: em lengths depend on it
         style["font-size"] = self._font_size(declared.get("font-size"), parent_font, root_size)
@@ -1936,6 +1981,13 @@ class Styler:
             if name.startswith("border-") and name.endswith("-width"):
                 lowered = {"thin": "1px", "medium": "3px", "thick": "5px"}.get(lowered, lowered)
             length = parse_length(lowered, font, root_size, self.viewport)
+            if length is None and lowered.startswith("calc("):
+                # a share of the containing block and a length together, as
+                # ("%", share, px): max-width: calc(100% - 36px), which keeps
+                # Google's video channel names clear of their menu button
+                found = calc_value(lowered, font, root_size, self.viewport)
+                if found and set(found) <= {"px", "%"}:
+                    return ("%", float(found.get("%", 0.0)), float(found.get("px", 0.0)))
             return length if length is not None else "auto"
         return value.strip()
 

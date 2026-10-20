@@ -1214,7 +1214,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
         self.cert_troubles = []
         # what styling needs, taken here on the UI thread: the loading thread
         # then parses the CSS and runs the cascade without touching the window
-        viewport = (self._page_width(), float(max(1, self.height())))
+        viewport = self._viewport()
         hiding = self._hiding_css_for(host_name)
         from PyQt6.QtCore import QStandardPaths
 
@@ -1543,7 +1543,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             self._viewport_units = prepared.get("viewport_units", False)
             self._styled_at = prepared.get("styled_at")
         else:
-            styled_at = (self._page_width(), float(self.height()))
+            styled_at = self._viewport()
             styler = Styler(self._document, author_css=self._sheets,
                             viewport=styled_at, extra_css=self._hiding_css())
             self._styles = styler.compute()
@@ -1890,7 +1890,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
         self._restyling = True
         number = self._load_number
         job = {"markup": self._markup, "url": self._url.toString(), "sheets": self._sheets,
-               "viewport": (self._page_width(), float(max(1, self.height()))),
+               "viewport": self._viewport(),
                "hiding": self._hiding_css(), "patches": dict(self._patches),
                "want": "styles"}
 
@@ -2426,11 +2426,35 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
         def work():
             started = time.monotonic()
             kept = cache.get(url) if cache is not None else None
+            streamed = {"on": False}
+            fetch_id = message.get("id")
+
+            def on_start(answer):
+                # a stream: its status and headers now, its pieces as they come
+                streamed["on"] = True
+                host.send(dict(answer, type="answer", id=fetch_id))
+
+            def on_chunk(piece):
+                import base64 as _b64
+
+                if piece is None:
+                    host.send({"type": "chunk", "id": fetch_id, "done": True})
+                else:
+                    host.send({"type": "chunk", "id": fetch_id, "data": _b64.b64encode(piece).decode("ascii")})
+
+            may_stream = bool(message.get("stream_ok")) and cache is None
             answer = ({"error": "blocked by the content blocker"} if blocked else
                       dict(kept) if kept is not None else
-                      page_fetch(url, message.get("method", "GET"), headers, message.get("body"), opener))
+                      page_fetch(url, message.get("method", "GET"), headers, message.get("body"), opener,
+                                 on_start=on_start if may_stream else None,
+                                 on_chunk=on_chunk if may_stream else None))
             if cache is not None and kept is None:
                 cache.put(url, answer)
+            if streamed["on"]:
+                self.network_lines.append(
+                    f"{message.get('method', 'GET'):6} {answer.get('status', 'failed')!s:6} "
+                    f"{answer.get('size', 0):>9} B {int((time.monotonic() - started) * 1000):>6} ms  {url}  (streamed)")
+                return
             # the network log, for the debugging zip: a data request failing
             # quietly is how a page stays empty with nothing in its console
             size = len(answer.get("body") or "") * 3 // 4
@@ -2480,7 +2504,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
         lenient = self._leniency(host_name)
         opener = cookie_opener(self._cookies(), lenient)
         plain = cookie_opener(None, lenient)
-        viewport = (self._page_width(), float(max(1, self.height())))
+        viewport = self._viewport()
         hiding = self._hiding_css_for(host_name)
 
         old_document, old_markup = self._document, self._markup
@@ -2660,7 +2684,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             return None
         self._partial_making = key
         sheets, document = list(self._sheets or []), self._document
-        viewport = self._styled_at or (self._page_width(), float(self.height()))
+        viewport = self._styled_at or self._viewport()
         hiding = key[2]
 
         def work():
@@ -2792,6 +2816,12 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             # nothing waiting: once rested, the page's scripts may send more
             self._script_rest.start(max(1, int((self._script_rest_until - time.monotonic()) * 1000)))
 
+    def _viewport(self) -> tuple:
+        """(page width, height, window width) for styling: the page is laid
+        out beside the scroll bar, and @media asks the window's whole width."""
+        height = float(max(1, self.height()))
+        return (self._page_width(), height, float(max(1, self.width())))
+
     def _page_width(self) -> float:
         if self.is_frame():
             bar = self.scrollbar.sizeHint().width() if not self.scrollbar.isHidden() else 0
@@ -2803,7 +2833,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             return
         # across a breakpoint, the page is styled again, in the background;
         # until then it keeps its present styles
-        viewport = (self._page_width(), float(self.height()))
+        viewport = self._viewport()
         if self._media and any(media_matches(q, viewport) != held
                                for q, held in self._media.items()):
             self._media = {q: media_matches(q, viewport) for q in self._media}
@@ -4230,7 +4260,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
 
         try:
             styler = Styler(self._document, author_css=sheets,
-                            viewport=self._styled_at or (self._page_width(), float(self.height())),
+                            viewport=self._styled_at or self._viewport(),
                             extra_css=self._hiding_css())
         except Exception:                                  # noqa: BLE001
             return None

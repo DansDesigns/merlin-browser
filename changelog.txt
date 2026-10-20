@@ -5,6 +5,82 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.40
+  Merlin Engine:
+  - YouTube's search results show their titles, channel names, details and
+    thumbnails, laid out as on YouTube. A custom element's
+    disconnectedCallback set innerText, which Merlin could only read; the
+    error stopped every video title from being written.
+  - YouTube's search box border sits round the box, not inside it.
+    Corners now each take their own border-radius, and borders that differ
+    by side are drawn round rounded corners.
+  - Cover Your Tracks shows its full results. setTimeout() and
+    setInterval() given a string of code now run it; the fingerprint
+    check started that way had never run.
+  - Ponder's results appear as each source answers. A page's fetch() can
+    now read a response as it arrives (response.body.getReader()); the
+    whole search had waited for its slowest source.
+  - Ponder's "Searching…" spinners show their green arc. A rounded border
+    with sides of different colours draws each side in its colour.
+  - Pictures still loading that are given a size by CSS (width and height
+    100%, or a min-width and min-height) take that size, so lazy-loading
+    pages see them come into view and load them.
+  - IntersectionObserverEntry exists, as polyfills look for it. YouTube's
+    polyfill had replaced Merlin's observer with one that never saw the
+    page laid out.
+  - Google's results page, further down:
+      - Star ratings show as stars. They had been a grey bar.
+      - Site icons are round.
+      - Icons take their colour from the page (fill: currentColor on the
+        element round them). The search and arrow icons had been black.
+      - Video length badges show their play triangle at its own size.
+      - Long names and video titles end in "…" where the page asks for it
+        (text-overflow: ellipsis and -webkit-line-clamp).
+  - CSS:
+      - clip-path shapes are drawn: polygon(), circle(), ellipse() and
+        inset().
+      - Two gradient colour stops at the same place make a hard edge, as in
+        browsers.
+      - A picture's border-radius rounds the picture itself.
+      - SVG fill and stroke are inherited, below an SVG's own fill and
+        stroke attributes.
+      - calc() of a percentage and a length works for widths, heights,
+        margins and positions (max-width: calc(100% - 36px)).
+      - A flex item with auto margins across the line is centred, not
+        stretched. An <svg> keeps the width and height its attributes give
+        it in flex and grid layouts.
+  - Page scripts:
+      - What is inside a <template> stays inert until a script uses it, as
+        in browsers. Its custom elements are not made early, and changes a
+        script makes to a template's content are kept when it is copied.
+        YouTube's pages are built from templates this way, and their
+        results had been missing parts.
+
+1.8.39
+  Merlin Engine:
+  - Google's results page is laid out as Chrome lays it out.
+  - Style sheets added by a page's scripts keep their ">" selectors. They
+    had come over as "&gt;", so every child rule was lost.
+  - @container rules are applied. Google's results grid and side panel
+    depend on them.
+  - Media queries ask the window's width, scroll bar included, as Chrome's
+    do. Google's search box and header now pick the right size.
+  - Skip links and other boxes clipped to nothing are no longer drawn.
+  - Margins join (collapse) as in browsers:
+      - A negative margin pulls a block up. Google's tabs had sat 12
+        pixels low.
+      - A first or last child's margin joins its parent's.
+      - Margins join through empty blocks.
+  - Grid items with a percentage height take it from their grid area.
+    Google's picture tiles had each been as tall as the whole grid, and
+    the bottom row was missing.
+  - A flex row held by max-height centres its items on that height. This
+    puts Google's "About this result" button beside the site name.
+  - An inline element's side margins, padding and borders take room on the
+    line. Google's favicons had sat against the site names.
+  - display: contents wrappers around a block no longer add an empty line
+    above it. Google's pictures had sat a line low in their tiles.
+
 1.8.38
   Merlin Engine:
   - Solving Google's "I'm not a robot" check lets you through. reCAPTCHA
