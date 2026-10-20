@@ -17045,6 +17045,63 @@ var HTMLIFrameElement = class extends HTMLElement {
   set loading(value) {
     stringAttribute.set(this, "loading", value);
   }
+  // the rest a browser's <iframe> reflects as attributes: reCAPTCHA sets
+  // iframe.scrolling = "no", which had stayed a property, and its box was
+  // drawn with scroll bars
+  get scrolling() {
+    return stringAttribute.get(this, "scrolling");
+  }
+  set scrolling(value) {
+    stringAttribute.set(this, "scrolling", value);
+  }
+  get frameBorder() {
+    return stringAttribute.get(this, "frameborder");
+  }
+  set frameBorder(value) {
+    stringAttribute.set(this, "frameborder", value);
+  }
+  get width() {
+    return stringAttribute.get(this, "width");
+  }
+  set width(value) {
+    stringAttribute.set(this, "width", value);
+  }
+  get height() {
+    return stringAttribute.get(this, "height");
+  }
+  set height(value) {
+    stringAttribute.set(this, "height", value);
+  }
+  get marginWidth() {
+    return stringAttribute.get(this, "marginwidth");
+  }
+  set marginWidth(value) {
+    stringAttribute.set(this, "marginwidth", value);
+  }
+  get marginHeight() {
+    return stringAttribute.get(this, "marginheight");
+  }
+  set marginHeight(value) {
+    stringAttribute.set(this, "marginheight", value);
+  }
+  get sandbox() {
+    const element = this;
+    const list = () => (element.getAttribute("sandbox") || "").split(/\s+/).filter(Boolean);
+    return {
+      get value() { return element.getAttribute("sandbox") || ""; },
+      set value(v) { element.setAttribute("sandbox", String(v)); },
+      get length() { return list().length; },
+      contains: (t) => list().includes(String(t)),
+      supports: () => true,
+      add: (...tokens) => element.setAttribute("sandbox", [...new Set([...list(), ...tokens.map(String)])].join(" ")),
+      remove: (...tokens) => element.setAttribute("sandbox", list().filter((t) => !tokens.includes(t)).join(" ")),
+      toString: () => element.getAttribute("sandbox") || "",
+      [Symbol.iterator]: () => list()[Symbol.iterator](),
+    };
+  }
+  set sandbox(value) {
+    stringAttribute.set(this, "sandbox", value);
+  }
 };
 registerHTMLClass(tagName3, HTMLIFrameElement);
 

@@ -199,7 +199,16 @@ class FramesMixin:
     def _frame_script_state(self) -> dict:
         state = {"token": self._token}
         if self.is_frame():
-            state["frame"] = {"parent": self._frame_parent._token, "top": self.frame_top()._token}
+            parent = self._frame_parent
+            mine = next((e for e, v in parent._frames.items() if v is self), None)
+            # its window.name (its <iframe>'s name), and its parent's other
+            # frames by name, for parent.frames[name]: reCAPTCHA's challenge
+            # frame finds its checkbox frame so, and had stopped on
+            # window.name being undefined
+            state["frame"] = {"parent": parent._token, "top": self.frame_top()._token,
+                              "name": mine.attrs.get("name", "") if mine is not None else "",
+                              "siblings": {e.attrs["name"]: v._token for e, v in parent._frames.items()
+                                           if e.attrs.get("name") and v is not self}}
         return state
 
     # ---------------------------------------------------- as a parent

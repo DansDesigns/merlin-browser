@@ -2721,7 +2721,41 @@ function installFrames(g, made) {
       try { Object.defineProperty(g, name, { get: () => value, configurable: true }); } catch (_) { g[name] = value; }
     }
     try { Object.defineProperty(g, "frameElement", { get: () => null, configurable: true }); } catch (_) {}
+    // parent.frames[name]: the parent's other frames, by their names
+    const siblings = state.frame.siblings || {};
+    const siblingFrames = new Proxy({}, {
+      get(_, key) {
+        if (key === "length") return Object.keys(siblings).length;
+        if (typeof key === "string" && Object.prototype.hasOwnProperty.call(siblings, key)) return windowFor(siblings[key]);
+        return parent[key];
+      },
+    });
+    try { Object.defineProperty(parent, "frames", { get: () => siblingFrames, configurable: true }); } catch (_) {}
   }
+  // window.name: a frame's is its <iframe>'s name, a tab's empty; it had been
+  // undefined, and reCAPTCHA's challenge frame stopped on name.replace
+  let windowName = state.frame && state.frame.name ? String(state.frame.name) : "";
+  try {
+    Object.defineProperty(g, "name", { configurable: true, enumerable: true,
+      get: () => windowName, set: (v) => { windowName = String(v); } });
+  } catch (_) {}
+  // window.frames[name] and [index], and window[name]: this page's frames
+  const ownFrames = () => [...document_.querySelectorAll("iframe, frame")];
+  const framesView = new Proxy(g, {
+    get(target, key) {
+      if (key === "length") return ownFrames().length;
+      if (typeof key === "string") {
+        if (/^\d+$/.test(key)) { const f = ownFrames()[Number(key)]; return f ? f.contentWindow : undefined; }
+        if (!(key in target)) {
+          const f = ownFrames().find((e) => e.getAttribute("name") === key);
+          if (f) return f.contentWindow;
+        }
+      }
+      const value = Reflect.get(target, key);
+      return value;
+    },
+  });
+  try { Object.defineProperty(g, "frames", { get: () => framesView, configurable: true }); } catch (_) { g.frames = framesView; }
   const probe = document_.createElement("iframe");
   const Base = (g.HTMLElement || made.HTMLElement).prototype;
   const own = Object.getPrototypeOf(probe);

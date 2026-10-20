@@ -757,7 +757,8 @@ class Layout:
                     if margin[3] is None and margin[1] is None:
                         box_x += spare / 2
                         content_x += spare / 2
-            inner_height, first_baseline = self._table(element, style, content_x, content_y, content_width)
+            inner_height, first_baseline = self._table(element, style, content_x, content_y, content_width,
+                                                       room=fixed_height)
         elif element.tag == "svg":
             inner_height, first_baseline = self._svg_block(element, style, content_x,
                                                            content_y, content_width)
@@ -778,8 +779,11 @@ class Layout:
                 room=fixed_height, least=min_height)
         else:
             inner_height, first_baseline = self._contents(element, style, content_x, content_y, content_width)
-        # where this block's first line of text sits, for a list marker outside it
-        self._last_baseline = first_baseline
+        # where this block's first line of text sits, for a list marker outside it.
+        # A table gives none to what holds it, as in Chrome: an inline-block
+        # holding one sits on its bottom edge (reCAPTCHA's checkbox and its
+        # label, each in a table, had sat at different heights)
+        self._last_baseline = None if style.get("display") == "table" else first_baseline
 
         if new_context:
             float_bottom = max((f["bottom"] for f in self._floats), default=None)
@@ -1800,12 +1804,29 @@ class Layout:
         rows, caption = [], None
 
         def take_rows(node):
+            # cells straight in a table (or a row group), with no row around
+            # them, are a row of their own, as CSS makes an anonymous row
+            # for them: reCAPTCHA's "I'm not a robot" is such a cell, in a
+            # display: table, and was never drawn
+            loose = []
+
+            def flush():
+                if loose:
+                    row = Element("tr")
+                    row.parent = node
+                    rows.append((row, list(loose)))
+                    loose.clear()
+
             for child in node.children:
                 if not isinstance(child, Element):
                     continue
                 display = self.styles[child].get("display")
                 if display == "none":
                     continue
+                if display == "table-cell":
+                    loose.append(child)
+                    continue
+                flush()
                 if display == "table-row":
                     rows.append([c for c in child.children
                                  if isinstance(c, Element)
@@ -1814,6 +1835,7 @@ class Layout:
                 elif display in ("table-row-group", "table-header-group",
                                  "table-footer-group"):
                     take_rows(child)
+            flush()
 
         for child in table.children:
             if isinstance(child, Element) and self.styles[child].get("display") == "table-caption":
@@ -1882,13 +1904,38 @@ class Layout:
         spacing = self._spacing(style)
         return sum(high) + spacing * (len(high) + 1)
 
-    def _table(self, table, style: dict, x: float, y: float, width: float):
+    def _table(self, table, style: dict, x: float, y: float, width: float,
+               room: float | None = None, least: list | None = None, record: list | None = None):
+        """Lay out a table; its height (its rows', and its caption's) and first
+        baseline. room: the height the table is given, which its rows grow
+        to fill, shared out equally, as in a browser (a display: table at
+        height: 100% with a cell at vertical-align: middle centres it; it had
+        stayed at the top). least: each row's least height; record: each
+        row's height, appended."""
+        if room is not None and least is None and record is None:
+            heights = []
+            saved = self.out
+            held = (self._floats, self._absolute, self._fixed)
+            was_measuring = self._measuring
+            self.out = DisplayList()
+            self._floats, self._absolute, self._fixed = [], [[]], []
+            self._measuring = True
+            try:
+                natural, _baseline = self._table(table, style, x, y, width, record=heights)
+            finally:
+                self.out = saved
+                self._floats, self._absolute, self._fixed = held
+                self._measuring = was_measuring
+            if heights and natural < room - 0.5:
+                extra = (room - natural) / len(heights)
+                least = [h + extra for h in heights]
         rows, caption = self._table_grid(table)
         spacing = self._spacing(style)
         low, high = self._columns(table, style)
         count = len(low)
         cursor = y
         first_baseline = None
+        baseline_from = None
         if caption is not None:
             cursor += self._block(caption, self.styles[caption], x, cursor, width)
         if not count:
@@ -1907,8 +1954,8 @@ class Layout:
             total = sum(give) or 1.0
             widths = [l + spare * g / total for l, g in zip(low, give)]
         cursor += spacing
-        for row, cells in rows:
-            row_style = self.styles[row]
+        for row_number, (row, cells) in enumerate(rows):
+            row_style = self.styles.get(row) or {}
             row_start = len(self.out.items)
             self.out.items.append(None)          # the row's background, once known
             placed = []                          # (cell, x, width, start items, links, height)
@@ -1938,8 +1985,9 @@ class Layout:
                     if not isinstance(cell_style.get("height"), tuple) else None
                 if fixed is not None:
                     height = max(height, fixed * self.zoom)
-                if first_baseline is None:
+                if first_baseline is None and baseline is not None:
                     first_baseline = baseline
+                    baseline_from = (row_number, len(placed))
                 placed.append((cell_style, cell_x, cell_width, items_before, links_before,
                                height, inner, padding, border,
                                len(self.out.items), len(self.out.links), cell_boxes, len(self.out.boxes)))
@@ -1949,12 +1997,21 @@ class Layout:
                 if not isinstance(row_style.get("height"), tuple) else None
             if fixed_row is not None:
                 row_height = max(row_height, fixed_row * self.zoom)
-            for (cell_style, cell_x, cell_width, items_before, links_before,
-                 height, inner, padding, border, items_after, links_after, boxes_from, boxes_to) in placed:
+            if least is not None and row_number < len(least):
+                row_height = max(row_height, least[row_number])
+            if record is not None:
+                record.append(row_height)
+            for cell_number, (cell_style, cell_x, cell_width, items_before, links_before,
+                              height, inner, padding, border, items_after, links_after,
+                              boxes_from, boxes_to) in enumerate(placed):
                 align = cell_style.get("vertical-align", "middle")
                 content_room = row_height - padding[0] - padding[2] - border[0] - border[2]
                 shift = {"top": 0.0, "bottom": content_room - inner,
                          "baseline": 0.0}.get(align, (content_room - inner) / 2)
+                if shift > 0.5 and baseline_from == (row_number, cell_number):
+                    # the table's baseline is that cell's, where it now is: an
+                    # inline-block holding the table lines up by it
+                    first_baseline += shift
                 if shift > 0.5:
                     # this cell's own content only: moving everything laid out
                     # since it began moved the later cells in the row too
@@ -2137,9 +2194,18 @@ class Layout:
                 line.pop()
             cursor = state["cursor"]
             if line:
-                ascent = max(p[5] for p in line)
-                descent = max(p[6] for p in line)
-                line_height = max(max(p[7] for p in line), ascent + descent)
+                # a box at vertical-align: top or bottom sits at the line's
+                # top or bottom, not on its baseline (reCAPTCHA's logo column
+                # had sat 18 pixels down): it makes the line no taller than
+                # it is, and has no say in where the baseline goes
+                pinned = [p for p in line if p[0] == "box"
+                          and str(p[3].get("vertical-align", "")).strip() in ("top", "bottom")]
+                aligned = [p for p in line if not any(p is q for q in pinned)] or line
+                ascent = max(p[5] for p in aligned)
+                descent = max(p[6] for p in aligned)
+                line_height = max(max(p[7] for p in aligned), ascent + descent)
+                if len(aligned) < len(line):
+                    line_height = max([line_height] + [p[5] + p[6] for p in pinned])
                 baseline = cursor + (line_height - (ascent + descent)) / 2 + ascent
                 if state["first"] is None:
                     state["first"] = baseline
@@ -2159,6 +2225,11 @@ class Layout:
                         _k, w, element, style, link, ascent, descent, _lh, extra = part
                         m_left, m_top, border_width, _m_bottom = extra
                         top = baseline - ascent + m_top
+                        pin = str(style.get("vertical-align", "")).strip()
+                        if pin == "top" and len(aligned) < len(line):
+                            top = cursor + m_top
+                        elif pin == "bottom" and len(aligned) < len(line):
+                            top = cursor + line_height - (ascent + descent) + m_top
                         if element.tag == "svg":
                             self._svg_item(element, style, QRectF(pen + m_left, top,
                                                                   border_width,
@@ -2189,6 +2260,12 @@ class Layout:
                         run = [style, link, pen, text, advance, font]
                         runs.append(run)
                     pen += advance
+                if self._measuring:
+                    # where the line ends, an inline-block's right margin
+                    # with it: measured by what was drawn, a box's right
+                    # margin was lost, and a table cell holding reCAPTCHA's
+                    # checkbox (28 wide, 12 either side) came out 40 wide
+                    self._line_reach = max(getattr(self, "_line_reach", 0.0), pen)
                 for style, link, start_x, text, advance, font in runs:
                     if style.get("visibility") in ("hidden", "collapse"):
                         continue                   # its room is kept, nothing drawn
@@ -3019,9 +3096,19 @@ class _Measure:
         self.layout._floats, self.layout._absolute, self.layout._fixed = [], [[]], []
         self.layout.out = DisplayList()
         self.layout._measuring = True
+        reach = getattr(self.layout, "_line_reach", 0.0)
+        self.layout._line_reach = 0.0
         try:
             if style.get("display") in ("flex", "inline-flex"):
                 return self._flex_natural(element, style, narrowest=width <= 1.0)
+            elif style.get("display") in ("table", "inline-table"):
+                # a table's width is its columns', not the line it is laid out
+                # on: its cells, laid out as blocks in 100,000 pixels, had made
+                # an inline-block holding a display: table that wide (the
+                # parts of reCAPTCHA's box, pushed onto lines of their own)
+                low, high = self.layout._columns(element, style)
+                spacing = self.layout._spacing(style)
+                return (sum(low) if width <= 1.0 else sum(high)) + spacing * (len(high) + 1)
             elif style.get("display") in ("grid", "inline-grid"):
                 # A grid's natural width is what its content needs: laid out
                 # from the start, with no room handed out. Centred in the
@@ -3038,13 +3125,14 @@ class _Measure:
                 if stacked is not None:
                     return stacked
                 self.layout._contents(element, style, 0.0, 0.0, width)
-            right = 0.0
+            right = getattr(self.layout, "_line_reach", 0.0)
             for item in self.layout.out.items:
                 right = max(right, _right_edge(item))
             return right
         finally:
             self.layout.out = saved
             self.layout._measuring = was_measuring
+            self.layout._line_reach = reach
             self.layout._floats, self.layout._absolute, self.layout._fixed = held
 
 

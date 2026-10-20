@@ -233,6 +233,32 @@ def test_tables() -> None:
     check("short cells sit centred beside a tall one, each in its own place",
           top < by["short"][2] < bottom and abs(by["short"][2] - by["last"][2]) < 1)
 
+    # reCAPTCHA's "I'm not a robot" box: cells straight in a display: table
+    # (no rows), each table 100% high in an inline-block, the cells centred
+    # top to bottom, beside a column at vertical-align: top. Measured in
+    # Chrome: the checkbox at 13,23, both halves at the top, the footer too
+    doc = parse("""<!DOCTYPE html><style>body{margin:0}
+.anchor{border:1px solid #d3d3d3;height:74px;width:300px}
+.content{display:inline-block;position:relative;height:74px;width:206px}
+.ib{display:inline-block;height:100%}.cc{display:table;height:100%}
+.ci{display:table-cell;vertical-align:middle}
+.box{position:relative;display:inline-block;height:28px;width:28px;margin:0 12px 2px 12px;font-size:1px;vertical-align:text-bottom}
+.label{font-size:14px;line-height:17px;width:152px}
+.footer{display:inline-block;height:74px;vertical-align:top;width:70px}</style>
+<div class=anchor><div class=content><div class=ib id=ib1><div class=cc><div class=ci><span class=box id=box></span></div></div></div><div class=ib id=ib2><div class=cc><label class="ci label" id=label>I'm not a robot</label></div></div></div><div class=footer id=footer>reCAPTCHA</div></div>""")
+    out = Layout(doc, Styler(doc, viewport=(304, 78)).compute(), 304).run()
+    at = {e.attrs.get("id"): r for r, e in out.boxes if e.attrs.get("id")}
+    got = {k: (round(at[k].x()), round(at[k].y()), round(at[k].width())) for k in ("box", "ib1", "ib2", "footer") if k in at}
+    check("cells with no row around them are laid out as a row, and drawn",
+          any(i and i[0] == "text" and "not a robot" in i[3] for i in out.items), str(got))
+    check("an inline-block holding a table is as wide as the table, margins and all",
+          got.get("ib1", (0, 0, 0))[2] == 52 and got.get("ib2", (0, 0, 0))[2] == 152, str(got))
+    check("a table at height: 100% fills it, its cell centred top to bottom",
+          got.get("box") == (13, 23, 28), str(got))
+    check("inline-blocks holding tables sit on their bottom edges, side by side at the top",
+          got.get("ib1", (0, -1))[1] == 1 and got.get("ib2", (0, -1))[1] == 1, str(got))
+    check("vertical-align: top puts a box at the top of its line", got.get("footer", (0, -1))[1] == 1, str(got))
+
 
 def test_images(app) -> None:
     from PyQt6.QtGui import QColor, QImage
@@ -3845,8 +3871,8 @@ def test_frames(app) -> None:
         "parent.html": (
             "<!DOCTYPE html><html><head><title>P</title></head><body style='margin:0;background:#ffffff'>"
             "<p id=got>waiting</p><p id=port>waiting</p><p id=loads>0</p><p id=blank>waiting</p>"
-            f"<iframe id=f src='{other}/child.html' width=320 height=90 frameborder=0></iframe>"
-            f"<iframe id=deny src='{other}/deny.html' width=200 height=60></iframe>"
+            f"<iframe id=f name=kid src='{other}/child.html' width=320 height=90 frameborder=0></iframe>"
+            f"<iframe id=deny name=denied src='{other}/deny.html' width=200 height=60></iframe>"
             "<script>let loads = 0; const frame = document.getElementById('f');"
             "frame.addEventListener('load', () => { document.getElementById('loads').textContent = String(++loads); });"
             "window.addEventListener('message', (e) => {"
@@ -3864,13 +3890,17 @@ def test_frames(app) -> None:
             "});"
             # a blank frame's window is the page's own origin: its JSON is there
             "const blank = document.createElement('IFRAME'); document.body.appendChild(blank);"
+            "blank.scrolling = 'no';"
             "document.getElementById('blank').textContent = 'blank: ' + blank.localName + ' '"
             " + (typeof blank.contentWindow.JSON.parse) + ' ' + (blank.contentDocument !== null)"
-            " + ' ' + (document.querySelector('iframe:last-of-type') === blank);"
+            " + ' ' + (document.querySelector('iframe:last-of-type') === blank) + ' ' + blank.getAttribute('scrolling')"
+            " + ' ' + window.name.length + ' ' + (window.frames.kid === document.getElementById('f').contentWindow);"
             "</script></body></html>", {}),
         "child.html": (
-            "<!DOCTYPE html><html><body style='margin:0;background:#f9f9f9'><p id=c>child</p>"
+            "<!DOCTYPE html><html><body style='margin:0;background:#f9f9f9'><p id=c>child</p><p id=n></p>"
             "<script>const c = document.getElementById('c');"
+            "document.getElementById('n').textContent = 'name ' + window.name + ' sibling '"
+            " + (typeof parent.frames['denied'].postMessage);"
             "c.textContent = 'top is another window: ' + (window.top !== window);"
             "window.addEventListener('message', (e) => {"
             " if (e.data === 'not for you') { c.textContent = 'wrong: a message meant for another origin came'; return; }"
@@ -3947,7 +3977,11 @@ def test_frames(app) -> None:
         check("a message whose target origin is written as an address (path, port) reaches that origin",
               child.title() == "with a path came", child.title())
         check("a blank frame made by script is an <iframe> whose window has the page's JSON and a document",
-              text_of(view, "blank") == "blank: iframe function true true", text_of(view, "blank"))
+              text_of(view, "blank").startswith("blank: iframe function true true"), text_of(view, "blank"))
+        check("iframe.scrolling = 'no' is its attribute; a tab's window.name is empty, its frames found by name",
+              text_of(view, "blank").endswith(" no 0 true"), text_of(view, "blank"))
+        check("a frame's window.name is its <iframe>'s name, and parent.frames[name] its sibling",
+              text_of(child, "n") == "name kid sibling function", text_of(child, "n"))
         until(lambda: frame_of(view, "deny") is not None and frame_of(view, "deny")._document is not None, 10)
         denied = frame_of(view, "deny")
         check("a page that says X-Frame-Options: DENY is not shown in the frame",
@@ -4534,10 +4568,16 @@ def test_hover(app) -> None:
         ".item{position:relative;padding:10px 20px}"
         ".menu{position:absolute;left:0;top:100%;opacity:0;transform:scaleY(0);background:#eee;width:600px;z-index:5}"
         ".item:hover>.menu{opacity:1;transform:scaleY(1)}"
-        ".menu a{display:block;padding:8px}</style></head><body>"
+        ".menu a{display:block;padding:8px}"
+        # Square's: the menu a gap below its item, closing by a transition
+        ".gapped>.menu{top:auto;margin-top:17px;transition:opacity .5s ease-in-out .1s,transform 0ms ease-in-out .6s}"
+        ".gapped:hover>.menu{transition:opacity .2s ease-in-out 50ms,transform 0ms ease-in-out 0ms}"
+        "</style></head><body>"
         "<nav><ul><li class=item id=software><a id=top href='/software'>Software</a>"
         "<div class=menu id=menu><a id=first href='/one'>One</a><a id=second href='/two'>Two</a></div></li>"
-        "<li class=item><a href='/about'>About</a></li></ul></nav>"
+        "<li class=item><a href='/about'>About</a></li>"
+        "<li class='item gapped' id=products><a id=ptop href='/products'>Products</a>"
+        "<div class=menu id=menu2><a id=pone href='/phone'>Phone</a></div></li></ul></nav>"
         # a heading the open menu lies over, smaller than the menu: what is on
         # top is what the pointer is over, not the smallest box there
         "<h1 id=hero style='margin:4px 0 0 0;font-size:20px;display:inline-block'>A heading under the menu</h1>"
@@ -4618,6 +4658,33 @@ def test_hover(app) -> None:
         far = where("far")
         move(far.center().x(), far.center().y())
         check("moving away closes it", until(lambda: opacity() == 0.0, 6), str(opacity()))
+        # a gap between the item and its menu, crossed: the menu waits for
+        # its own closing transition, as in a browser, and is there to reach
+        menu2 = next(e for e in view._document.root.elements() if e.id == "menu2")
+
+        def opacity2():
+            return view._styles.get(menu2, {}).get("opacity", 1.0)
+        ptop, item = where("ptop"), where("products")
+        move(ptop.center().x(), ptop.center().y())
+        until(lambda: opacity2() == 1.0, 6)
+        pone = where("pone")
+        gap_y = (item.bottom() + where("menu2").top()) / 2
+        check("the gapped menu opens, a gap below its item",
+              opacity2() == 1.0 and where("menu2").top() - item.bottom() > 3,
+              f"{opacity2()} item ends {item.bottom()}, menu starts {where('menu2').top()}")
+        move(ptop.center().x(), gap_y)
+        until(lambda: False, 0.1)
+        open_in_gap = opacity2() == 1.0
+        move(pone.center().x(), pone.center().y())
+        until(lambda: False, 1.0)
+        check("crossing the gap, the menu stays open for its transition, and once over it stays open",
+              open_in_gap and opacity2() == 1.0
+              and view._link_at(QPointF(pone.center().x(), pone.center().y())) == "/phone", str(opacity2()))
+        move(far.center().x(), far.center().y())
+        until(lambda: False, 0.2)
+        lingering = opacity2() == 1.0
+        check("and left for good, it closes once its transition has run",
+              lingering and until(lambda: opacity2() == 0.0, 3), f"lingered {lingering}, now {opacity2()}")
     finally:
         view.shutdown()
         view.deleteLater()

@@ -4244,6 +4244,8 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             self._hover_wanted = position
             return
         self._hover_wanted = None
+        if position is not None:
+            self._hover_at = position
         kit = self._hover_selectors() if self._display is not None else None
         chain = []
         if kit is not None and position is not None:
@@ -4256,10 +4258,14 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
                 node = node.parent
         self._set_hover(chain, kit)
 
+    HOVER_LINGER_MOST = 1.0                  # seconds, the longest a menu waits to close
+
     def _set_hover(self, chain: list, kit) -> None:
         old = getattr(self, "_hover_chain", [])
         if getattr(self, "_hover_document", None) is not self._document:
             old = []                             # a new page: its elements are new
+            self._hover_linger = {}
+        chain = self._with_lingering(old, chain, kit)
         if [id(e) for e in old] == [id(e) for e in chain]:
             return
         old_ids, new_ids = {id(e) for e in old}, {id(e) for e in chain}
@@ -4308,6 +4314,17 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
         numbers = [e.attrs.get("data-mjs") for e in old]
         chain = [self._by_script_id.get(n) for n in numbers if n]
         chain = [e for e in chain if e is not None]
+        # a menu lingering open (see _with_lingering) lingers on in it
+        moved = {}
+        for element, until in (getattr(self, "_hover_linger", None) or {}).values():
+            fresh = self._by_script_id.get(element.attrs.get("data-mjs") or "")
+            if fresh is not None:
+                moved[id(fresh)] = (fresh, until)
+        self._hover_linger = moved
+        real = getattr(self, "_hover_real", None) or []
+        self._hover_real = [x for x in (self._by_script_id.get(e.attrs.get("data-mjs") or "") for e in real)
+                             if x is not None]
+        self._hover_real_document = self._document
         for element in old:
             element.hover = False
         for element in chain:
@@ -4349,6 +4366,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
         styler.styles = styles
         root = self._document.root
         root_size = (styles.get(root) or {}).get("font-size", 16.0)
+        before = self._styles
         try:
             for top in tops:
                 if held(top):
@@ -4357,11 +4375,98 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
                 styler._compute(top, styles.get(parent) if parent is not None else None, root_size)
         except Exception:                                  # noqa: BLE001
             return False
+        # how each box's change goes back when the pointer leaves: its
+        # transition when not hovered, kept as hovering begins (see
+        # _with_lingering)
+        rest = getattr(self, "_hover_rest", None)
+        if rest is None or getattr(self, "_hover_rest_document", None) is not self._document:
+            rest = self._hover_rest = {}
+            self._hover_rest_document = self._document
+        for element in relevant:
+            if not getattr(element, "hover", False):
+                continue
+            for inner in [element] + list(element.elements())[:400]:
+                was = (before.get(inner) or {}).get("transition")
+                if was and was != (styles.get(inner) or {}).get("transition"):
+                    rest[id(inner)] = was
         self._styles = styles
         return True
 
+    @staticmethod
+    def _transition_seconds(text) -> float:
+        """The longest a transition list takes, its delay with it, in seconds."""
+        longest = 0.0
+        for part in str(text or "").split(","):
+            times = [float(n) / (1000.0 if unit == "ms" else 1.0)
+                     for n, unit in re.findall(r"(?<![\w.-])(-?\d*\.?\d+)(ms|s)\b", part)]
+            if times:
+                longest = max(longest, max(0.0, times[0]) + (times[1] if len(times) > 1 else 0.0))
+        return longest
+
+    def _with_lingering(self, old: list, chain: list, kit) -> list:
+        """The hovered chain, with what the pointer just left still in it for
+        as long as the page's own transitions take to undo its :hover look.
+
+        A menu that drops down on :hover, a gap above it, closes in a browser
+        only once its transition has run (Square's: opacity over half a
+        second, after a tenth): crossed in that time, it is still there to be
+        reached, and holding it keeps its item hovered. Merlin had closed it
+        the moment the pointer left the item, and AlterniTech's menus could
+        not be reached."""
+        linger = getattr(self, "_hover_linger", None)
+        if linger is None:
+            linger = self._hover_linger = {}
+        now = time.monotonic()
+        new_ids = {id(e) for e in chain}
+        # left since the pointer was last really over it: not what lingered
+        # (or a menu, once lingered, would linger on for ever)
+        real = getattr(self, "_hover_real", None)
+        old = real if real is not None and getattr(self, "_hover_real_document", None) is self._document else old
+        self._hover_real, self._hover_real_document = list(chain), self._document
+        if kit is not None:
+            from .css import _matches_compound
+
+            rest = getattr(self, "_hover_rest", {}) if getattr(self, "_hover_rest_document", None) \
+                is self._document else {}
+            for element in old:
+                if id(element) in new_ids or id(element) in linger:
+                    continue
+                if not any(_matches_compound(c, element) for c in kit[1]):
+                    continue
+                inner = [element] + list(element.elements())[:400]
+                seconds = min(self.HOVER_LINGER_MOST,
+                              max((self._transition_seconds(rest.get(id(e))) for e in inner), default=0.0))
+                if seconds > 0.05:
+                    linger[id(element)] = (element, now + seconds)
+                    QTimer.singleShot(int(seconds * 1000) + 20, self._hover_linger_ended)
+        # what the pointer is over again needs no lingering
+        for key in [k for k, (e, _until) in linger.items() if id(e) in new_ids]:
+            del linger[key]
+        kept = [e for e, until in linger.values() if until > now]
+        if not kept:
+            return chain
+        extended = list(chain)
+        have = {id(e) for e in extended}
+        for element in kept:
+            node = element
+            while node is not None and hasattr(node, "attrs"):
+                if id(node) not in have:
+                    extended.append(node)
+                    have.add(id(node))
+                node = node.parent
+        return extended
+
+    def _hover_linger_ended(self) -> None:
+        linger = getattr(self, "_hover_linger", None) or {}
+        now = time.monotonic()
+        for key in [k for k, (_e, until) in linger.items() if until <= now + 0.005]:
+            del linger[key]
+        if self._display is not None and self._document is not None:
+            self._update_hover(getattr(self, "_hover_at", None))
+
     def leaveEvent(self, event) -> None:                      # noqa: N802
         self._hover_wanted = None
+        self._hover_at = None
         for key, controller in self._players.items():
             if controller.hovered:
                 controller.hovered = False

@@ -5,6 +5,33 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.36
+  Merlin Engine:
+  - AlterniTech's menus stay open while you move down into them. A menu
+    that drops down on :hover, with a gap above it, now waits for its own
+    closing transition before closing, as in a browser (Square's takes
+    six tenths of a second), so the pointer can cross the gap and reach
+    it; over it, it stays open. It had closed the moment the pointer left
+    the menu's heading.
+  - Google's "I'm not a robot" box is drawn as it is in Chrome: checkbox,
+    label and logo in place, with no scroll bars. Measured against Chrome:
+    * table cells with no row around them (display: table-cell straight in
+      a display: table) are laid out as a row of their own; they had not
+      been drawn at all
+    * a table's width, measured inside an inline-block, is its columns',
+      where it had been the whole line
+    * a table given a height (100%) fills it, its rows sharing the extra,
+      so vertical-align: middle centres its cells
+    * an inline-block holding a table sits on its bottom edge, as in Chrome
+    * vertical-align: top and bottom on inline-blocks
+    * an inline-block's right margin is counted when measuring what holds it
+    * iframe.scrolling = "no" (and frameBorder, sandbox, width, height) set
+      the attribute, as in a browser; reCAPTCHA's box had scroll bars
+  - reCAPTCHA's challenge frame gets going: window.name is a frame's
+    <iframe> name (it had been undefined, and the frame stopped on it), and
+    parent.frames[name] finds a sibling frame. window.frames[name] and [n]
+    work in a page too.
+
 1.8.35
   - The start page's Codeberg tile is now Cover Your Tracks, EFF's test of
     how well the browser hides from trackers. Changed once on an existing
