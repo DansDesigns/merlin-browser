@@ -6166,6 +6166,266 @@ def test_search_box_columns_and_a_quick_window(app) -> None:
         view.close()
 
 
+def test_quiet_tabs_shadows_and_deep_layouts(app) -> None:
+    """What 1.8.44 changed: a page in a hidden tab kept quiet, as browsers keep
+    it; YouTube's buttons (a dozen flex boxes deep) laid out once, not
+    hundreds of times; shadow roots, Lit's markers and core-js's class lists
+    as Microsoft's header uses them; grid and justify-self centring as
+    ChatGPT's column has it; and a fixed header measured again once laid out."""
+    from PyQt6.QtCore import QRectF
+    from PyQt6.QtGui import QColor, QImage, QPainter
+
+    from merlin.engine import MerlinView
+    from merlin.engine import layout as layout_module
+    from merlin.engine import paint as paint_module
+    from merlin.engine.css import Styler
+    from merlin.engine.dom import Element
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+    from merlin.engine.script import LocalStorage
+
+    def laid(markup, width=1000):
+        doc = parse("<body style='margin:0'>" + markup)
+        styles = Styler(doc).compute()
+        return doc, styles, Layout(doc, styles, width).run()
+
+    def rects(out):
+        found = {}
+        for r, e in out.boxes:
+            name = getattr(e, "attrs", {}).get("id")
+            if name and name not in found:
+                found[name] = (round(r.x()), round(r.y()), round(r.width()), round(r.height()))
+        return found
+
+    # a deep nest of flex rows and inline-blocks, as YouTube's buttons are
+    depth = 14
+    markup = "<span id=leaf>Subscribe</span>"
+    for level in range(depth):
+        markup = (f"<div style='display:flex;align-items:center;padding:1px'>{markup}<i>x</i></div>"
+                  if level % 2 else f"<span style='display:inline-block;padding:1px'>{markup}</span>")
+    markup = f"<div style='display:flex'><div>{markup}</div><div style='flex:1'>after</div></div>"
+    calls = []
+    original = layout_module.Layout._block
+
+    def counting(self, element, *args, **kwargs):
+        calls.append(element)
+        return original(self, element, *args, **kwargs)
+
+    layout_module.Layout._block = counting
+    try:
+        doc, styles, out = laid(markup)
+    finally:
+        layout_module.Layout._block = original
+    leaf_parent = next(e for e in doc.root.elements() if e.id == "leaf").parent
+    times = sum(1 for e in calls if e is leaf_parent)
+    check("an item deep in flex rows and inline-blocks is laid out a few times, not once more for each "
+          "box around it (YouTube's channel page took half a minute)", times <= 12, f"{times} times")
+    plain = layout_module.Layout._item_box
+    layout_module.Layout._item_box = lambda self, e, s, x, y, bw, bh=None: self._item_box_now(e, s, x, y, bw, bh)
+    try:
+        again = Layout(doc, styles, 1000).run()
+    finally:
+        layout_module.Layout._item_box = plain
+    check("and comes out exactly where it did when laid out every time",
+          [(round(r.x(), 2), round(r.y(), 2), round(r.width(), 2), round(r.height(), 2)) for r, _e in out.boxes]
+          == [(round(r.x(), 2), round(r.y(), 2), round(r.width(), 2), round(r.height(), 2)) for r, _e in again.boxes]
+          and out.height == again.height)
+
+    # grid items held by max-width and centred by auto margins; justify-self
+    _d, _s, out = laid("<div style='display:grid;grid-template-columns:600px'>"
+                       "<div id=g style='width:100%;max-width:200px;margin:0 auto;height:10px'></div></div>"
+                       "<div style='width:400px'><div id=j style='width:100px;justify-self:center;height:5px'></div></div>")
+    found = rects(out)
+    check("a grid item with a max-width and auto margins is centred at that width (ChatGPT's composer)",
+          found.get("g") == (200, 0, 200, 10), str(found.get("g")))
+    check("justify-self: center centres a block in the flow (ChatGPT's heading)",
+          found.get("j") == (150, 10, 100, 5), str(found.get("j")))
+
+    # isolation makes a stacking context: a z-index: -1 child is over its background
+    _d, _s, out = laid("<div style='isolation:isolate;position:relative;background:#fff;width:60px;height:60px'>"
+                       "<div style='position:absolute;z-index:-1;left:0;top:0;width:60px;height:60px;"
+                       "background:#f00'></div></div>"
+                       "<div style='opacity:0.99;position:relative;background:#fff;width:60px;height:60px'>"
+                       "<div style='position:absolute;z-index:-1;left:0;top:0;width:60px;height:60px;"
+                       "background:#00f'></div></div>")
+    image = QImage(200, 200, QImage.Format.Format_RGB32)
+    image.fill(QColor(0, 255, 0))
+    painter = QPainter(image)
+    paint_module.paint(painter, out, QRectF(0, 0, 200, 200), {})
+    painter.end()
+    first, second = image.pixelColor(30, 30), image.pixelColor(30, 90)
+    check("isolation: isolate keeps a z-index: -1 child inside, over the box's own background",
+          (first.red(), first.green(), first.blue()) == (255, 0, 0), first.name())
+    check("so does opacity below 1", second.blue() > 240 and second.red() < 12 and second.green() < 12, second.name())
+
+    # <use> drawn from a symbol elsewhere in the page
+    doc, styles, out = laid("<svg style='display:none'><symbol id=dot viewBox='0 0 10 10'>"
+                            "<circle cx=5 cy=5 r=5 fill='#f00'/></symbol></svg>"
+                            "<svg id=icon width=20 height=20 viewBox='0 0 20 20'><use href='#dot'/></svg>")
+    icon = next(e for e in doc.root.elements() if e.id == "icon")
+    drawn = layout_module.svg_markup(icon, styles.get(icon, {}))
+    check("an <svg> drawing <use href=\"#name\"> has the named symbol drawn in it (ChatGPT's icons)",
+          "<circle" in drawn and "scale(2" in drawn, drawn[:300])
+    check("the page's body is found once, not looked for each time",
+          doc.body is doc.body and doc.body.tag == "body")
+    doc.root.children[:] = [c for c in doc.root.children if getattr(c, "tag", None) != "body"]
+    check("and not kept once it has gone", doc.body is None or doc.body.parent is doc.root)
+
+    # rules filed by what is at their right end, matched all the same
+    doc, styles, _out = laid("<style>.menu > * {color: rgb(1,2,3)} .menu * {font-weight: 700}"
+                             " [class*=btn] {margin-left: 7px} [class~=b] {margin-right: 9px}</style>"
+                             "<ul class=menu><li id=li><a id=a>x</a></li></ul><p id=p class='my-btn-x b'>y</p>")
+    by = {e.id: styles[e] for e in doc.root.elements() if e.id}
+    check("child and descendant rules ending in * still match (Microsoft's menus)",
+          by["li"].get("color")[:3] == (1, 2, 3) and by["a"].get("color")[:3] != (1, 2, 3)
+          and str(by["a"].get("font-weight")) in ("700", "bold"), str((by["li"].get("color"), by["a"].get("font-weight"))))
+    check("and [class*=...] and [class~=...] match as before",
+          by["p"].get("margin-left") == 7.0 and by["p"].get("margin-right") == 9.0,
+          str((by["p"].get("margin-left"), by["p"].get("margin-right"))))
+
+    runtime = _node_for_tests()
+    if not runtime:
+        print("  skip  hidden tabs and shadow roots: Node.js is not here")
+        return
+    folder = tempfile.mkdtemp(prefix="merlin-quiet-")
+    open(os.path.join(folder, "page.html"), "w").write(r"""<!DOCTYPE html><html><body style="margin:0">
+<p id=out>-</p><p id=state>-</p><div id=host></div><div id=late></div><div id=watched></div>
+<script>
+var r = [];
+var t = document.createElement('template'); t.innerHTML = '<p><?lit$12$>x</p>';
+var c = t.content.firstChild.firstChild;
+r.push('lit' + c.nodeType + (String(c.data).indexOf('lit$12$') >= 0));
+DOMTokenList.prototype[Symbol.iterator] = Array.prototype.values;      // as core-js does
+var d = document.createElement('div'); d.classList.add('a', 'b'); d.classList.remove('a'); d.classList.add('c');
+r.push('cls' + d.className + d.classList[0] + d.classList[1] + [].slice.call(d.classList).join(''));
+var records = 0;
+new MutationObserver(function (l) { records += l.length; }).observe(document.getElementById('watched'), {childList: true});
+document.getElementById('watched').setAttribute('data-x', '1');
+class W extends HTMLElement { set className(v) { this.setAttribute('class', v); } get className() { return this.getAttribute('class') || ''; } }
+customElements.define('x-w', W);
+var w = document.createElement('x-w'); w.className = 'k'; r.push('own' + w.getAttribute('class'));
+r.push('vis' + typeof document.body.checkVisibility);
+var host = document.getElementById('host');
+var root = host.attachShadow({mode: 'open'});
+root.innerHTML = '<style>:host{display:block;padding-left:3px} b{color:rgb(0,128,0)}</style><b>shadow</b> <slot></slot>';
+host.innerHTML = '<i>light</i>';
+var changes = [], frames = 0, resizes = 0, seen = [];
+document.addEventListener('visibilitychange', function () {
+  changes.push(document.visibilityState + document.hidden + ':' + ticks + ':' + frames);
+  if (document.hidden) requestAnimationFrame(function () { frames++; });
+});
+addEventListener('resize', function () { resizes++; });
+var ticks = 0; setInterval(function () { ticks++; }, 20);
+var watcher = new ResizeObserver(function (es) { seen.push(es[0].contentRect.height); });
+var grow = document.createElement('div'); document.body.appendChild(grow);
+watcher.disconnect(); watcher.observe(grow);
+setTimeout(function () { grow.style.height = '40px'; }, 300);
+var lateRead = -1;
+setTimeout(function () {
+  var late = document.getElementById('late');
+  lateRead = late.offsetHeight;                                   // laid out, 0 high
+  late.innerHTML = '<div style="height:25px"></div>';
+}, 600);
+setInterval(function () {
+  document.getElementById('out').textContent = r.join(' ') + ' rec' + records;
+  document.getElementById('state').textContent = [changes.join(','), 'frames' + frames, 'ticks' + ticks,
+    'seen' + seen.join('/'), 'late' + lateRead, 'resizes' + resizes].join(' ');
+}, 50);
+</script></body></html>""")
+
+    class Pages(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=folder, **k)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Pages)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    class Host:
+        settings = {}
+
+        def javascript_allowed(self, site):
+            return True
+
+        def node_for_scripts(self):
+            return runtime
+
+        def script_cache_dir(self):
+            return os.path.join(folder, "cache")
+
+        def local_storage(self):
+            return LocalStorage(None)
+
+    view = MerlinView()
+    view._host = Host()
+    view.resize(600, 400)
+    view.show()
+
+    def element(name):
+        return next((x for x in view._document.root.elements() if x.id == name), None) if view._document else None
+
+    def text(name):
+        found = element(name)
+        return " ".join(found.text().split()) if found is not None else ""
+
+    def until(test, seconds):
+        end = time.time() + seconds
+        while time.time() < end and not test():
+            app.processEvents()
+            time.sleep(0.01)
+
+    try:
+        view.setUrl(QUrl(f"http://127.0.0.1:{server.server_address[1]}/page.html"))
+        until(lambda: "/40 " in text("state") and "resizes1" in text("state"), 10)
+        out = text("out")
+        check("<?...?> in HTML a script parses is a comment, as Lit's markers are (Microsoft's header)",
+              "lit8true" in out, f"{out} / {list(view.console_lines)[-4:]}")
+        check("a class list read through an Array iterator, as core-js puts in, has its classes (Microsoft's)",
+              "clsb cbcbc" in out, out)
+        check("an attribute change is not reported to an observer of children only (Microsoft's endless loop)",
+              out.endswith("rec0"), out)
+        check("setAttribute('class') does not call a page's own className setter (YouTube's stack overflow)",
+              "ownk" in out, out)
+        check("Element.checkVisibility is there (Microsoft's player)", "visfunction" in out, out)
+        state = text("state")
+        check("a ResizeObserver observing again after disconnect() hears of sizes (YouTube's channel header)",
+              "/40 " in state, state)
+        check("a box read as 0 high, laid out with a size later, brings a resize for scripts to measure "
+              "again (YouTube's header, drawn over by the videos)", "late0" in state and "resizes1" in state, state)
+        host = element("host")
+        bold = next((x for x in host.elements() if x.tag == "b"), None) if host is not None else None
+        check("a shadow root is drawn, its slot filled with the element's own children",
+              text("host").endswith("shadow light"), text("host"))
+        check("its styles apply inside it, :host to the element itself",
+              bold is not None and tuple(view._styles.get(bold, {}).get("color", ()))[:3] == (0, 128, 0)
+              and view._styles.get(host, {}).get("padding-left") == 3.0,
+              str((view._styles.get(bold, {}).get("color") if bold is not None else None,
+                   view._styles.get(host, {}).get("padding-left") if host is not None else None)))
+        view.hide()
+        wait(app, 2.5)
+        view.show()
+        until(lambda: "visiblefalse" in text("state") and "frames1" in text("state"), 5)
+        shown = text("state")
+        told = dict(part.split(":", 1) for part in shown.split()[0].split(",") if ":" in part)
+        check("a hidden tab is told it is hidden (document.hidden, visibilitychange), and told when shown",
+              "hiddentrue" in told and "visiblefalse" in told, shown)
+        try:
+            hidden_ticks, _f = (int(n) for n in told["hiddentrue"].split(":"))
+            shown_ticks, shown_frames = (int(n) for n in told["visiblefalse"].split(":"))
+        except (KeyError, ValueError):
+            hidden_ticks, shown_ticks, shown_frames = 0, 999, 1
+        check("while hidden its timers run at most once a second, as Chrome keeps them (Merlin's CPU with tabs open)",
+              shown_ticks - hidden_ticks <= 4, f"{shown_ticks - hidden_ticks} ticks in 2.5s: {shown}")
+        check("its animation frames wait until it is seen, and then run",
+              shown_frames == 0 and "frames1" in shown, shown)
+    finally:
+        view.shutdown()
+        server.shutdown()
+    wait(app, 0.3)
+
+
 def main() -> int:
     app = QApplication(sys.argv[:1])
     for test in (test_no_chromium, test_without_html_parser, test_parsing, test_cascade, test_layout,
@@ -6281,6 +6541,8 @@ def main() -> int:
     test_streams_timers_and_templates(app)
     print("test_search_box_columns_and_a_quick_window")
     test_search_box_columns_and_a_quick_window(app)
+    print("test_quiet_tabs_shadows_and_deep_layouts")
+    test_quiet_tabs_shadows_and_deep_layouts(app)
     if FAILED:
         print(f"\n{len(FAILED)} FAILED: " + "; ".join(FAILED))
         return 1

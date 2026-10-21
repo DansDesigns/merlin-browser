@@ -635,7 +635,30 @@ def index_keys(selector) -> list:
                 return sorted(set(keys))
     attrs = compound.get("attrs") or []
     if attrs:
+        name, op, value, flag = (tuple(attrs[0]) + ("", "", ""))[:4]
+        if name.lower() == "class" and value and not flag:
+            # [class~=x] is the class x; [class*=col-] can match only where
+            # the class attribute holds "col-": tried only there (Microsoft's
+            # 169 such rules had been tried on every element with a class)
+            if op == "~=":
+                return [("class", value)]
+            if op in ("*=", "^=", "$=", "|=", "="):
+                return [("classpart", value)]
         return [("attr", attrs[0][0].lower())]
+    # .row > *, .animation--effect-3 *: tried only where the element's parent
+    # (or, for a descendant, an element above it) is what the rule asks for,
+    # not on every element. Microsoft's pages have over 600 such rules, and
+    # each of their 7,000 elements had tried every one
+    if len(selector.parts) > 1 and selector.parts[0][1] in (" ", ">"):
+        above = selector.parts[1][0]
+        kind = "child" if selector.parts[0][1] == ">" else "under"
+        if above.get("id"):
+            return [(kind, ("id", above["id"]))]
+        classes = sorted(above.get("classes") or ())
+        if classes:
+            return [(kind, ("class", classes[0]))]
+        if above.get("tag") and above["tag"] != "*":
+            return [(kind, ("tag", above["tag"]))]
     return [("any", "")]
 
 
@@ -1305,6 +1328,9 @@ def media_matches(query: str, viewport=(1024, 768), scheme: str = "light") -> bo
     return False
 
 
+_BRACKETS = re.compile(r"[()]")
+
+
 def _var(value: str, custom: dict, depth: int = 0):
     """value with each var(--name, fallback) replaced; None if one cannot be.
 
@@ -1324,13 +1350,14 @@ def _var(value: str, custom: dict, depth: int = 0):
             out.append(value[position:])
             break
         out.append(value[position:start])
-        depth_here, index = 1, start + 4
-        while index < len(value) and depth_here:
-            if value[index] == "(":
-                depth_here += 1
-            elif value[index] == ")":
-                depth_here -= 1
-            index += 1
+        # the matching bracket, bracket to bracket (not letter by letter: this
+        # runs for every var() of every element)
+        depth_here, index = 1, len(value)
+        for bracket in _BRACKETS.finditer(value, start + 4):
+            depth_here += 1 if bracket.group() == "(" else -1
+            if not depth_here:
+                index = bracket.end()
+                break
         inside = value[start + 4:index - 1]
         name, comma, fallback = inside.partition(",")
         name = name.strip()
@@ -1417,6 +1444,7 @@ input[type="checkbox"], input[type="radio"] { border: none; padding: 0; backgrou
 input[type="hidden"] { display: none }
 input[type="range"] { border: none; padding: 0; background-color: transparent; width: 129px; height: 16px; margin: 2px }
 summary { display: block; cursor: pointer }
+slot { display: contents }
 details:not([open]) > :not(summary) { display: none }
 """
 
@@ -1498,6 +1526,12 @@ class Styler:
             for key in keys:
                 default.setdefault(key, []).append((rule, 0))
         self._index = {"default": default, "author": author}
+        # the indexes with rules filed under what is above an element, and
+        # the pieces of class attributes their rules look for
+        self._under = {id(found) for found in (default, author)
+                       if any(key[0] == "under" for key in found)}
+        self._class_parts = {id(found): [key[1] for key in found if key[0] == "classpart"]
+                             for found in (default, author)}
 
     def _holds(self, query: str) -> bool:
         found = self._media.get(query)
@@ -1531,6 +1565,20 @@ class Styler:
         keys.extend(("attr", name) for name in element.attrs)
         if element is self.document.root:
             keys.append(("root", ""))
+        parts = self.__dict__.get("_class_parts", {}).get(id(index))
+        if parts:
+            written = element.attrs.get("class")
+            if written:
+                keys.extend(("classpart", part) for part in parts if part in written)
+        parent = element.parent
+        if isinstance(parent, Element):
+            # rules filed under what the parent, or an element above, must be
+            keys.append(("child", ("tag", parent.tag)))
+            if parent.id:
+                keys.append(("child", ("id", parent.id)))
+            keys.extend(("child", ("class", name)) for name in parent.classes)
+            if id(index) in self.__dict__.get("_under", ()):
+                keys.extend(("under", key) for key in self._ancestor_keys(element))
         seen = set()
         several = self.__dict__.get("_several", ())
         for key in keys:

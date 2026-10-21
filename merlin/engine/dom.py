@@ -98,7 +98,15 @@ class Document:
 
     @property
     def body(self) -> Element:
-        return self.root.find("body") or self.root
+        # found once, not looked for every time: layout asks for it for every
+        # box, and on YouTube's pages, their <head> holding thousands of
+        # elements, looking had taken most of a layout's 34 seconds
+        known = self.__dict__.get("_body")
+        if known is not None and known.tag == "body" and known.parent is self.root:
+            return known
+        found = self.root.find("body")
+        self.__dict__["_body"] = found
+        return found or self.root
 
     @property
     def title(self) -> str:

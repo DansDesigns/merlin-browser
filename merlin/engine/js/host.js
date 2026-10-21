@@ -16,6 +16,14 @@ import { makeWorkerClasses, makeXHR, makeCacheStorage, coarsenClocks } from "./w
 // Node's own process, kept here before the page's globals are made: the page
 // never sees it (see lockDown)
 const proc = globalThis.process;
+// This host's own timers, as Node makes them. The page's (the window's
+// setTimeout and setInterval, guarded below) are slowed while its tab is
+// hidden, as browsers slow them; Merlin's own work here is not
+const setTimeout = globalThis.setTimeout.bind(globalThis);
+const clearTimeout = globalThis.clearTimeout.bind(globalThis);
+// a hidden tab's timers run at most once a second, as in Chrome and Brave:
+// four tabs of Merlin had kept a core busier than twenty of Brave's
+const HIDDEN_TIMER_MS = 1000;
 // Every module this host needs is above. After the page is in, nothing more
 // is loaded the way Node loads modules: a page's code (an import() made from
 // a Function, say) could otherwise reach Node's own (files, the network).
@@ -236,8 +244,9 @@ const computed = new Map();      // element id -> its computed styles that are n
 // read as 0, had sat with its corner at the window's middle.
 const unmeasured = new Set();
 let remeasures = 0;
-function noteUnmeasured(element) {
-  if (unmeasured.size < 500 && remeasures < 20 && element && element.isConnected) unmeasured.add(new WeakRef(element));
+function noteUnmeasured(element, present = false) {
+  if (unmeasured.size < 500 && remeasures < 20 && element && element.isConnected)
+    unmeasured.add([new WeakRef(element), present]);
 }
 // and fixed boxes (dialogs, pop-ups) a script measured, as they were then:
 // one placed by its size, then given a max-height, is placed again once laid
@@ -258,10 +267,16 @@ function remeasured() {
     if (box && box.slice(0, 4).join(",") !== was) { laid = true; break; }
   }
   measuredFixed.clear();
-  for (const ref of unmeasured) {
+  for (const [ref, present] of unmeasured) {
     if (laid) break;
     const element = ref.deref();
-    if (element && geometry.has(ids.get(element))) { laid = true; break; }
+    const box = element ? geometry.get(ids.get(element)) : undefined;
+    // laid out since, or (read as nothing, 0 high or 0 wide, when it had
+    // just been made) laid out with a size now. YouTube's channel header,
+    // fixed, is measured to push the page down past it: read as 0 high
+    // before what it holds was laid out, it was never measured again, and
+    // the channel's videos were drawn over its name.
+    if (box && (!present || (box[2] > 0 && box[3] > 0))) { laid = true; break; }
   }
   if (!laid) return;
   unmeasured.clear();
@@ -463,6 +478,22 @@ function install(html) {
       try { Object.defineProperty(proto, Symbol.toStringTag, { value: name, configurable: true }); } catch (_) {}
     }
   }
+  // shadow roots, kept so the page is drawn as the browser composes it
+  // (see serialize): a component's own structure and styles, its slots
+  // filled with what the page put in it
+  {
+    const elementProto = g.Element && g.Element.prototype;
+    const attach = elementProto && elementProto.attachShadow;
+    if (typeof attach === "function" && !attach.__tracked) {
+      const tracked = function attachShadow(init) {
+        const root = attach.call(this, init);
+        trackShadow(this, root);
+        return root;
+      };
+      tracked.__tracked = true;
+      try { Object.defineProperty(elementProto, "attachShadow", { value: tracked, configurable: true, writable: true }); } catch (_) {}
+    }
+  }
   if (g.HTMLImageElement?.prototype) {
     const imageProto = g.HTMLImageElement.prototype;
     const srcOwner = (() => { let p = imageProto; while (p && !Object.getOwnPropertyDescriptor(p, "src")) p = Object.getPrototypeOf(p); return p; })();
@@ -512,7 +543,7 @@ function install(html) {
       }, configurable: true,
     });
   } catch (_) {}
-  try { Object.defineProperty(document_, "visibilityState", { get: () => "visible", configurable: true }); } catch (_) {}
+  try { Object.defineProperty(document_, "visibilityState", { get: () => (state.hidden ? "hidden" : "visible"), configurable: true }); } catch (_) {}
   // what a browser's document has and linkedom's did not: GitHub's scripts
   // stopped on "Unable to get document domain"
   const documentProperties = {
@@ -557,8 +588,8 @@ function install(html) {
     fonts.ready = Promise.resolve(fonts);
     try { Object.defineProperty(document_, "fonts", { value: fonts, configurable: true }); } catch (_) {}
   }
-  try { Object.defineProperty(document_, "hidden", { get: () => false, configurable: true }); } catch (_) {}
-  document_.hasFocus = () => true;
+  try { Object.defineProperty(document_, "hidden", { get: () => !!state.hidden, configurable: true }); } catch (_) {}
+  document_.hasFocus = () => !state.hidden;
   g.history = {
     length: 1, state: null, scrollRestoration: "auto",
     pushState(data, _title, url) { this.state = data; if (url !== undefined && url !== null) { state.url = new URL(String(url), state.url).href; send({ type: "url", url: state.url }); } },
@@ -610,8 +641,14 @@ function install(html) {
     media: String(query), get matches() { return evaluateMedia(query); }, onchange: null,
     addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent() { return false; },
   });
-  const frame = (cb) => setTimeout(() => { try { cb(performance.now()); } catch (e) { reportError(e); } }, 16);
-  g.requestAnimationFrame = frame; g.cancelAnimationFrame = (id) => clearTimeout(id);
+  // animation frames: none while the tab is hidden, as in a browser; those
+  // asked for then wait till it is shown
+  const frame = (cb) => {
+    if (state.hidden) { const id = ++frameNumber; heldFrames.set(id, cb); return id; }
+    return setTimeout(() => { try { cb(performance.now()); } catch (e) { reportError(e); } }, 16);
+  };
+  g.requestAnimationFrame = frame;
+  g.cancelAnimationFrame = (id) => { if (!heldFrames.delete(id)) clearTimeout(id); };
   g.requestIdleCallback = (cb) => setTimeout(() => { try { cb({ didTimeout: false, timeRemaining: () => 10 }); } catch (e) { reportError(e); } }, 1);
   g.cancelIdleCallback = (id) => clearTimeout(id);
   // Computed styles as Merlin Engine worked them out (sent with the
@@ -691,7 +728,7 @@ function install(html) {
       this.thresholds = [].concat(options.threshold ?? 0).map(Number).sort((a, b) => a - b);
       observers.add(this);
     }
-    observe(target) { if (!this._targets.has(target)) { this._targets.set(target, null); queueMicrotask(() => this._check()); } }
+    observe(target) { observers.add(this); if (!this._targets.has(target)) { this._targets.set(target, null); nextFrame(this); } }
     unobserve(target) { this._targets.delete(target); }
     disconnect() { this._targets.clear(); observers.delete(this); }
     takeRecords() { return []; }
@@ -736,7 +773,10 @@ function install(html) {
   // sizes AlterniTech's logo from it, and drew it 0 pixels tall.
   g.ResizeObserver = class {
     constructor(callback) { this._cb = callback; this._targets = new Map(); resizers.add(this); }
-    observe(target) { if (!this._targets.has(target)) { this._targets.set(target, null); queueMicrotask(() => this._check()); } }
+    // observing again after disconnect() watches again: Polymer's header
+    // layout disconnects and observes its header each time it updates, and
+    // its observer, forgotten, was never told the header's height
+    observe(target) { resizers.add(this); if (!this._targets.has(target)) { this._targets.set(target, null); nextFrame(this); } }
     unobserve(target) { this._targets.delete(target); }
     disconnect() { this._targets.clear(); resizers.delete(this); }
     _check() {
@@ -1176,7 +1216,20 @@ function install(html) {
         callback = function () { return (0, g.eval)(code); };
       }
       if (typeof callback !== "function") return numbered(original.call(this, () => {}, delay));
-      return numbered(original.call(this, function () { try { return callback.apply(this, arguments); } catch (e) { reportError(e); } }, delay, ...rest));
+      // while the tab is hidden: a timeout waits at least a second, and an
+      // interval (made before, perhaps, every 16ms) runs at most once a second
+      let wait = Number(delay) || 0;
+      if (state.hidden && wait < HIDDEN_TIMER_MS) wait = HIDDEN_TIMER_MS;
+      let last = 0;
+      const repeating = name === "setInterval";
+      return numbered(original.call(this, function () {
+        if (repeating && state.hidden) {
+          const now = Date.now();
+          if (now - last < HIDDEN_TIMER_MS) return;
+          last = now;
+        }
+        try { return callback.apply(this, arguments); } catch (e) { reportError(e); }
+      }, wait, ...rest));
     };
     guarded.__guarded = true;
     g[name] = guarded;
@@ -1255,6 +1308,7 @@ function install(html) {
       return { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, toJSON() { return this; } };
     }
     noteMeasured(this, box);
+    if (!box[2] || !box[3]) noteUnmeasured(this, true);
     let [x, y, width, height, fixed] = box;
     // a fixed box placed by its own style's left and top in pixels is where
     // they put it now, as a browser would lay it out at once: Polymer's
@@ -1275,6 +1329,19 @@ function install(html) {
     } catch (_) { /* as laid out */ }
     const top = fixed ? y : y - state.scrollY, left = fixed ? x : x - state.scrollX;
     return { x: left, y: top, top, left, right: left + width, bottom: top + height, width, height, toJSON() { return this; } };
+  };
+  // Whether it is shown: laid out, with a size, and neither it nor anything
+  // around it hidden. Microsoft's player scripts call it, and stopped with
+  // "checkVisibility is not a function".
+  proto.checkVisibility = function (options = {}) {
+    if (!this.isConnected) return false;
+    const box = geometry.get(ids.get(this));
+    if (!box || (!box[2] && !box[3])) return false;
+    const worked = computed.get(ids.get(this)) || {};
+    if ((options.visibilityProperty || options.checkVisibilityCSS) &&
+        (worked.visibility === "hidden" || worked.visibility === "collapse")) return false;
+    if ((options.opacityProperty || options.checkOpacity) && Number(worked.opacity) === 0) return false;
+    return true;
   };
   // The root element's client size is the viewport's, as browsers define it:
   // Square reads documentElement.clientWidth to choose its layout, got its
@@ -1297,6 +1364,7 @@ function install(html) {
         return Math.round(name === "clientHeight" ? panel[1] : panel[2]);
       const box = geometry.get(ids.get(this));
       if (!box) noteUnmeasured(this);
+      else if (!box[index]) noteUnmeasured(this, true);
       return box ? Math.round(box[index]) : 0; } });
   }
   // A panel that scrolls inside the page: its position read and set, as
@@ -2924,7 +2992,12 @@ function installFrames(g, made) {
       return value;
     },
   });
-  try { Object.defineProperty(g, "frames", { get: () => framesView, configurable: true }); } catch (_) { g.frames = framesView; }
+  // replaceable, as browsers have it: a page's own "var frames = 0" is its
+  // own variable (it had stayed the window's frames, a counter never counting)
+  try {
+    Object.defineProperty(g, "frames", { get: () => framesView, configurable: true, enumerable: true,
+      set: (value) => Object.defineProperty(g, "frames", { value, writable: true, configurable: true, enumerable: true }) });
+  } catch (_) { g.frames = framesView; }
   const probe = document_.createElement("iframe");
   const Base = (g.HTMLElement || made.HTMLElement).prototype;
   const own = Object.getPrototypeOf(probe);
@@ -3079,7 +3152,90 @@ function escapeAttr(t) { return t.replace(/&/g, "&amp;").replace(/"/g, "&quot;")
 // written as "a &gt; b" is no longer CSS, and every child selector in a
 // page's own <style> (Google's results page's layout) had been lost
 const RAW_TEXT = new Set(["style", "xmp", "noembed", "noframes", "plaintext"]);
-function serialize(node, out) {
+// Shadow roots. Merlin Engine styles one document, so a component's shadow
+// root is written in place of what the page put inside it, each <slot>
+// filled with what is given to it (or its own content when nothing is), and
+// the component's styles (in the root, or adopted by it) kept to it: a rule
+// is made to apply only within its host, :host is the host itself, and
+// ::slotted(x) is x. Microsoft's header (Lit's components) had been drawn as
+// what the page put in it alone, its menus' every link down the middle.
+const shadowOf = new WeakMap();
+function trackShadow(host, root) {
+  shadowOf.set(host, root);
+  try {
+    new globalThis.MutationObserver(mutated).observe(root, { childList: true, subtree: true, attributes: true, characterData: true });
+  } catch (_) {}
+  structural = true;
+}
+function cssScan(text, i, stops) {
+  let depth = 0, quote = "";
+  for (; i < text.length; i++) {
+    const c = text[i];
+    if (quote) { if (c === "\\") i++; else if (c === quote) quote = ""; continue; }
+    if (c === '"' || c === "'") { quote = c; continue; }
+    if (c === "(" || c === "[") depth++;
+    else if (c === ")" || c === "]") depth--;
+    else if (depth <= 0 && stops.includes(c)) return i;
+  }
+  return text.length;
+}
+function cssBlockEnd(text, open) {
+  let depth = 0, quote = "";
+  for (let i = open; i < text.length; i++) {
+    const c = text[i];
+    if (quote) { if (c === "\\") i++; else if (c === quote) quote = ""; continue; }
+    if (c === '"' || c === "'") { quote = c; continue; }
+    if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) return i;
+  }
+  return text.length;
+}
+function scopeSelector(selector, host) {
+  let s = selector.trim();
+  if (!s) return s;
+  // ::slotted(x): x, within the host (it is in the host's light DOM)
+  s = s.replace(/::slotted\(((?:[^()]|\([^()]*\))*)\)/g, "$1");
+  s = s.replace(/:host-context\(((?:[^()]|\([^()]*\))*)\)/g, (_m, inner) => `${inner} ${host}`);
+  if (/:host(?![-\w])/.test(s)) {
+    return s.replace(/:host\(((?:[^()]|\([^()]*\))*)\)/g, (_m, inner) => host + inner)
+            .replace(/:host(?![-\w(])/g, host);
+  }
+  return `${host} ${s}`;
+}
+function scopeCss(text, host) {
+  text = String(text || "").replace(/\/\*[\s\S]*?\*\//g, "");
+  let out = "", i = 0;
+  while (i < text.length) {
+    const stop = cssScan(text, i, "{;}");
+    if (stop >= text.length) break;
+    const prelude = text.slice(i, stop).trim();
+    if (text[stop] !== "{") { if (prelude) out += prelude + ";"; i = stop + 1; continue; }
+    const close = cssBlockEnd(text, stop);
+    const body = text.slice(stop + 1, close);
+    if (prelude.startsWith("@")) {
+      out += /^@(media|supports|container|layer|document|scope)\b/i.test(prelude)
+        ? `${prelude}{${scopeCss(body, host)}}` : `${prelude}{${body}}`;
+    } else {
+      const selectors = [];
+      for (let j = 0; j <= prelude.length;) {
+        const comma = cssScan(prelude, j, ",");
+        selectors.push(scopeSelector(prelude.slice(j, comma), host));
+        j = comma + 1;
+      }
+      out += `${selectors.filter(Boolean).join(",")}{${body}}`;
+    }
+    i = close + 1;
+  }
+  return out;
+}
+function slotted(host, slot) {
+  const name = slot.getAttribute("name") || "";
+  return [...host.childNodes].filter((n) => (n.nodeType === 1
+    ? (n.getAttribute("slot") || "") === name
+    : n.nodeType === 3 && !name));
+}
+const styleText = (text) => text.replace(/<\/(style)/gi, "<\\/$1");
+function serialize(node, out, scope) {
   if (node.nodeType === 3) {
     const parent = node.parentNode;
     const holder = parent && parent.nodeType === 1 ? (parent.localName || "").toLowerCase() : "";
@@ -3089,8 +3245,10 @@ function serialize(node, out) {
   }
   if (node.nodeType !== 1) return;
   const tag = node.localName || node.tagName.toLowerCase();
+  const root = shadowOf.get(node);
   out.push("<", tag, ' data-mjs="', String(idOf(node)), '"');
   for (const attr of node.attributes || []) out.push(" ", attr.name, '="', escapeAttr(attr.value), '"');
+  if (root) out.push(' data-mjs-host="', String(idOf(node)), '"');
   // a form field's value as the script left it, not only as written
   if ((tag === "input" || tag === "textarea" || tag === "select") && node.value !== undefined && node.value !== null) {
     out.push(' data-mjs-value="', escapeAttr(String(node.value)), '"');
@@ -3098,10 +3256,31 @@ function serialize(node, out) {
   }
   out.push(">");
   if (VOID.has(tag)) return;
-  // scripts are Merlin Engine's to run, not to lay out: left empty
-  if (tag !== "script") {
+  if (scope && tag === "style") {
+    // a component's own styles, kept to it
+    out.push(styleText(scopeCss(node.textContent, scope.selector)), "</style>");
+    return;
+  }
+  if (scope && tag === "slot") {
+    const given = slotted(scope.host, node);
+    if (given.some((n) => n.nodeType === 1 || String(n.data || "").trim())) {
+      for (const child of given) serialize(child, out, scope.outer);
+    } else {
+      for (const child of node.childNodes) serialize(child, out, scope);
+    }
+    out.push("</slot>");
+    return;
+  }
+  if (root) {
+    const inner = { host: node, outer: scope, selector: `[data-mjs-host="${idOf(node)}"]` };
+    let adopted = "";
+    try { adopted = [...(root.adoptedStyleSheets || [])].map((sheet) => (sheet._source ? sheet._source() : "")).join("\n"); } catch (_) {}
+    if (adopted.trim()) out.push("<style data-mjs-shadow>", styleText(scopeCss(adopted, inner.selector)), "</style>");
+    for (const child of root.childNodes) serialize(child, out, inner);
+  } else if (tag !== "script") {
+    // scripts are Merlin Engine's to run, not to lay out: left empty
     const children = tag === "template" && node.content ? node.content.childNodes : node.childNodes;
-    for (const child of children) serialize(child, out);
+    for (const child of children) serialize(child, out, scope);
   }
   out.push("</", tag, ">");
 }
@@ -3176,6 +3355,41 @@ function changed() {
   structural = true;
   schedule();
 }
+let lastTitle = "";
+// An observer's first look at what it was given to watch comes with the next
+// frame, as in a browser, not at once: Microsoft's menus watch the page with
+// a ResizeObserver, and its callback starts watching again, which, answered
+// at once each time, went round for ever and stopped the page's timers
+const frameChecks = new Set();
+let frameCheckPending = null;
+function nextFrame(observer) {
+  frameChecks.add(observer);
+  if (frameCheckPending) return;
+  frameCheckPending = setTimeout(() => {
+    frameCheckPending = null;
+    const due = [...frameChecks];
+    frameChecks.clear();
+    for (const one of due) { try { one._check(); } catch (e) { reportError(e); } }
+  }, 16);
+}
+// animation frames asked for while the tab is hidden
+const heldFrames = new Map();
+let frameNumber = 1e9;
+function visibility(hidden) {
+  hidden = !!hidden;
+  if (hidden === !!state.hidden) return;
+  state.hidden = hidden;
+  if (!hidden) {
+    const held = [...heldFrames.values()];
+    heldFrames.clear();
+    if (held.length) setTimeout(() => {
+      const now = performance.now();
+      for (const cb of held) { try { cb(now); } catch (e) { reportError(e); } }
+    }, 16);
+  }
+  fire(document_, "visibilitychange");
+  if (!hidden) schedule();            // what changed meanwhile, now
+}
 function schedule() {
   if (pending) return;
   const waited = Date.now() - awaitingSince;
@@ -3183,6 +3397,13 @@ function schedule() {
   pending = setTimeout(() => {
     pending = null;
     if (awaiting && Date.now() - awaitingSince < PATIENCE) return;   // dom_ready will ask again
+    if (state.hidden) {
+      // a hidden tab's page is sent when it is shown (see "visibility"):
+      // only its title now, for its tab
+      const title = document_.title || "";
+      if (title !== lastTitle) { lastTitle = title; send({ type: "title", title }); }
+      return;
+    }
     if (!structural && lastSent) {
       if (!textDirty.size && !attrDirty.size) return;
       const items = textChanges(), attrs = attrChanges();
@@ -3273,6 +3494,7 @@ function dispatch(message) {
     return;
   }
   if (message.type === "dom_ready") { domReady(!!message.whole); return; }
+  if (message.type === "visibility") { visibility(message.hidden); return; }
   if (message.type === "resize") {
     state.width = message.width; state.height = message.height; fire(globalThis, "resize"); return;
   }

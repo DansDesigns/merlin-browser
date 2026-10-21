@@ -11814,7 +11814,7 @@ var attribute = (element, end, attribute2, value, active) => {
   attribute2[VALUE] = value;
   attribute2.ownerElement = element;
   knownSiblings(end[PREV], attribute2, end);
-  if (attribute2.name === "class") element.className = value;
+  if (attribute2.name === "class") setClassValue(element, value);
   if (active) attributeChangedCallback(element, attribute2.name, null, value);
 };
 var parseFromString = (document, isHTML, markupLanguage, inert = false) => {
@@ -11835,6 +11835,11 @@ var parseFromString = (document, isHTML, markupLanguage, inert = false) => {
     // <!DOCTYPE ...>
     onprocessinginstruction(name, data) {
       if (name.toLowerCase() === "!doctype") document.doctype = data.slice(name.length).trim();
+      // Merlin: in HTML, "<?...>" is a comment holding "?..." (a "bogus
+      // comment", as the HTML standard has it). Lit marks where each part
+      // of a template goes so, and with these dropped nothing a Lit
+      // component put in its template was ever drawn (Microsoft's header)
+      else if (isHTML && data[0] === "?") append2(node, document.createComment(data), active);
     },
     // <tagName>
     onopentag(name, attributes) {
@@ -11999,13 +12004,16 @@ var attributeChangedCallback2 = (element, attributeName, oldValue) => {
   const { active, observers } = ownerDocument[MUTATION_OBSERVER];
   if (active) {
     for (const observer of observers) {
-      for (const [target, { childList, subtree, attributes, attributeFilter, attributeOldValue }] of observer.nodes) {
-        if (childList) {
-          if (subtree && (target === ownerDocument || target.contains(element)) || !subtree && target.children.includes(element)) {
-            queueAttribute(observer, element, attributeName, attributeFilter, attributeOldValue, oldValue);
-            break;
-          }
-        } else if (attributes && target === element) {
+      // Merlin: attribute changes go only to observers that asked for them
+      // (attributes, or an attributeFilter or attributeOldValue, which imply
+      // it), on the element itself or, with subtree, within the target, as
+      // the DOM standard has it. Observers of childList alone had been told
+      // of every attribute changed below them: Microsoft's menus, which
+      // update themselves when their children change and change classes in
+      // doing so, updated for ever, a core kept busy
+      for (const [target, { subtree, attributes, attributeFilter, attributeOldValue }] of observer.nodes) {
+        if (!attributes && !attributeFilter && !attributeOldValue) continue;
+        if (target === element || subtree && (target === ownerDocument || target.contains(element))) {
           queueAttribute(observer, element, attributeName, attributeFilter, attributeOldValue, oldValue);
           break;
         }
@@ -12159,7 +12167,7 @@ var setAttribute = (element, attribute2) => {
   const { [VALUE]: value, name } = attribute2;
   attribute2.ownerElement = element;
   knownSiblings(element, attribute2, element[NEXT]);
-  if (name === "class") element.className = value;
+  if (name === "class") setClassValue(element, value);
   attributeChangedCallback2(element, name, null);
   attributeChangedCallback(element, name, null, value);
 };
@@ -15544,15 +15552,43 @@ setPrototypeOf(DOMStringMap.prototype, null);
 
 // cache/npm/registry.npmjs.org/linkedom/0.18.13/esm/dom/token-list.js
 var { add } = Set.prototype;
+// Merlin: a class list's tokens are read through Set's own methods, and
+// kept as numbered entries too, as a browser's DOMTokenList has them.
+// core-js (in many sites' polyfills) gives DOMTokenList the iterators of an
+// Array, which read [0], [1]... up to length: on Microsoft's pages every
+// element's classes had then read as none, and its pages were drawn without
+// their classes
+var tokensOf = (self) => Array.from(Set.prototype.values.call(self));
+var INDEXED = Symbol("indexed");
+var indexTokens = (self) => {
+  const tokens = tokensOf(self);
+  const before = self[INDEXED] || 0;
+  for (let i = 0; i < tokens.length; i++) self[i] = tokens[i];
+  for (let i = tokens.length; i < before; i++) delete self[i];
+  self[INDEXED] = tokens.length;
+};
 var addTokens = (self, tokens) => {
   for (const token of tokens) {
     if (token) add.call(self, token);
   }
+  indexTokens(self);
 };
-var update = ({ [OWNER_ELEMENT]: ownerElement, value }) => {
+var update = (self) => {
+  indexTokens(self);
+  const ownerElement = self[OWNER_ELEMENT], value = self.value;
   const attribute2 = ownerElement.getAttributeNode("class");
   if (attribute2) attribute2.value = value;
   else setAttribute(ownerElement, new Attr(ownerElement.ownerDocument, "class", value));
+};
+// Merlin: the class attribute set as a browser sets it, through the class
+// list itself, never through a className property: YouTube's components
+// define their own className setter, which sets the class attribute again,
+// and setAttribute("class") going through it had gone round for ever, and
+// YouTube's newer components (its video tiles, channel headers) never drew
+var setClassValue = (element, value) => {
+  const list = element[CLASS_LIST] || (element[CLASS_LIST] = new DOMTokenList(element));
+  list.clear();
+  list.add(...$String(value).split(/\s+/));
 };
 var DOMTokenList = class extends Set {
   constructor(ownerElement) {
@@ -15565,9 +15601,20 @@ var DOMTokenList = class extends Set {
     return this.size;
   }
   get value() {
-    return [
-      ...this
-    ].join(" ");
+    return tokensOf(this).join(" ");
+  }
+  item(index) {
+    const tokens = tokensOf(this);
+    return index >= 0 && index < tokens.length ? tokens[index] : null;
+  }
+  clear() {
+    super.clear();
+    indexTokens(this);
+  }
+  delete(token) {
+    const had = super.delete(token);
+    indexTokens(this);
+    return had;
   }
   /**
    * @param  {...string} tokens
@@ -16062,7 +16109,10 @@ var Element2 = class extends ParentNode {
     this.dispatchEvent(new GlobalEvent("focus"));
   }
   getAttribute(name) {
-    if (name === "class") return this.className;
+    // the class list itself, not className, which a page may define for
+    // itself in terms of getAttribute (as YouTube's do): it had called
+    // itself until the stack ran out
+    if (name === "class") return this[CLASS_LIST] ? this[CLASS_LIST].value : this.classList.value;
     const attribute2 = this.getAttributeNode(name);
     return attribute2 && (ignoreCase(this) ? attribute2.value : escape2(attribute2.value));
   }
@@ -16111,7 +16161,7 @@ var Element2 = class extends ParentNode {
     }
   }
   setAttribute(name, value) {
-    if (name === "class") this.className = value;
+    if (name === "class") setClassValue(this, value);
     else {
       const attribute2 = this.getAttributeNode(name);
       if (attribute2) attribute2.value = value;
@@ -16365,9 +16415,7 @@ var SVGElement = class extends Element2 {
     return "http://www.w3.org/2000/svg";
   }
   getAttribute(name) {
-    return name === "class" ? [
-      ...this.classList
-    ].join(" ") : super.getAttribute(name);
+    return name === "class" ? this.classList.value : super.getAttribute(name);
   }
   setAttribute(name, value) {
     if (name === "class") this.className = value;

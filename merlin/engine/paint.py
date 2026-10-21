@@ -257,7 +257,7 @@ def _escaping(in_force: list) -> list:
 
 
 def _paint_range(painter, display, start, end, shown, images, ends, scroll, active,
-                 layers_here: bool = True) -> None:
+                 layers_here: bool = True, own_box: bool = False) -> None:
     items = display.items
     # The layers at this level, with the clips, opacities and offsets in force
     # where each begins, to be set again when it is painted later. A layer that
@@ -287,6 +287,14 @@ def _paint_range(painter, display, start, end, shown, images, ends, scroll, acti
         index += 1
     below = sorted((l for l in layers if l[0] < 0), key=lambda l: (l[0], l[5]))
     above = sorted((l for l in layers if l[0] >= 0), key=lambda l: (l[0], l[5]))
+    painted_first = None
+    if below and own_box:
+        # A stacking context's own background and border come first, then the
+        # layers with a negative z-index, then the rest, as CSS paints them:
+        # those layers had been put under the context's own background too,
+        # and hidden by it (ChatGPT's send button, its disc a ::before at
+        # z-index -1 in a white box)
+        painted_first = _paint_own_box(painter, display, start, end, shown, images, scroll)
     for layer in below:
         _paint_layer(painter, display, layer, shown, images, ends, scroll)
     # the content at this level, in document order
@@ -313,8 +321,9 @@ def _paint_range(painter, display, start, end, shown, images, ends, scroll, acti
                 if len(here) > 1:
                     here.pop()
         elif kind == "group":
-            for sub in item[1]:
-                _draw(painter, sub, here[-1], images)
+            if index != painted_first:
+                for sub in item[1]:
+                    _draw(painter, sub, here[-1], images)
         elif kind not in ("layer_pop", "fixed_slot"):
             _draw(painter, item, here[-1], images)
         index += 1
@@ -411,6 +420,39 @@ def _layer_bounds(display, start: int, close: int):
     return found
 
 
+def _paint_own_box(painter, display, start, end, shown, images, scroll):
+    """Paint a stacking context's own background and border (its first group,
+    under whatever clips and transforms open before it) and return where that
+    group is, so it is not painted again; None if it has none."""
+    items = display.items
+    opened = []
+    index = start
+    while index < end:
+        item = items[index]
+        if item is not None:
+            kind = item[0]
+            if kind == "group":
+                break
+            if kind in _PUSHES:
+                opened.append(item)
+            elif kind in _POPS or kind == "layer_push" or kind not in _PUSHES:
+                return None                     # something drawn before it: leave the order be
+        index += 1
+    else:
+        return None
+    painter.save()
+    here = list(shown)
+    for push in opened:
+        painter.save()
+        _apply(painter, display, push, here, scroll)
+    for sub in items[index][1]:
+        _draw(painter, sub, here[-1], images)
+    for _push in opened:
+        painter.restore()
+    painter.restore()
+    return index
+
+
 def _paint_layer(painter, display, layer, shown, images, ends, scroll) -> None:
     _z, start, close, in_force, context, _order = layer
     bounds = _layer_bounds(display, start, close)
@@ -428,7 +470,7 @@ def _paint_layer(painter, display, layer, shown, images, ends, scroll) -> None:
     # a stacking context paints its own layers; one that is not leaves them to
     # the level above, which has gathered them already
     _paint_range(painter, display, start + 1, close, here, images, ends, scroll, in_force,
-                 layers_here=context)
+                 layers_here=context, own_box=context)
     for _item in in_force:
         painter.restore()
     painter.restore()

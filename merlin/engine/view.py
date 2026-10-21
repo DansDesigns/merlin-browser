@@ -2094,6 +2094,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             element.attrs["data-mjs"] = str(number)
             self._by_script_id[str(number)] = element
         whole = to_html(self._document)
+        self._told_hidden = not self.isVisible()
         host.send({"type": "load", "html": whole, "geometry": self._geometry_now(), "state": {
             "url": self._url.toString(), "width": self._page_width(), "height": float(self.height()),
             "userAgent": _scripts_user_agent(headers.get("User-Agent", "")), "language": "en-GB",
@@ -2101,6 +2102,8 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             "cookie": cookie_string(self._cookies(), self._url.toString()),
             "storage": storage.load(self._origin()),
             "blurTiming": self._blur_timing(),
+            # a tab opened behind the others is hidden from the start
+            "hidden": not self.isVisible(),
             "scheme": "dark" if getattr(self._host, "dark", False) else "light"}})
         self._scripts_started_for_frames()
 
@@ -2474,6 +2477,12 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             return
         if kind == "dom":
             self._script_dom(message.get("html", ""), message.get("title", ""))
+        elif kind == "title":
+            # a hidden tab's page keeps its name up to date, nothing more
+            title = str(message.get("title") or "")
+            if title and title != self._title:
+                self._title = title
+                self.titleChanged.emit(title)
         elif kind == "texts":
             self._script_texts(message.get("items") or [], message.get("title", ""),
                                message.get("attrs") or [])
@@ -2935,8 +2944,23 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             element = getattr(element, "parent", None)
         return True
 
+    def hideEvent(self, event):  # noqa: N802
+        super().hideEvent(event)
+        self._tell_visibility()
+
+    def _tell_visibility(self) -> None:
+        """The page told whether its tab is shown: a hidden one's timers are
+        slowed to once a second, its animation frames held and its changes
+        kept till it is shown (js/host.js), as browsers do. Every tab had run
+        as if it were the one in front, and four kept a core busy."""
+        hidden = not self.isVisible()
+        if self._script is not None and getattr(self, "_told_hidden", None) != hidden:
+            self._told_hidden = hidden
+            self._script.send({"type": "visibility", "hidden": hidden})
+
     def showEvent(self, event):  # noqa: N802
         super().showEvent(event)
+        self._tell_visibility()
         # shown again: what its scripts did meanwhile, now
         if getattr(self, "_script_queued", None) is not None and not self._script_busy:
             QTimer.singleShot(0, self._script_rested)

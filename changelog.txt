@@ -5,6 +5,56 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.44
+  Merlin Engine:
+  - Tabs you are not looking at keep quiet, as they do in other browsers.
+    A hidden tab's page is told it is hidden, its timers run at most once a
+    second, its animation frames wait until it is shown, and Merlin no
+    longer sends its page changes to be laid out until then. A hidden
+    YouTube tab's scripts were busy a quarter of a second in 22 seconds.
+  - Microsoft's pages no longer keep a processor busy. Changing an element's
+    classes was reported to scripts watching only for added and removed
+    elements; Microsoft's header answered each report by changing classes
+    again, for ever.
+  - YouTube's pages no longer stop with "Maximum call stack size exceeded".
+    Setting or reading an element's class went through the page's own
+    className, which YouTube defines in terms of the class attribute: each
+    called the other until the stack ran out.
+  - Microsoft's header and its menus are drawn as buttons in a bar again,
+    not as a list of links down the middle. Its parts are built with Lit
+    and with core-js, and both had failed: Lit's markers in the HTML it
+    writes were dropped, and class lists read the way core-js reads them
+    came out empty, so nothing on the bar had its classes.
+  - Shadow roots are drawn: what a component puts in its shadow root, its
+    slots filled with the element's own children, and its styles applied
+    inside it (:host, ::slotted).
+  - Pages are styled in under half the time. Rules that end in * (".menu
+    > *") or match part of a class ([class*=btn]) had been tried against
+    every element on the page; Microsoft's had 7,000 elements.
+  - Pages are laid out much faster. An item inside flex boxes and
+    inline-blocks was laid out once more for each one around it, to learn
+    its height; YouTube's buttons are a dozen deep, and its channel page
+    took half a minute, ran out of time and was drawn with estimates (its
+    channel picture 0 wide, the parts of its heading on top of each other).
+    It now takes under 2 seconds.
+  - YouTube's channel page: the videos are no longer drawn over the channel
+    name. The page measures its header to push the videos below it, and
+    measured it before it was laid out (0 high). A size read as 0 that
+    comes to something is now measured again, and a ResizeObserver
+    disconnected and used again keeps watching.
+  - ChatGPT: the conversation column is centred and 768 wide, the heading
+    is centred above it, and the icons are drawn. Grid items keep to their
+    max-width and are centred by auto margins, justify-self centres a
+    block, and <svg><use href="#icon"> draws the icon it names.
+  - A box with isolation: isolate, or opacity below 1, keeps its children
+    with a negative z-index in front of its own background.
+  - Element.checkVisibility() is there; Microsoft's video scripts stopped
+    without it. A page's own "var frames" is its own.
+  Known:
+  - YouTube's channel trailer can still say "Your browser can't play this
+    video": YouTube refuses the video file Merlin asks for. The page itself
+    is not affected.
+
 1.8.43
   - With the title bar hidden, the window has no border. With the tabs down
     a side, the 6-pixel border lay between the tab list and the edge of the

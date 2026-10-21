@@ -495,6 +495,7 @@ class Layout:
         self._runs: list = []
         self._last_baseline = None
         self._measuring = False
+        self._scratching = 0              # laying out only to learn a height
         self._link = None                 # the href of an enclosing block-level link
         # Measurements, remembered for this pass. Flex and grid measure an item
         # several ways to size it, and an item that is itself a flex container
@@ -658,6 +659,18 @@ class Layout:
 
     # ------------------------------------------------------------ blocks
     def _edges(self, style: dict, reference: float):
+        # worked out once per style and width for a layout: a box's edges were
+        # asked for four times over (Microsoft's pages, 94,000 times)
+        cache = self.__dict__.setdefault("_edges_cache", {})
+        key = (id(style), reference, self.zoom)
+        known = cache.get(key)
+        if known is not None and known[0] is style:
+            return list(known[1]), list(known[2]), list(known[3])
+        margin, padding, border = self._edges_now(style, reference)
+        cache[key] = (style, tuple(margin), tuple(padding), tuple(border))
+        return margin, padding, border
+
+    def _edges_now(self, style: dict, reference: float):
         z = self.zoom
         # a margin never set is 0; only an explicit "auto" is auto. Treating
         # the unset ones as auto centred tables and max-width blocks that had
@@ -747,6 +760,17 @@ class Layout:
                 m_left = max(0.0, spare - (margin[1] or 0.0))
             else:
                 m_left = margin[3] or 0.0
+        justify = style.get("justify-self")
+        if justify in ("center", "end", "right", "flex-end", "self-end") \
+                and margin[3] is not None and margin[1] is not None \
+                and style.get("float") in (None, "none") \
+                and style.get("position") not in ("absolute", "fixed"):
+            # justify-self on a block in the flow, as browsers now have it:
+            # ChatGPT's heading (max-width 17.5rem, justify-self: center) had
+            # sat at the left of its column
+            spare = available - content_width - horizontal_extra - margin[3] - margin[1]
+            if spare > 0.5:
+                m_left = margin[3] + (spare / 2 if justify == "center" else spare)
         box_x = x + m_left
         content_x = box_x + border[3] + padding[3]
         # margins that meet join (collapse), as CSS has them: a first child's
@@ -817,6 +841,12 @@ class Layout:
 
         layered = style.get("position") in ("relative", "absolute", "fixed", "sticky") \
             and not self._measuring
+        # isolation: isolate, and opacity below 1, make a stacking context too:
+        # what is inside, a z-index of -1 among it, stays within the box
+        # (ChatGPT's send button, its blue disc a ::before at -1)
+        given_opacity = style.get("opacity", 1.0)
+        isolates = not self._measuring and (style.get("isolation") == "isolate" or (
+            isinstance(given_opacity, float) and given_opacity < 0.999))
         if layered:
             try:
                 z_index = int(str(style.get("z-index", "auto")).strip())
@@ -828,7 +858,7 @@ class Layout:
             # positioned boxes inside it are stacked with its surroundings:
             # GitHub's header, z-index 99, was held inside such an ancestor at 0,
             # and the page scrolled over it.
-            context = given or style.get("position") in ("fixed", "sticky")
+            context = given or style.get("position") in ("fixed", "sticky") or isolates
             self.out.items.append(("layer_push", z_index, context,
                                    self._tree_order.get(id(element), 0)))
         # A transform, or an animation of one or of opacity, is drawn by paint
@@ -840,7 +870,7 @@ class Layout:
         moving = bool(transform_ops or animations) and not self._measuring
         animates_opacity = bool(animations) and any(
             "opacity" in frame[1] for animation in animations for frame in animation["frames"])
-        own_layer = moving and not layered
+        own_layer = (moving or isolates) and not layered
         if own_layer:
             self.out.items.append(("layer_push", 0, True, self._tree_order.get(id(element), 0)))
         sticky = None
@@ -1136,7 +1166,9 @@ class Layout:
             # size: measured, it is left out. Square's menu items each held a
             # drop-down placed absolutely, and measured as wide as it, so they
             # stacked one a line where they should sit in a row.
-            if not self._measuring:
+            # Laid out only to learn its height, a box's positioned boxes,
+            # which take no part in it, are left out
+            if not self._measuring and not self._scratching:
                 for child, child_style, static_x, static_y in waiting:
                     self._place_absolute(child, child_style, inside, static_x + dx, static_y + dy)
         if not self._measuring:
@@ -1813,7 +1845,84 @@ class Layout:
 
     def _item_box(self, element: Element, style: dict, x: float, y: float,
                   border_width: float, border_height: float | None = None) -> float:
-        """Lay out one flex item at a size already decided; returns its height."""
+        """Lay out one flex item at a size already decided; returns its height.
+
+        Measured, an item comes out the same each time it is met at the same
+        size, wherever it is: remembered per pass, with how far right it
+        reached and where its first line sits. Laid out afresh inside every
+        measurement of the boxes around it, the work doubled at each level,
+        and YouTube's buttons (a dozen flex boxes and inline-blocks deep) were
+        laid out hundreds of times each: its channel page took half a minute,
+        ran out of time, and came out with its avatar 0 wide.
+        """
+        if not self._measuring:
+            return self._item_box_sized(element, style, x, y, border_width, border_height)
+        key = ("item", id(element), id(style), round(border_width, 3),
+               None if border_height is None else round(border_height, 3),
+               getattr(self, "_grid_measuring", 0), round(self._height_base(element), 3))
+        found = self._measured.get(key)
+        if found is not None:
+            height, right, reach, baseline, margins = found[0]
+            if right is not None:
+                self.out.items.append(("extent", x + right))
+            if reach is not None:
+                self._line_reach = max(getattr(self, "_line_reach", 0.0), x + reach)
+            self._last_baseline = None if baseline is None else y + baseline
+            self._last_margins = margins
+            return height
+        items_before = len(self.out.items)
+        held = (len(self._floats), len(self._absolute), len(self._absolute[-1]) if self._absolute else 0,
+                len(self._fixed))
+        reach_before = getattr(self, "_line_reach", 0.0)
+        self._line_reach = 0.0
+        try:
+            height = self._item_box_now(element, style, x, y, border_width, border_height)
+        finally:
+            inner = self._line_reach
+            self._line_reach = max(reach_before, inner)
+        after = (len(self._floats), len(self._absolute), len(self._absolute[-1]) if self._absolute else 0,
+                 len(self._fixed))
+        if after == held:
+            # what it left for the boxes around it (a positioned box placed
+            # further out, a float) is not remembered: such an item is laid
+            # out each time
+            right = max((_right_edge(item) for item in self.out.items[items_before:]
+                         if item is not None), default=None)
+            baseline = self._last_baseline
+            self._measured[key] = ((height, None if right is None else right - x,
+                                    inner - x if inner > 0.0 else None,
+                                    None if baseline is None else baseline - y,
+                                    self._last_margins), element, style)
+        return height
+
+    def _item_box_sized(self, element, style, x, y, border_width, border_height):
+        """An item laid out for real, or (to learn its height) as before.
+
+        A flex row learns its items' heights before it places them, each by
+        laying it out on the side; a row inside the item did the same with its
+        own, and so on down: everything was laid out once more for each flex
+        box around it. Laid out only to learn a height, an item already laid
+        out at that size gives the height it had (and where its first line
+        sat), its insides not laid out again.
+        """
+        key = ("box", id(element), id(style), round(border_width, 3),
+               None if border_height is None else round(border_height, 3),
+               round(self._height_base(element), 3))
+        if self._scratching:
+            found = self._measured.get(key)
+            if found is not None:
+                height, baseline, margins = found[0]
+                self._last_baseline = None if baseline is None else y + baseline
+                self._last_margins = margins
+                return height
+        height = self._item_box_now(element, style, x, y, border_width, border_height)
+        baseline = self._last_baseline
+        self._measured[key] = ((height, None if baseline is None else baseline - y,
+                                self._last_margins), element, style)
+        return height
+
+    def _item_box_now(self, element: Element, style: dict, x: float, y: float,
+                      border_width: float, border_height: float | None = None) -> float:
         _m, padding, border = self._edges(style, border_width)
         z = self.zoom
         item = dict(style)
@@ -1867,9 +1976,11 @@ class Layout:
         self._floats, self._absolute, self._fixed = [], [[]], []
         self.out = DisplayList()
         self._runs = []
+        self._scratching += 1
         try:
             return self._item_box(element, style, 0.0, 0.0, border_width)
         finally:
+            self._scratching -= 1
             self.out, self._runs = saved, saved_runs
             self._floats, self._absolute, self._fixed = held
 
@@ -2496,6 +2607,8 @@ class Layout:
                 return (kind, item[1].translated(dx, dy)) + tuple(item[2:])
             if kind == "text":
                 return (kind, item[1] + dx, item[2] + dy) + item[3:]
+            if kind == "extent":
+                return (kind, item[1] + dx)
             if kind == "scroll_push":
                 # the panel's area moves with it (its record is shared)
                 item[1]["area"] = item[1]["area"].translated(dx, dy)
@@ -2932,6 +3045,35 @@ class Layout:
             ascent = h + m_top + m_bottom
             return ("box", w + m_left + m_right, element, style, link, ascent, 0.0, ascent,
                     (m_left, m_top, w, m_bottom))
+        if self._measuring:
+            # Measured, a box comes out the same each time it is met in the
+            # same room: remembered per pass. Measured afresh inside every
+            # measurement of the boxes around it, the work doubled at each
+            # inline-block, and YouTube's buttons (a dozen deep) were laid
+            # out four hundred times; its channel page took half a minute.
+            key = ("inline", id(element), id(style), round(available, 3),
+                   getattr(self, "_grid_measuring", 0))
+            found = self._measured.get(key)
+            if found is not None:
+                box, reach, baseline = found[0]
+                self._line_reach = max(getattr(self, "_line_reach", 0.0), reach)
+                self._last_baseline = baseline
+                return box[:4] + (link,) + box[5:]
+            reach = getattr(self, "_line_reach", 0.0)
+            self._line_reach = 0.0
+            try:
+                box = self._inline_box_now(element, style, link, available,
+                                           margin, padding, border, edges)
+            finally:
+                inner = getattr(self, "_line_reach", 0.0)
+                self._line_reach = max(reach, inner)
+            if box is not None:
+                self._measured[key] = ((box, inner, self._last_baseline), element, style)
+            return box
+        return self._inline_box_now(element, style, link, available, margin, padding, border, edges)
+
+    def _inline_box_now(self, element, style, link, available, margin, padding, border, edges):
+        m_top, m_right, m_bottom, m_left = (m or 0.0 for m in margin)
         fixed = self._length(style.get("width"), available)
         if self._measuring and _is_percentage(style.get("width")):
             fixed = None             # measured, a percentage of the room counts as auto
@@ -2968,11 +3110,13 @@ class Layout:
         self._floats, self._absolute, self._fixed = [], [[]], []
         self.out = DisplayList()
         self._runs = []
+        self._scratching += 1
         try:
             self._last_baseline = None
             height = self._item_box(element, style, 0.0, 0.0, border_width)
             baseline = self._last_baseline
         finally:
+            self._scratching -= 1
             self.out, self._runs = saved, saved_runs
             self._floats, self._absolute, self._fixed = held
         if baseline is None:
@@ -3358,12 +3502,25 @@ class Layout:
                 justify = style.get("justify-items", "stretch") or "stretch"
             fixed = self._length(child_style.get("width"), cell)
             m_left, m_right = margin[3] or 0.0, margin[1] or 0.0
+            edges_x = padding[1] + padding[3] + border[1] + border[3]
+            auto_margins = margin[3] is None or margin[1] is None
             if fixed is not None:
-                border_width = fixed + padding[1] + padding[3] + border[1] + border[3]
-            elif justify in ("stretch", "normal"):
+                border_width = self._outer(child_style, fixed, edges_x)
+            elif justify in ("stretch", "normal") and not auto_margins:
                 border_width = cell - m_left - m_right
             else:
+                # an auto margin takes the room instead: the item is as wide
+                # as what it holds
                 border_width = min(content(child, child_style, False), cell - m_left - m_right)
+            # its max-width and min-width hold it, as anywhere: ChatGPT's
+            # composer (width 100%, max-width 768px, centred by auto margins)
+            # had filled the whole window
+            most = self._length(child_style.get("max-width"), cell)
+            if most is not None:
+                border_width = min(border_width, self._outer(child_style, most, edges_x))
+            least = self._length(child_style.get("min-width"), cell)
+            if least is not None:
+                border_width = max(border_width, self._outer(child_style, least, edges_x))
             fixed_height = self._length(child_style.get("height"), 0.0, vertical=True)
             if child.tag == "svg":
                 height = self._svg_size(child, child_style, border_width)[1]
@@ -3417,6 +3574,12 @@ class Layout:
             spare_x = cell_w - border_width - m_left - m_right
             offset_x = {"center": spare_x / 2, "end": spare_x, "flex-end": spare_x,
                         "right": spare_x}.get(justify, 0.0)
+            if margin[3] is None and margin[1] is None:
+                offset_x = max(0.0, spare_x) / 2          # auto margins both sides: centred
+            elif margin[3] is None:
+                offset_x = max(0.0, spare_x)
+            elif margin[1] is None:
+                offset_x = 0.0
             align = child_style.get("align-self", "auto")
             if align in ("auto", "normal", ""):
                 align = style.get("align-items", "stretch") or "stretch"
@@ -3924,14 +4087,85 @@ def svg_markup(element: Element, style: dict) -> str:
             parts.append(f'{name}="{_svg_escape(value)}"')
         return (" " + " ".join(parts)) if parts else ""
 
-    def render(node, root=False):
+    def render(node, root=False, depth=0):
         tag = _SVG_NAMES.get(node.tag, node.tag)
+        if node.tag == "use" and depth < 8:
+            shown = _svg_use(node, element, render, depth)
+            if shown is not None:
+                return shown
         inner = []
         for child in node.children:
             if isinstance(child, Element):
-                inner.append(render(child))
+                inner.append(render(child, depth=depth))
             else:
                 inner.append(_svg_escape(child.data))
         return f"<{tag}{attributes(node, root)}>{''.join(inner)}</{tag}>"
 
     return render(element, root=True)
+
+
+_SVG_IDS: dict = {}
+
+
+def _svg_use(use: Element, svg: Element, render, depth: int):
+    """<use href="#name"> drawn as what it names, from anywhere in the page:
+    a <symbol> (or any element) put in its place, scaled from the symbol's
+    viewBox to the room the <use> gives it. ChatGPT draws every icon from a
+    sprite of symbols elsewhere in the page; each <svg> drawn alone had
+    named nothing, and its icons were blank. None when the name is unknown."""
+    target = (use.attrs.get("href") or use.attrs.get("xlink:href") or "").strip()
+    if not target.startswith("#") or len(target) < 2:
+        return None
+    top = svg
+    while isinstance(getattr(top, "parent", None), Element):
+        top = top.parent
+    known = _SVG_IDS.get(id(top))
+    if known is None or known[0] is not top:
+        found = {}
+        for node in top.elements():
+            name = node.attrs.get("id")
+            if name and name not in found and (node.tag == "symbol" or node.tag in _SVG_DRAWN):
+                found[name] = node
+        if len(_SVG_IDS) > 8:
+            _SVG_IDS.clear()
+        known = _SVG_IDS[id(top)] = (top, found)
+    named = known[1].get(target[1:])
+    if named is None or named is use:
+        return None
+
+    def number(value, fallback):
+        try:
+            return float(str(value).replace("px", "").strip())
+        except (TypeError, ValueError):
+            return fallback
+
+    x, y = number(use.attrs.get("x"), 0.0), number(use.attrs.get("y"), 0.0)
+    moves = [f"translate({x} {y})"] if x or y else []
+    if named.tag == "symbol":
+        box = [number(v, 0.0) for v in (named.attrs.get("viewbox") or "").replace(",", " ").split()]
+        outer = [number(v, 0.0) for v in (svg.attrs.get("viewbox") or "").replace(",", " ").split()]
+        width = number(use.attrs.get("width"), outer[2] if len(outer) == 4 else number(svg.attrs.get("width"), 0.0))
+        height = number(use.attrs.get("height"), outer[3] if len(outer) == 4 else number(svg.attrs.get("height"), 0.0))
+        if len(box) == 4 and box[2] > 0 and box[3] > 0 and width > 0 and height > 0:
+            scale = min(width / box[2], height / box[3])         # preserveAspectRatio: xMidYMid meet
+            dx, dy = (width - box[2] * scale) / 2, (height - box[3] * scale) / 2
+            moves.append(f"translate({dx} {dy}) scale({scale}) translate({-box[0]} {-box[1]})")
+        inner = "".join(render(child, depth=depth + 1) if isinstance(child, Element) else _svg_escape(child.data)
+                        for child in named.children)
+    else:
+        inner = render(named, depth=depth + 1)
+    keep = []
+    for name in ("fill", "stroke", "stroke-width", "opacity", "transform", "class"):
+        value = use.attrs.get(name)
+        if value and name != "class":
+            keep.append(f'{name}="{_svg_escape(value)}"')
+    transform = " ".join(moves)
+    if transform:
+        keep = [k for k in keep if not k.startswith("transform=")]
+        given = use.attrs.get("transform")
+        keep.append(f'transform="{_svg_escape((given + " " if given else "") + transform)}"')
+    return f"<g {' '.join(keep)}>{inner}</g>" if keep else f"<g>{inner}</g>"
+
+
+# what a <use> may name besides a <symbol>
+_SVG_DRAWN = {"g", "path", "circle", "ellipse", "rect", "line", "polyline", "polygon", "text", "image", "svg"}
