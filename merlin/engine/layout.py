@@ -1028,9 +1028,6 @@ class Layout:
         if hidden:
             colour = None                       # keeps its space, draws nothing
         owns_canvas = element is getattr(self, "_canvas_owner", None)
-        shadows = None if hidden or self._measuring else self._box_shadows(style)
-        if shadows and shadows[0]:
-            paint.append(("shadow", box, shadows[0], radius, False))     # under the box
         # each corner's own radius: YouTube's search box is rounded on the
         # left only, and its button on the right only; taken all round from
         # the top left, the box had come out rounded at both ends, its border
@@ -1041,6 +1038,12 @@ class Layout:
         uneven = max(corners) > 0.5 and max(corners) - min(corners) > 0.5
         if uneven:
             radius = min(corners)
+        shadows = None if hidden or self._measuring else self._box_shadows(style)
+        if shadows and shadows[0]:
+            # under the box; rounded as the box is, corner by corner (YouTube's
+            # search box: rounded on the left only, its inset shadow had been
+            # drawn square, a grey line round the rounded border)
+            paint.append(("shadow", box, shadows[0], radius, False, tuple(corners) if uneven else None))
         if colour and colour[3] > 0 and not owns_canvas \
                 and not (root_level and self.out.canvas == colour):
             if uneven:
@@ -1060,7 +1063,7 @@ class Layout:
                     paint.append(("gradient", box, gradient, radius))
         if shadows and shadows[1]:
             # inset shadows: over the background, inside the border
-            paint.append(("shadow", box, shadows[1], radius, True))
+            paint.append(("shadow", box, shadows[1], radius, True, tuple(corners) if uneven else None))
         if hidden:
             border = [0.0, 0.0, 0.0, 0.0]
         sides = ("top", "right", "bottom", "left")
@@ -1083,7 +1086,17 @@ class Layout:
         masks = style.get("mask-image")
         mask = next((layer for layer in masks if layer and layer[0] == "url"), None) \
             if isinstance(masks, list) and not self._measuring else None
-        if mask is not None and paint:
+        ring = self._mask_ring(style, masks, border, padding) if paint and not self._measuring else None
+        if ring is not None:
+            # two plain layers, one clipped to an inner box, the one taken from
+            # the other: only the ring between them shows. YouTube's buttons
+            # have a rim of light so, a gradient drawn over the whole button
+            # and kept only at its edge; Merlin had drawn all of it, a pale
+            # patch over each button
+            self.out.items[background_index] = (
+                "masked", box, ("ring",) + ring + (tuple(corners) if uneven else radius,),
+                None, None, None, paint)
+        elif mask is not None and paint:
             # the background drawn through the mask's picture: where it is
             # opaque the box shows (an icon's shape in the text's colour)
             index = masks.index(mask)
@@ -1221,6 +1234,33 @@ class Layout:
         bottom_margin = _collapse_margins(margin[2] or 0.0, escaped)
         self._last_margins = (top_margin, bottom_margin)
         return top_margin + box_height + bottom_margin
+
+    @staticmethod
+    def _mask_ring(style: dict, masks, border, padding):
+        """(left, top, right, bottom) insets of the hole when a mask is a
+        ring: two opaque layers, one clipped to the padding or content box,
+        joined by mask-composite: exclude (or -webkit-'s xor). None otherwise."""
+        if not isinstance(masks, list) or len(masks) != 2:
+            return None
+        if any(not layer or layer[0] == "url" for layer in masks):
+            return None
+        composite = str(style.get("mask-composite") or "").split(",")[0].strip().lower()
+        if composite not in ("exclude", "xor"):
+            return None
+        for layer in masks:
+            stops = layer[2] if len(layer) > 2 and isinstance(layer[2], list) else None
+            if not stops or any(not colour or colour[3] < 255 for colour, _at in stops):
+                return None                     # not a plain, opaque layer
+        clips = [c.strip().lower() for c in str(style.get("mask-clip") or "").split(",")]
+        clips = (clips + ["border-box", "border-box"])[:2]
+        if len(set(clips)) != 2 or "border-box" not in clips:
+            return None
+        inner = next(c for c in clips if c != "border-box")
+        insets = [border[3], border[0], border[1], border[2]]
+        if inner == "content-box":
+            insets = [insets[0] + padding[3], insets[1] + padding[0],
+                      insets[2] + padding[1], insets[3] + padding[2]]
+        return tuple(float(v) for v in insets)
 
     def _box_shadows(self, style: dict):
         """box-shadow as (outer, inset), each a list of (dx, dy, blur, spread,
@@ -1854,7 +1894,17 @@ class Layout:
         if reverse:
             kind = {"flex-start": "flex-end", "start": "end", "left": "right",
                     "flex-end": "flex-start", "end": "start", "right": "left"}.get(kind, kind)
-        if spare <= 0 or count == 0:
+        if count == 0 or spare == 0:
+            return 0.0, 0.0
+        if spare < 0:
+            # more than fits: centred items overflow both ends, and items at
+            # the end overflow the start, as browsers do (YouTube's 40-pixel
+            # clear button, centred in its 24-pixel holder, sits 8 pixels out
+            # on each side; Merlin had let it hang off the right and bottom)
+            if kind in ("flex-end", "end", "right"):
+                return spare, 0.0
+            if kind in ("center", "space-around", "space-evenly"):
+                return spare / 2, 0.0
             return 0.0, 0.0
         if kind in ("flex-end", "end", "right"):
             return spare, 0.0
@@ -1960,7 +2010,14 @@ class Layout:
                     # centred, puts the "About this result" button beside the
                     # name; aligned in its content's height it fell 19 lower
                     cross = min(cross, most)
-                cross = max(cross, room or 0.0, least or 0.0)
+                if room is not None and room > 0:
+                    # a container of a set height: the line is that tall,
+                    # whatever it holds, which aligns in it and overflows it
+                    # if larger (YouTube's clear button, centred in a box
+                    # smaller than itself)
+                    cross = max(room, least or 0.0)
+                else:
+                    cross = max(cross, least or 0.0)
 
             pen = x + start
             for entry, height in zip(line, heights):

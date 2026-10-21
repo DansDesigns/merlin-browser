@@ -119,8 +119,7 @@ class ScriptHost(QObject):
 
         self.errors = deque(maxlen=30)
         threading.Thread(target=self._read_errors, daemon=True).start()
-        self._lock = threading.Lock()
-        self._closed = False
+        self._start_writer()
         # the process goes with its tab: when the view is deleted, this is too,
         # and a process had been left running for every tab closed
         process = self.process
@@ -156,18 +155,57 @@ class ScriptHost(QObject):
         return f"code {code}" + (f": {tail[:600]}" if tail else "")
 
     def send(self, message: dict) -> None:
+        """Hand a message to the page's scripts. It is written to Node by a
+        thread of its own, in order; this never waits for Node."""
         if self._closed:
             return
+        kind = message.get("type")
         data = (json.dumps(message) + "\n").encode("utf-8")
-        with self._lock:
+        with self._waiting:
+            if kind == "geometry" and self._outgoing and self._outgoing[-1][0] == "geometry":
+                # where everything is, again, before Node had read the last:
+                # only the latest is any use
+                self._outgoing[-1] = (kind, data)
+            else:
+                self._outgoing.append((kind, data))
+            self._waiting.notify()
+
+    def _start_writer(self) -> None:
+        """What is sent waits for a thread of its own to write it: while Node
+        runs a page's scripts it reads nothing, its pipe fills, and a write
+        waited with it. Every write had been made on the window's own thread,
+        which stood still for up to a second and a quarter at a time while
+        YouTube loaded, nothing in Merlin answering a click or a key."""
+        from collections import deque
+
+        self._lock = threading.Lock()
+        self._closed = False
+        self._outgoing = deque()
+        self._waiting = threading.Condition(self._lock)
+        threading.Thread(target=self._write, daemon=True).start()
+
+    def _write(self) -> None:
+        stream = self.process.stdin
+        while True:
+            with self._waiting:
+                while not self._outgoing and not self._closed:
+                    self._waiting.wait()
+                if self._closed:
+                    return
+                batch = b"".join(data for _kind, data in self._outgoing)
+                self._outgoing.clear()
             try:
-                self.process.stdin.write(data)
-                self.process.stdin.flush()
+                stream.write(batch)
+                stream.flush()
             except (BrokenPipeError, OSError, ValueError):
-                self._closed = True
+                with self._waiting:
+                    self._closed = True
+                return
 
     def stop(self) -> None:
-        self._closed = True
+        with self._waiting:
+            self._closed = True
+            self._waiting.notify()
         try:
             self.process.kill()
         except Exception:                                  # noqa: BLE001

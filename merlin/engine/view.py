@@ -85,6 +85,28 @@ def _subresource(headers: dict, destination: str) -> None:
     headers.pop("Upgrade-Insecure-Requests", None)
 
 
+_IMAGE_ACCEPT: dict = {}
+
+
+def image_accept(svg: bool = False) -> str:
+    """The Accept header for a picture: only the formats Merlin can draw.
+    Chrome's list starts with AVIF, which Qt reads only with a plugin most
+    systems lack; Microsoft's picture servers choose the format by this
+    header, sent AVIF, and its pages' pictures never showed."""
+    key = bool(svg)
+    if key not in _IMAGE_ACCEPT:
+        try:
+            from PyQt6.QtGui import QImageReader
+
+            readable = {bytes(f).decode().lower() for f in QImageReader.supportedImageFormats()}
+        except Exception:                                  # noqa: BLE001
+            readable = {"png", "jpeg", "gif"}
+        kinds = [f"image/{name}" for name in ("avif", "webp") if name in readable]
+        kinds += ["image/apng", "image/png"] + (["image/svg+xml"] if svg else [])
+        _IMAGE_ACCEPT[key] = ",".join(kinds) + ",image/*;q=0.8,*/*;q=0.5"
+    return _IMAGE_ACCEPT[key]
+
+
 def page_headers(user_agent: str = "") -> dict:
     """What a browser sends when it asks for a page."""
     return {"User-Agent": user_agent or USER_AGENT,
@@ -143,12 +165,60 @@ def cookie_opener(jar, lenient: str = ""):
         # connections made as Chrome makes them: sites that look for robots
         # tell Python's from a browser's by the handshake alone
         return chromelike.ChromeOpener(jar, lenient)
+    if jar is None and not lenient:
+        return None
+    # made once for each jar and leniency, not for every request: each made
+    # its own TLS context, loading the system's certificates afresh, on the
+    # window's thread (a second and a quarter while YouTube loaded)
+    key = (id(jar), lenient)
+    with _OPENERS_LOCK:
+        known = _OPENERS.get(key)
+        if known is not None and known[0] is jar:
+            return known[1]
     handlers = []
     if jar is not None:
         handlers.append(urllib.request.HTTPCookieProcessor(jar))
     if lenient:
         handlers.append(urllib.request.HTTPSHandler(context=lenient_context(lenient)))
-    return urllib.request.build_opener(*handlers) if handlers else None
+    opener = urllib.request.build_opener(*handlers)
+    with _OPENERS_LOCK:
+        if len(_OPENERS) > 64:
+            _OPENERS.clear()
+        _OPENERS[key] = (jar, opener)
+    return opener
+
+
+_OPENERS: dict = {}
+_OPENERS_LOCK = threading.Lock()
+
+
+_LAUNCHES: "queue.SimpleQueue | None" = None
+
+
+def _spawn(target, *args) -> None:
+    """Run target(*args) on a thread of its own, started by a launcher
+    thread: starting a thread waits for it to begin, and while YouTube loaded
+    the window's thread spent a third of a second just starting the hundreds
+    of fetches its scripts asked for."""
+    global _LAUNCHES
+    with _OPENERS_LOCK:
+        if _LAUNCHES is None:
+            _LAUNCHES = _start_launcher()
+    _LAUNCHES.put((target, args))
+
+
+def _start_launcher():
+    import queue
+
+    launches = queue.SimpleQueue()
+
+    def launcher():
+        while True:
+            job, given = launches.get()
+            threading.Thread(target=job, args=given, daemon=True).start()
+
+    threading.Thread(target=launcher, daemon=True, name="merlin-launcher").start()
+    return launches
 
 
 def certificate_failure(text) -> str:
@@ -1302,7 +1372,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             except RuntimeError:
                 pass                     # the tab was closed while this loaded
 
-        threading.Thread(target=work, daemon=True).start()
+        _spawn(work)
 
     def _certificate_page(self, problem: str, skew) -> str:
         """Why a page could not be opened, for its certificate, and a way on."""
@@ -1522,6 +1592,9 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             self._sheets = None                 # the page's own <style> blocks
         self._clear_controls()
         self._images = {}
+        # pictures being fetched now: asked for again (a page's scripts change
+        # it many times a second while it loads) they are not fetched again
+        self._images_coming = set()
         self._icon = QIcon()
         self._element_count = sum(1 for _ in self._document.root.elements())
         if self._element_count > BIG_PAGE:
@@ -1573,7 +1646,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
         """
         number = self._load_number
         headers = dict(self._headers())
-        headers["Accept"] = "image/avif,image/webp,image/png,image/*;q=0.8,*/*;q=0.5"
+        headers["Accept"] = image_accept()
         _subresource(headers, "image")
         page = self._url.toString()
         if page.startswith(("http://", "https://")):
@@ -1584,7 +1657,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             if element.tag != "img" or self._styles.get(element, {}).get("display") == "none":
                 continue
             src = element.attrs.get("src", "").strip()
-            if not src or src in self._images or src in wanted:
+            if not src or src in self._images or src in wanted or src in self._coming():
                 continue
             address = self._url.resolved(QUrl(src)).toString()
             if self._blocked(address, "image"):
@@ -1605,7 +1678,8 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
                 if not (isinstance(layer, tuple) and layer and layer[0] == "url"):
                     continue
                 src = layer[1]
-                if not src or src in self._images or src in wanted or src.startswith("#"):
+                if not src or src in self._images or src in wanted or src.startswith("#") \
+                        or src in self._coming():
                     continue
                 if self._blocked(self._url.resolved(QUrl(src)).toString(), "image"):
                     self._images[src] = False
@@ -1629,8 +1703,9 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             # cookies go only to the page's own site: another site's images
             # never learn who is looking
             same = _registrable(QUrl(address).host()) == page_site
-            ok, _final, data, _kind = fetch_bytes(address, headers,
-                                                  opener=own_opener if same else plain_opener)
+            started = time.monotonic()
+            ok, _final, data, kind = fetch_bytes(address, headers,
+                                                 opener=own_opener if same else plain_opener)
             if not ok:
                 problem = certificate_failure(data)
                 if problem:
@@ -1639,6 +1714,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             decoded = None
             if ok and data and b"<svg" not in data[:4096]:
                 decoded = QImage.fromData(data)
+            self._log_picture(address, ok, data, kind, decoded, started)
             try:
                 self._image_fetched.emit(number, src, decoded if decoded is not None
                                          else (data if ok else b""), ok)
@@ -1647,7 +1723,8 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
 
         for src in wanted[:200]:                  # enough for any ordinary page
             address = self._url.resolved(QUrl(src)).toString()
-            threading.Thread(target=work, args=(src, address), daemon=True).start()
+            self._coming().add(src)
+            _spawn(work, src, address)
 
     def _load_fonts(self) -> None:
         """Fetch the page's web fonts, once it shows, and lay it out with them.
@@ -1709,7 +1786,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
                 list(pool.map(get, chosen[:40]))
 
-        threading.Thread(target=work, daemon=True).start()
+        _spawn(work)
 
     def _on_font(self, number: int, family: str, data: bytes) -> None:
         if number != self._load_number:
@@ -1760,7 +1837,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             return
         number = self._load_number
         headers = dict(self._headers())
-        headers["Accept"] = "image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5"
+        headers["Accept"] = image_accept(svg=True)
         _subresource(headers, "image")
         same = _registrable(QUrl(address).host()) == _registrable(self._url.host())
         lenient = self._leniency(self._url.host())
@@ -1775,7 +1852,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
                 except RuntimeError:
                     pass                             # the tab was closed
 
-        threading.Thread(target=work, daemon=True).start()
+        _spawn(work)
 
     def _on_icon(self, number: int, data: bytes) -> None:
         from PyQt6.QtGui import QPixmap
@@ -1808,6 +1885,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             if (picture is None or picture.isNull()) and ok and data:
                 picture = QImage.fromData(data)
         self._images[src] = picture if picture is not None and not picture.isNull() else False
+        self._coming().discard(src)
         self._report_image(src)
         self._media_picture_arrived(src)         # a video's poster (mediaview.py)
         if self._image_moves_layout(src):
@@ -1832,34 +1910,66 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
                            "ok": bool(picture), "width": size.width() if size else 0,
                            "height": size.height() if size else 0})
 
+    def _log_picture(self, address: str, ok: bool, data, kind: str, decoded, started: float) -> None:
+        """A picture's fetch in the network log, for the debugging zip: a
+        picture that never shows (YouTube's thumbnails) is told apart there,
+        not fetched, refused, or not one Qt can read."""
+        if address.startswith("data:"):
+            return
+        took = int((time.monotonic() - started) * 1000)
+        if not ok:
+            note = f"failed: {str(data)[:120]}"
+            size = 0
+        else:
+            size = len(data or b"")
+            unread = decoded is not None and decoded.isNull()
+            note = f"picture, {kind or 'no type'}" + (", which Qt could not read" if unread else "")
+        try:
+            self.network_lines.append(f"{'IMAGE':6} {'200' if ok else 'failed':6} {size:>9} B {took:>6} ms  "
+                                      f"{address}  ({note})")
+        except RuntimeError:
+            pass
+
+    def _coming(self) -> set:
+        """The pictures being fetched for this page now."""
+        coming = getattr(self, "_images_coming", None)
+        if coming is None:
+            coming = self._images_coming = set()
+        return coming
+
     def _want_image(self, src: str) -> None:
         """A page's script waits on an image (one in the page, or new Image()):
         told now if it is known, else fetched as the page's images are."""
         if src in self._images:
             self._report_image(src)
             return
+        if src in self._coming():
+            return                    # told when it comes, as the page's own are
         address = self._url.resolved(QUrl(src)).toString()
         if self._blocked(address, "image"):
             self._images[src] = False
             self._report_image(src)
             return
         number = self._load_number
+        self._coming().add(src)
         headers = dict(self._headers())
+        headers["Accept"] = image_accept()
         _subresource(headers, "image")
         lenient = self._leniency(self._url.host())
         same = _registrable(QUrl(address).host()) == _registrable(self._url.host())
         opener = cookie_opener(self._cookies() if same else None, lenient)
 
         def work():
-            ok, _final, data, _kind = fetch_bytes(address, headers, opener=opener)
+            started = time.monotonic()
+            ok, _final, data, kind = fetch_bytes(address, headers, opener=opener)
             decoded = QImage.fromData(data) if ok and data and b"<svg" not in data[:4096] else None
+            self._log_picture(address, ok, data, kind, decoded, started)
             try:
                 self._image_fetched.emit(number, src, decoded if decoded is not None
                                          else (data if ok else b""), ok)
             except RuntimeError:
                 pass
-        self._images.setdefault("__pending__" + src, True)
-        threading.Thread(target=work, daemon=True).start()
+        _spawn(work)
 
     def _image_moves_layout(self, src: str) -> bool:
         """Whether an image arriving changes the layout: only if no size is given.
@@ -1908,7 +2018,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             except RuntimeError:
                 pass                             # the tab was closed
 
-        threading.Thread(target=work, daemon=True).start()
+        _spawn(work)
 
     def _on_restyled(self, number: int, answer) -> None:
         self._restyling = False
@@ -2378,7 +2488,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
                 self._answered_values = {}
         elif kind == "want_image":
             src = str(message.get("src", ""))
-            if src and not self._images.get("__pending__" + src):
+            if src:
                 self._want_image(src)
         elif kind == "panel_scroll_to":
             # a page's script moved a panel (scrollTop, scrollTo)
@@ -2562,7 +2672,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             answer.update(type="answer", id=message.get("id"))
             host.send(answer)
 
-        threading.Thread(target=work, daemon=True).start()
+        _spawn(work)
 
     def _script_dom(self, markup: str, title: str) -> None:
         """The page as scripts left it: styled off the UI thread, then shown.
@@ -2616,7 +2726,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             except RuntimeError:
                 pass
 
-        threading.Thread(target=work, daemon=True).start()
+        _spawn(work)
 
     def _script_rested(self) -> None:
         if self._script_queued is not None and self._script is not None:
@@ -2784,7 +2894,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
                 styler = None
             self._partial_ready.emit(key, styler)
 
-        threading.Thread(target=work, daemon=True).start()
+        _spawn(work)
         return None
 
     def _on_partial_ready(self, key, styler) -> None:
@@ -2977,7 +3087,7 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
             except RuntimeError:
                 pass                                 # the tab was closed
 
-        threading.Thread(target=work, daemon=True).start()
+        _spawn(work)
 
     def _on_laid_out(self, number: int, out) -> None:
         self._layout_running = False

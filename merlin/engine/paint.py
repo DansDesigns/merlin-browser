@@ -517,10 +517,11 @@ def _draw(painter, item, visible: QRectF, images) -> None:
                 painter.fillRect(rect, QColor(0, 0, 0))
     elif kind == "shadow":
         box, shadows, radius, inset = item[1], item[2], item[3], item[4]
+        corners = item[5] if len(item) > 5 else None
         reach = max((abs(dx) + abs(dy) + blur + abs(spread) for dx, dy, blur, spread, _c in shadows),
                     default=0.0)
         if box.adjusted(-reach, -reach, reach, reach).intersects(visible):
-            draw_shadows(painter, box, shadows, radius, inset)
+            draw_shadows(painter, box, shadows, radius, inset, corners)
     elif kind == "dashed":
         rect, rgba, style = item[1], item[2], item[3]
         if rect.intersects(visible) and rgba:
@@ -657,7 +658,7 @@ def _shape(rect: QRectF, radius: float) -> QPainterPath:
     return path
 
 
-def draw_shadows(painter, box: QRectF, shadows, radius: float, inset: bool) -> None:
+def draw_shadows(painter, box: QRectF, shadows, radius: float, inset: bool, corners=None) -> None:
     """box-shadow: each shadow (dx, dy, blur, spread, rgba), the first on top.
 
     An outer shadow is drawn outside the box only, as browsers do (a box with
@@ -667,7 +668,13 @@ def draw_shadows(painter, box: QRectF, shadows, radius: float, inset: bool) -> N
     painter.save()
     painter.setRenderHint(painter.RenderHint.Antialiasing, True)
     painter.setPen(Qt.PenStyle.NoPen)
-    outline = _shape(box, radius)
+    def shape(rect, change):
+        # the box's outline grown or shrunk by change, each corner with it
+        if corners:
+            return corner_path(rect, [max(0.0, c + change) if c > 0.5 else 0.0 for c in corners])
+        return _shape(rect, max(0.0, radius + change) if radius > 0.5 else 0.0)
+
+    outline = corner_path(box, corners) if corners else _shape(box, radius)
     for dx, dy, blur, spread, rgba in reversed(shadows):
         if not rgba or rgba[3] == 0:
             continue
@@ -692,13 +699,14 @@ def draw_shadows(painter, box: QRectF, shadows, radius: float, inset: bool) -> N
                 path = QPainterPath()
                 path.addRect(box.adjusted(-reach, -reach, reach, reach))
                 if hole.width() > 0 and hole.height() > 0:
-                    path = path.subtracted(_shape(hole, max(0.0, radius - spread + grow)))
+                    path = path.subtracted(corner_path(hole, [max(0.0, c - spread + grow) for c in corners])
+                                           if corners else _shape(hole, max(0.0, radius - spread + grow)))
             else:
                 grown = box.translated(dx, dy).adjusted(-spread - grow, -spread - grow,
                                                         spread + grow, spread + grow)
                 if grown.width() <= 0 or grown.height() <= 0:
                     continue
-                path = _shape(grown, max(0.0, radius + spread + grow) if radius > 0.5 else 0.0)
+                path = shape(grown, spread + grow)
             painter.fillPath(path, colour)
         painter.restore()
     painter.restore()
@@ -725,6 +733,26 @@ def _draw_masked(painter, item, visible: QRectF, images) -> None:
     nothing is drawn, as in browsers (an icon is not a filled square first)."""
     _kind, rect, source, size, position, repeat, parts = item
     if not rect.intersects(visible) or rect.width() < 0.5 or rect.height() < 0.5:
+        return
+    if isinstance(source, tuple) and source and source[0] == "ring":
+        # only the ring between the box's edge and an inner box shows
+        _ring, left, top, right, bottom, rounding = source
+        hole = rect.adjusted(left, top, -right, -bottom)
+        if isinstance(rounding, tuple):
+            outer = corner_path(rect, rounding)
+            shrink = max(left, top, right, bottom)
+            inner = corner_path(hole, [max(0.0, r - shrink) for r in rounding])
+        else:
+            outer = _shape(rect, rounding)
+            inner = _shape(hole, max(0.0, rounding - max(left, top, right, bottom)))
+        painter.save()
+        painter.setRenderHint(painter.RenderHint.Antialiasing, True)
+        painter.setClipPath(outer.subtracted(inner) if hole.width() > 0 and hole.height() > 0 else outer,
+                            Qt.ClipOperation.IntersectClip)
+        for part in parts:
+            if part is not None:
+                _draw(painter, part, visible, images)
+        painter.restore()
         return
     picture = images.get(source)
     if picture is None or picture is False or (hasattr(picture, "isNull") and picture.isNull()):

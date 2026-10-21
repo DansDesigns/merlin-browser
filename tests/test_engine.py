@@ -5980,6 +5980,192 @@ setTimeout("document.getElementById('timer').textContent = 'string ran'", 50);
     wait(app, 0.3)
 
 
+def test_search_box_columns_and_a_quick_window(app) -> None:
+    """YouTube's search box (a rounded inset shadow, a clear button centred in
+    a holder smaller than itself), Microsoft's two-column sections (flex: 0 0
+    calc(...)) and pictures (never asked for as AVIF, which Qt cannot draw),
+    and the window kept answering while a page loads."""
+    import subprocess
+
+    from PyQt6.QtCore import QBuffer, QByteArray, QIODevice, QObject
+    from PyQt6.QtGui import QColor, QImage, QImageReader, QPainter
+
+    from merlin.engine import MerlinView
+    from merlin.engine import chromelike
+    from merlin.engine import view as view_module
+    from merlin.engine.css import Styler, expand_shorthand
+    from merlin.engine.html import parse
+    from merlin.engine.layout import Layout
+    from merlin.engine.paint import draw_shadows
+    from merlin.engine.script import ScriptHost
+
+    def laid(markup, width=1000):
+        doc = parse("<body style='margin:0'>" + markup)
+        styles = Styler(doc).compute()
+        return Layout(doc, styles, width).run()
+
+    def rects(out):
+        found = {}
+        for r, e in out.boxes:
+            name = getattr(e, "attrs", {}).get("id")
+            if name and name not in found:
+                found[name] = (round(r.x()), round(r.y()), round(r.width()), round(r.height()))
+        return found
+
+    def flat(items):
+        for item in items:
+            if item and item[0] == "group":
+                yield from flat(item[1])
+            elif item:
+                yield item
+
+    # the search box: rounded on the left only, its inset shadow with it
+    out = laid("<div id=box style='width:300px;height:80px;border:1px solid #1c62b9;"
+               "border-radius:40px 0 0 40px;box-shadow:inset 0 1px 2px #eee'></div>")
+    shadows = [i for i in flat(out.items) if i[0] == "shadow"]
+    check("an inset shadow keeps each corner's own radius (YouTube's search box)",
+          bool(shadows) and len(shadows[0]) > 5 and shadows[0][5] == (40.0, 0.0, 0.0, 40.0),
+          str(shadows[:1]))
+
+    def corner_pixel(corners):
+        picture = QImage(302, 82, QImage.Format.Format_ARGB32)
+        picture.fill(QColor("white"))
+        painter = QPainter(picture)
+        draw_shadows(painter, QRectF(0, 0, 302, 82), [(0.0, 1.0, 2.0, 0.0, (120, 120, 120, 255))],
+                     0.0, True, corners)
+        painter.end()
+        return picture.pixelColor(2, 2).red(), picture.pixelColor(150, 0).red()
+
+    rounded, square = corner_pixel((40.0, 0.0, 0.0, 40.0)), corner_pixel(None)
+    check("so no grey corner is drawn outside the rounded border",
+          rounded[0] == 255 and square[0] < 255 and rounded[1] < 255, f"{rounded} {square}")
+
+    out = laid("<button id=b style='width:40px;height:40px;border:0;padding:0 8px'>x</button>")
+    check("a button's width and height include its padding, as in browsers (box-sizing: border-box)",
+          rects(out).get("b", (0, 0, 0, 0))[2:] == (40, 40), str(rects(out).get("b")))
+    out = laid("<div id=w style='display:flex;align-items:center;justify-content:center;"
+               "width:24px;height:24px;margin:50px 0 0 100px'>"
+               "<div id=c style='width:40px;height:40px;flex-shrink:0;background:red'></div></div>")
+    check("an item larger than its flex box, centred, overflows it equally on each side "
+          "(YouTube's clear button, in its 24-pixel holder)",
+          rects(out).get("c") == (92, 42, 40, 40), str(rects(out)))
+    out = laid("<div style='display:flex;justify-content:flex-end;width:100px'>"
+               "<div id=e style='width:140px;flex-shrink:0;height:10px;background:red'></div></div>")
+    check("and one at the end overflows the start", rects(out).get("e", (0,))[0] == -40, str(rects(out)))
+
+    out = laid("<style>.r{position:relative;width:90px;height:36px;border-radius:18px;background:#0f0f0f}"
+               ".r:before{content:'';position:absolute;inset:0;border-radius:inherit;padding:.5px;"
+               "-webkit-mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);"
+               "-webkit-mask-composite:xor;mask-composite:exclude;"
+               "background:linear-gradient(rgba(255,255,255,0.6),transparent 75%)}</style><div class=r></div>")
+    rings = [i for i in flat(out.items) if i[0] == "masked" and isinstance(i[2], tuple) and i[2][0] == "ring"]
+    check("a mask of a content box taken from the whole box leaves only a ring (YouTube's rim of "
+          "light on its buttons, which had been drawn over all of each)",
+          len(rings) == 1 and rings[0][2][1:5] == (0.5, 0.5, 0.5, 0.5), str(rings[:1])[:200])
+
+    # Microsoft's columns
+    check("flex: 0 0 calc(50% - 8px) is a basis of calc(50% - 8px)",
+          expand_shorthand("flex", "0 0 calc(50% - 8px)")[2] == ("flex-basis", "calc(50% - 8px)"),
+          str(expand_shorthand("flex", "0 0 calc(50% - 8px)")))
+    out = laid("<style>.l{--count:2;--gap:16px;--each:calc((100% - var(--gap)) / var(--count));"
+               "display:flex;flex-wrap:wrap;column-gap:var(--gap)}.l>div{flex:0 0 var(--each)}</style>"
+               "<div class=l style='width:1302px'><div id=one>one</div><div id=two>two</div></div>")
+    check("so Microsoft's two columns sit side by side, each half the row",
+          rects(out).get("one", (0, 0, 0))[2] == 643 and rects(out).get("two", (0, 0))[:2] == (659, 0),
+          str(rects(out)))
+    check("inset and border-radius with calc() in them, split only outside brackets",
+          expand_shorthand("inset", "calc(5px + 5px) calc(10px + 10px)")[1] == ("right", "calc(10px + 10px)")
+          and expand_shorthand("border-radius", "calc(10px / 2)")[0]
+          == ("border-top-left-radius", "calc(10px / 2)"),
+          str(expand_shorthand("border-radius", "calc(10px / 2)")))
+    readable = {bytes(f).decode().lower() for f in QImageReader.supportedImageFormats()}
+    accept = view_module.image_accept()
+    check("pictures are asked for only in formats Merlin can draw (AVIF only with a Qt that reads it)",
+          ("image/avif" in accept) == ("avif" in readable) and "image/png" in accept, accept)
+
+    # the window is never held up by a page's scripts being busy
+    host = ScriptHost.__new__(ScriptHost)
+    QObject.__init__(host)
+    host.process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"],
+                                    stdin=subprocess.PIPE)
+    host._start_writer()
+    try:
+        started = time.monotonic()
+        for _n in range(40):
+            host.send({"type": "answer", "body": "x" * 100000})
+        took = time.monotonic() - started
+        check("sending to scripts that read nothing does not wait (the window stood still on YouTube)",
+              took < 0.5, f"{took:.2f}s for 4 MB")
+        host.send({"type": "geometry", "n": 1})
+        host.send({"type": "geometry", "n": 2})
+        waiting = [data for kind, data in host._outgoing if kind == "geometry"]
+        check("and of two layouts not yet read, only the latest is kept",
+              len(waiting) == 1 and b'"n": 2' in waiting[0], str(waiting))
+    finally:
+        host.stop()
+        host.process.kill()
+    ran = threading.Event()
+    view_module._spawn(ran.set)
+    check("work handed to a thread of its own runs", ran.wait(2))
+    was = chromelike.enabled
+    chromelike.enabled = False
+    try:
+        jar = view_module.new_cookie_jar()
+        check("a cookie jar's opener is made once, not for every request",
+              view_module.cookie_opener(jar) is view_module.cookie_opener(jar))
+    finally:
+        chromelike.enabled = was
+
+    # a picture being fetched is not fetched again, and is in the network log
+    picture = QImage(10, 10, QImage.Format.Format_RGB32)
+    picture.fill(QColor("orange"))
+    data = QByteArray()
+    buffer = QBuffer(data)
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    picture.save(buffer, "PNG")
+    png = bytes(data)
+    asked = []
+
+    class Slow(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            if self.path.endswith(".png"):
+                asked.append(self.headers.get("Accept", ""))
+                time.sleep(0.8)
+                body, kind = png, "image/png"
+            else:
+                body, kind = b"<p>text<img src='/slow.png' width=10 height=10>", "text/html"
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Slow)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    view = MerlinView()
+    view.resize(400, 300)
+    view.show()
+    try:
+        view.setUrl(QUrl(f"http://127.0.0.1:{server.server_address[1]}/"))
+        wait(app, 0.4)
+        view._load_images()
+        view._want_image("/slow.png")
+        view._load_images()
+        wait(app, 1.6)
+        check("a picture still arriving is not fetched again when asked for again",
+              len(asked) == 1, f"{len(asked)} fetches")
+        check("and not asked for as AVIF unless Merlin can draw it",
+              bool(asked) and (("avif" in asked[0]) == ("avif" in readable)), str(asked[:1]))
+        logged = [line for line in view.network_lines if "slow.png" in line]
+        check("pictures are in the network log, for the debugging zip",
+              any(line.startswith("IMAGE") and "image/png" in line for line in logged), str(logged))
+    finally:
+        server.shutdown()
+        view.close()
+
+
 def main() -> int:
     app = QApplication(sys.argv[:1])
     for test in (test_no_chromium, test_without_html_parser, test_parsing, test_cascade, test_layout,
@@ -6093,6 +6279,8 @@ def main() -> int:
     test_google_icons_ratings_and_ellipsis(app)
     print("test_streams_timers_and_templates")
     test_streams_timers_and_templates(app)
+    print("test_search_box_columns_and_a_quick_window")
+    test_search_box_columns_and_a_quick_window(app)
     if FAILED:
         print(f"\n{len(FAILED)} FAILED: " + "; ".join(FAILED))
         return 1

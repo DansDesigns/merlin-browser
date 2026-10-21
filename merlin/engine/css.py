@@ -1411,7 +1411,7 @@ input, textarea, select { border: 1px solid #8f8f9d; padding: 2px 3px; backgroun
 select { border-radius: 3px }
 button, input[type="submit"], input[type="button"], input[type="reset"] {
   border: 1px solid #8f8f9d; padding: 2px 8px; background-color: #e9e9ed; border-radius: 3px;
-  text-align: center; cursor: pointer }
+  text-align: center; cursor: pointer; box-sizing: border-box }
 input[type="checkbox"], input[type="radio"] { border: none; padding: 0; background-color: transparent;
   margin: 3px 3px 3px 4px }
 input[type="hidden"] { display: none }
@@ -2128,13 +2128,18 @@ def expand_shorthand(name: str, value: str) -> list:
         # the text's colour, masked by the icon's SVG
         if keyword in ("none", ""):
             return [("mask-image", "none")]
-        images, sizes, positions, repeats = [], [], [], []
+        images, sizes, positions, repeats, clips = [], [], [], [], []
         image_pattern = r"""(?:url\((?:[^()]|\([^()]*\))*\)|[a-z-]*gradient\((?:[^()]|\([^()]*\))*\))"""
         for layer in _split_outside(value, ","):
             found = re.search(image_pattern, layer, re.I)
             images.append(found.group(0) if found else "none")
             rest = re.sub(image_pattern, " ", layer, flags=re.I)
             words = [w for w in _split_outside(rest, " ") if w.strip()]
+            # the box each layer is clipped to (its last box word, as CSS has
+            # it): a layer clipped to the content box, taken away from one
+            # over the whole box, leaves a ring, a border drawn in a gradient
+            boxes = [w.lower() for w in words if w.lower() in ("border-box", "padding-box", "content-box")]
+            clips.append(boxes[-1] if boxes else "border-box")
             repeats.append(next((w for w in words if w.lower() in ("repeat", "no-repeat", "repeat-x", "repeat-y",
                                                                     "space", "round")), "repeat"))
             spot = " ".join(w for w in words if w.lower() not in (
@@ -2145,7 +2150,8 @@ def expand_shorthand(name: str, value: str) -> list:
             positions.append(where.strip() or "0% 0%")
             sizes.append(size.strip() or "auto")
         return [("mask-image", ", ".join(images)), ("mask-size", ", ".join(sizes)),
-                ("mask-position", ", ".join(positions)), ("mask-repeat", ", ".join(repeats))]
+                ("mask-position", ", ".join(positions)), ("mask-repeat", ", ".join(repeats)),
+                ("mask-clip", ", ".join(clips))]
     if name == "background" and "url(" in value.lower():
         images, sizes, positions, repeats = [], [], [], []
         layers = _split_outside(value, ",")
@@ -2227,7 +2233,7 @@ def expand_shorthand(name: str, value: str) -> list:
     if name == "text-decoration-line":
         return [("text-decoration", value)]
     if name == "inset":
-        values = [v for v in value.split() if v]
+        values = _split_top(value, " ")          # inset: calc(...) calc(...) is two
         if not values:
             return []
         return [(side, v) for side, v in zip(("top", "right", "bottom", "left"), _sides(values))]
@@ -2263,7 +2269,11 @@ def expand_shorthand(name: str, value: str) -> list:
                 found.append(("flex-wrap", token))
         return found
     if name == "flex":
-        tokens = value.lower().split()
+        # split at spaces outside brackets: a basis of calc(50% - 8px) is one
+        # word. Microsoft's two-column sections (flex: 0 0 calc(...)) had
+        # been taken for "0 0 calc(50%" and "-" "8px)", every column the width
+        # of its words, the second hidden behind a wrapped first
+        tokens = _split_top(value.lower(), " ")
         if tokens == ["none"]:
             return [("flex-grow", "0"), ("flex-shrink", "0"), ("flex-basis", "auto")]
         if tokens == ["auto"]:
@@ -2279,7 +2289,9 @@ def expand_shorthand(name: str, value: str) -> list:
         basis = lengths[0] if lengths else "0px"
         return [("flex-grow", grow), ("flex-shrink", shrink), ("flex-basis", basis)]
     if name == "border-radius":
-        values = [v for v in value.split("/")[0].split() if v]
+        # split outside brackets: border-radius: calc(var(--r) / 2) is one
+        # value, its "/" no separator of horizontal and vertical radii
+        values = _split_top((_split_top(value, "/") or [""])[0], " ")
         if not values:
             return []
         corners = ("top-left", "top-right", "bottom-right", "bottom-left")

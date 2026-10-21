@@ -5,6 +5,37 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.42
+  Merlin Engine:
+  - Merlin answers clicks and keys while a page loads. Everything sent to a
+    page's scripts was written on the window's own thread, which waited
+    whenever the scripts were too busy to read: up to a second and a quarter
+    at a time on YouTube. It is now written by a thread of its own. Fetches
+    no longer each build a new connection setup on the window's thread, and
+    starting the threads for them no longer holds it up. Loading YouTube and
+    searching it kept the window busy for 4.5 seconds; now 1.3.
+  - Pictures are asked for only in formats Merlin can draw. Merlin had said
+    it took AVIF, which Qt cannot read without a plugin; Microsoft's picture
+    server chose AVIF for that reason, and its pages' large pictures never
+    showed.
+  - A picture still on its way is not fetched again each time a page's
+    scripts change the page.
+  - Pictures are now in the network log of the debugging zip, with their
+    size and type, and a note when one could not be read.
+  - YouTube's search box: the grey line round its rounded left end is gone.
+    Shadows inside a box follow each corner's own rounding.
+  - YouTube's search box: the clear button (x) sits in the middle of the
+    box. Buttons now include their padding in their width and height, as in
+    browsers, and an item bigger than the flex box holding it, centred,
+    overflows it equally on both sides.
+  - YouTube's buttons no longer have a pale patch over them. A CSS mask of
+    two layers, one taken from the other, now leaves only the ring between
+    them (YouTube's rim of light round each button).
+  - Microsoft's pages show their two-column sections side by side. flex,
+    inset and border-radius written with calc() in them (calc(50% - 8px))
+    were split at the spaces inside the brackets, and the columns had come
+    out as wide as their words, one under the other.
+
 1.8.41
   Merlin Engine:
   - YouTube's cookie dialog sits in the middle of the window, at the top,
