@@ -311,6 +311,47 @@ def test_decorations_per_window(app) -> None:
     two.close()
 
 
+def test_side_tabs_reach_the_edge(app) -> None:
+    """With no title bar and the tabs down a side, the window has no border:
+    the tab list reaches the edge of the window, so pushing the pointer to the
+    edge of the screen keeps it open. A 6-pixel border there had closed it.
+    The other edges still resize the window."""
+    from PyQt6.QtCore import QPoint
+
+    window, _settings, _ = make_window(app, "t-edge", hide_window_decorations=True,
+                                       tab_orientation="left")
+    window.new_tab(page("one"))
+    window.resize(900, 600)
+    window.show()
+    window.apply_decorations(True)
+    wait(app, 0.6)
+    margins = window.centralWidget().layout().contentsMargins()
+    check("a window with no title bar has no border",
+          (margins.left(), margins.right(), margins.bottom()) == (0, 0, 0),
+          f"{margins.left()} {margins.right()} {margins.bottom()}")
+    strip = window.tabs.v_strip
+    check("the tab list down the left starts at the window's very edge",
+          strip.isVisible() and strip.mapTo(window, QPoint(0, 0)).x() == 0,
+          str(strip.mapTo(window, QPoint(0, 0))))
+    middle = window.height() // 2
+    check("the pointer at the left edge is on the tab list, not a resize border",
+          window._edges_at(QPoint(1, middle)) is None
+          and strip.rect().contains(strip.mapFrom(window, QPoint(0, middle))))
+    check("the other edges still resize the window",
+          window._edges_at(QPoint(window.width() - 2, middle)) == Qt.Edge.RightEdge
+          and window._edges_at(QPoint(400, window.height() - 2)) == Qt.Edge.BottomEdge
+          and window._edges_at(QPoint(400, 1)) == Qt.Edge.TopEdge)
+    window.tabs.setOrientation("right")
+    wait(app, 0.3)
+    check("and with the tabs on the right, the right edge is theirs and the left resizes",
+          window._edges_at(QPoint(window.width() - 2, middle)) is None
+          and window._edges_at(QPoint(1, middle)) == Qt.Edge.LeftEdge)
+    window.close()
+    # the settings file is shared by the tests that follow
+    _settings.set("hide_window_decorations", False)
+    _settings.set("tab_orientation", "horizontal")
+
+
 def test_address_bar_selects(app) -> None:
     """Clicking into the address bar selects the whole address."""
     from PyQt6.QtCore import QPoint as _P
@@ -2520,7 +2561,7 @@ def main() -> int:
     app = QApplication([sys.argv[0]])
     for test in (test_session, test_placeholders, test_tab_churn,
                  test_gestures, test_local_addresses, test_app_mode,
-                 test_decorations_per_window, test_address_bar_selects,
+                 test_decorations_per_window, test_side_tabs_reach_the_edge, test_address_bar_selects,
                  test_theme_after_closing_tabs, test_live_stream_offer,
                  test_builtin_player_decodes_h264,
                  test_youtube_needs_a_runtime,

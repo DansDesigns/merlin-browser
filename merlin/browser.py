@@ -36,7 +36,10 @@ from .ui import (
     start_page_html,
 )
 
-RESIZE_MARGIN = 6
+# how near a window with no title bar the pointer must be to an edge to
+# resize it from there. The window has no border of its own: this band lies
+# over its edges, not round them
+RESIZE_MARGIN = 4
 from .brand import (
     APP_BLURB, APP_NAME, APP_SCHEME, APP_VERSION, START_URLS,
 )
@@ -112,6 +115,79 @@ class _MouseNavigation(QObject):
             window.act_back.trigger() if button == Qt.MouseButton.BackButton \
                 else window.act_forward.trigger()
         return True
+
+
+class _EdgeResize(QObject):
+    """Resizing a window with no title bar, from its edges.
+
+    The window had a 6-pixel border round it for this. With the tabs down a
+    side, that border lay between the tab list and the edge of the screen:
+    pushing the pointer to the edge to open the list left the list, and it
+    closed again. Now the window has no border; the pointer near an edge,
+    over whatever is there, shows the resize cursor, and pressing there
+    resizes. The side the tab list is on has none: the list reaches the edge.
+    """
+
+    def __init__(self, window):
+        super().__init__(window)
+        self.window = window
+        self.showing = False
+
+    def eventFilter(self, watched, event):                   # noqa: N802
+        kind = event.type()
+        if kind not in (QEvent.Type.MouseMove, QEvent.Type.HoverMove, QEvent.Type.MouseButtonPress,
+                        QEvent.Type.Leave):
+            return False
+        window = getattr(self, "window", None)
+        if window is None or not getattr(window, "_frameless", False):
+            return False
+        try:
+            if kind == QEvent.Type.Leave:
+                if watched is window:
+                    self.show_cursor(None)
+                return False
+            if not isinstance(watched, QWidget) or watched.window() is not window:
+                return False
+            if kind == QEvent.Type.MouseMove and event.buttons() != Qt.MouseButton.NoButton:
+                return False                     # a drag already under way
+            point = event.globalPosition().toPoint() if hasattr(event, "globalPosition") \
+                else watched.mapToGlobal(event.position().toPoint())
+            edges = window._edges_at(window.mapFromGlobal(point))
+        except RuntimeError:
+            return False
+        if kind == QEvent.Type.MouseButtonPress:
+            if edges is None or event.button() != Qt.MouseButton.LeftButton:
+                return False
+            handle = window.windowHandle()
+            if handle is None:
+                return False
+            self.show_cursor(None)
+            handle.startSystemResize(edges)
+            return True
+        self.show_cursor(edges)
+        return False
+
+    def show_cursor(self, edges) -> None:
+        if edges is None:
+            if self.showing:
+                QApplication.restoreOverrideCursor()
+                self.showing = False
+            return
+        left, right = bool(edges & Qt.Edge.LeftEdge), bool(edges & Qt.Edge.RightEdge)
+        top, bottom = bool(edges & Qt.Edge.TopEdge), bool(edges & Qt.Edge.BottomEdge)
+        if (left and top) or (right and bottom):
+            shape = Qt.CursorShape.SizeFDiagCursor
+        elif (right and top) or (left and bottom):
+            shape = Qt.CursorShape.SizeBDiagCursor
+        elif left or right:
+            shape = Qt.CursorShape.SizeHorCursor
+        else:
+            shape = Qt.CursorShape.SizeVerCursor
+        if self.showing:
+            QApplication.changeOverrideCursor(QCursor(shape))
+        else:
+            QApplication.setOverrideCursor(QCursor(shape))
+            self.showing = True
 
 
 class _LinkCatcher(QWebEnginePage):
@@ -487,6 +563,9 @@ class BrowserWindow(QMainWindow):
         # the mouse's back and forward buttons, anywhere in this window
         self._mouse_navigation = _MouseNavigation(self)
         QApplication.instance().installEventFilter(self._mouse_navigation)
+        # resizing from the edges, with no title bar and no border
+        self._edge_resize = _EdgeResize(self)
+        QApplication.instance().installEventFilter(self._edge_resize)
         self.url_bar.setSizePolicy(QSizePolicy.Policy.Expanding,
                                    QSizePolicy.Policy.Fixed)
         self._install_completer()
@@ -1038,8 +1117,11 @@ class BrowserWindow(QMainWindow):
         self.tabs.set_frameless(hide)
         self.window_buttons_action.setVisible(
             hide and bool(self.settings.get("show_window_buttons_when_frameless")))
-        margin = RESIZE_MARGIN if hide else 0
-        self.centralWidget().layout().setContentsMargins(margin, 0, margin, margin)
+        # no border either way: the tabs down a side reach the window's edge
+        # (a border there had closed the tab list as the pointer reached it)
+        self.centralWidget().layout().setContentsMargins(0, 0, 0, 0)
+        if not hide and getattr(self, "_edge_resize", None) is not None:
+            self._edge_resize.show_cursor(None)
 
         if was_visible:
             # setWindowFlags hides the window; restore it exactly as it was
@@ -1051,21 +1133,34 @@ class BrowserWindow(QMainWindow):
             self.raise_()
             self.activateWindow()
 
+    def _tab_list_side(self):
+        """"left" or "right" when the tabs are shown down that side."""
+        tabs = getattr(self, "tabs", None)
+        side = getattr(tabs, "_orientation", "horizontal")
+        strip = getattr(tabs, "v_strip", None)
+        if side in ("left", "right") and strip is not None and strip.isVisible():
+            return side
+        return None
+
     def _edges_at(self, pos):
+        """The edges a press at pos (in this window) would resize from."""
         if not self._frameless or self.is_maximised() or self.isFullScreen():
             return None
         rect = self.rect()
-        margin = RESIZE_MARGIN + 2
+        if not rect.contains(pos):
+            return None
+        margin = RESIZE_MARGIN
+        side = self._tab_list_side()
         edges = Qt.Edge(0)
-        if pos.x() <= margin:
+        if pos.x() < margin and side != "left":
             edges |= Qt.Edge.LeftEdge
-        elif pos.x() >= rect.width() - margin:
+        elif pos.x() >= rect.width() - margin and side != "right":
             edges |= Qt.Edge.RightEdge
-        if pos.y() <= margin:
+        if pos.y() < margin:
             edges |= Qt.Edge.TopEdge
         elif pos.y() >= rect.height() - margin:
             edges |= Qt.Edge.BottomEdge
-        return edges if int(edges) else None
+        return edges if edges.value else None
 
     def showEvent(self, event):  # noqa: N802
         super().showEvent(event)
@@ -1113,42 +1208,6 @@ class BrowserWindow(QMainWindow):
         indicator = getattr(self, "swipe_indicator", None)
         if indicator is not None and indicator.isVisible():
             indicator._reposition()
-
-    def mousePressEvent(self, event):
-        try:
-            if event.button() == Qt.MouseButton.LeftButton:
-                edges = self._edges_at(event.position().toPoint())
-                if edges is not None:
-                    handle = self.windowHandle()
-                    if handle is not None:
-                        handle.startSystemResize(edges)
-                        return
-        except Exception:                                # noqa: BLE001
-            pass
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        try:
-            edges = self._edges_at(event.position().toPoint())
-        except Exception:                                # noqa: BLE001
-            edges = None
-        if edges is None:
-            self.unsetCursor()
-        else:
-            left = bool(edges & Qt.Edge.LeftEdge)
-            right = bool(edges & Qt.Edge.RightEdge)
-            top = bool(edges & Qt.Edge.TopEdge)
-            bottom = bool(edges & Qt.Edge.BottomEdge)
-            if (left and top) or (right and bottom):
-                shape = Qt.CursorShape.SizeFDiagCursor
-            elif (right and top) or (left and bottom):
-                shape = Qt.CursorShape.SizeBDiagCursor
-            elif left or right:
-                shape = Qt.CursorShape.SizeHorCursor
-            else:
-                shape = Qt.CursorShape.SizeVerCursor
-            self.setCursor(QCursor(shape))
-        super().mouseMoveEvent(event)
 
     # ------------------------------------------------------------------ tabs
     def new_tab(self, url: str | None = None, background: bool = False,

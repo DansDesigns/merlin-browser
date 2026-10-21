@@ -5,6 +5,16 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.43
+  - With the title bar hidden, the window has no border. With the tabs down
+    a side, the 6-pixel border lay between the tab list and the edge of the
+    screen: pushing the pointer to the edge to open the list moved it off
+    the list, and the list closed again. The list now reaches the edge.
+  - The window is still resized from its edges: a thin band just inside
+    each edge shows the resize cursor, except the edge the tab list is on.
+    Resizing from the edges of a window with no title bar had not worked at
+    all; a mistake made each attempt fail without a word.
+
 1.8.42
   Merlin Engine:
   - Merlin answers clicks and keys while a page loads. Everything sent to a
