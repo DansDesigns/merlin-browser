@@ -228,6 +228,48 @@ let window_, document_;
 const state = { url: "about:blank", width: 1280, height: 800, scrollX: 0, scrollY: 0, cookie: "", scheme: "light",
                 userAgent: "Mozilla/5.0", language: "en-GB", storage: {}, loaded: false };
 const geometry = new Map();      // element id -> [x, y, width, height, fixed] in page terms
+const computed = new Map();      // element id -> its computed styles that are not CSS's initial ones
+// Elements a script measured before Merlin Engine had laid them out (a
+// browser lays out at once; here layout comes after): when they have been,
+// the window is said to have been resized, so a script that placed something
+// by them places it again. YouTube's cookie dialog, centred by its own size
+// read as 0, had sat with its corner at the window's middle.
+const unmeasured = new Set();
+let remeasures = 0;
+function noteUnmeasured(element) {
+  if (unmeasured.size < 500 && remeasures < 20 && element && element.isConnected) unmeasured.add(new WeakRef(element));
+}
+// and fixed boxes (dialogs, pop-ups) a script measured, as they were then:
+// one placed by its size, then given a max-height, is placed again once laid
+// out at that height, as it would have been at once in a browser
+const measuredFixed = new Map();   // element id -> the box it was read as
+function noteMeasured(element, box) {
+  const id = ids.get(element);
+  if (id === undefined || remeasures >= 20 || measuredFixed.size > 200) return;
+  const worked = computed.get(id);
+  let own = "";
+  try { own = element.style ? element.style.position : ""; } catch (_) { own = ""; }
+  if ((worked && worked.position === "fixed") || own === "fixed") measuredFixed.set(id, box.slice(0, 4).join(","));
+}
+function remeasured() {
+  let laid = false;
+  for (const [id, was] of measuredFixed) {
+    const box = geometry.get(id);
+    if (box && box.slice(0, 4).join(",") !== was) { laid = true; break; }
+  }
+  measuredFixed.clear();
+  for (const ref of unmeasured) {
+    if (laid) break;
+    const element = ref.deref();
+    if (element && geometry.has(ids.get(element))) { laid = true; break; }
+  }
+  if (!laid) return;
+  unmeasured.clear();
+  remeasures++;
+  setTimeout(() => {
+    try { fire(globalThis, "resize"); } catch (e) { reportError(e); }
+  }, 0);
+}
 const observers = new Set();     // the live IntersectionObservers
 const panels = new Map();        // a scrolling panel's id -> [top, shown height, whole height]
 const resizers = new Set();      // the live ResizeObservers
@@ -572,12 +614,53 @@ function install(html) {
   g.requestAnimationFrame = frame; g.cancelAnimationFrame = (id) => clearTimeout(id);
   g.requestIdleCallback = (cb) => setTimeout(() => { try { cb({ didTimeout: false, timeRemaining: () => 10 }); } catch (e) { reportError(e); } }, 1);
   g.cancelIdleCallback = (id) => clearTimeout(id);
+  // Computed styles as Merlin Engine worked them out (sent with the
+  // geometry), the element's own style attribute over them as it is now,
+  // and CSS's initial values for the rest: top had been "" rather than
+  // "auto", and Polymer's dialogs (YouTube's cookie consent) took it for a
+  // position the page had set, and were never centred.
+  const INITIAL = { display: "inline", position: "static", top: "auto", right: "auto", bottom: "auto",
+    left: "auto", "z-index": "auto", "max-width": "none", "max-height": "none", "min-width": "0px",
+    "min-height": "0px", visibility: "visible", opacity: "1", overflow: "visible", "overflow-x": "visible",
+    "overflow-y": "visible", float: "none", "box-sizing": "content-box", "flex-direction": "row",
+    transform: "none", "pointer-events": "auto", "margin-top": "0px", "margin-right": "0px",
+    "margin-bottom": "0px", "margin-left": "0px", "padding-top": "0px", "padding-right": "0px",
+    "padding-bottom": "0px", "padding-left": "0px", "border-top-width": "0px", "border-right-width": "0px",
+    "border-bottom-width": "0px", "border-left-width": "0px", direction: "ltr", "font-size": "16px",
+    "line-height": "normal", "text-align": "start", "white-space": "normal", cursor: "auto",
+    "background-color": "rgba(0, 0, 0, 0)", color: "rgb(0, 0, 0)", "transition-duration": "0s",
+    "animation-name": "none", "animation-duration": "0s", "writing-mode": "horizontal-tb" };
+  const BLOCKS = new Set(["div", "p", "section", "article", "header", "footer", "nav", "main", "aside", "ul", "ol",
+    "li", "form", "h1", "h2", "h3", "h4", "h5", "h6", "html", "body", "dl", "dd", "dt", "figure", "blockquote",
+    "pre", "table", "fieldset", "details", "summary", "dialog", "address", "hr"]);
+  const kebab = (name) => name.startsWith("--") ? name : name.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase());
   g.getComputedStyle = (element) => {
-    const inline = element && element.style ? element.style : {};
+    const inline = element && element.style ? element.style : null;
+    const id = element ? ids.get(element) : undefined;
+    const worked = (id !== undefined && computed.get(id)) || {};
+    const box = id !== undefined ? geometry.get(id) : undefined;
+    const tag = element && element.localName ? element.localName.toLowerCase() : "";
+    const value = (property) => {
+      const name = kebab(String(property));
+      let own = "";
+      try { own = inline && inline.getPropertyValue ? inline.getPropertyValue(name) : ""; } catch (_) { own = ""; }
+      if (own) return own;
+      if (name in worked) return worked[name];
+      if (name === "display") {
+        if (element && element.hidden) return "none";
+        return BLOCKS.has(tag) ? "block" : (tag === "script" || tag === "style" || tag === "template" || tag === "head") ? "none" : "inline";
+      }
+      if ((name === "width" || name === "height") && box) return box[name === "width" ? 2 : 3] + "px";
+      if (name === "overflow-x" || name === "overflow-y") return worked.overflow || "visible";
+      return INITIAL[name] ?? "";
+    };
     return new Proxy({}, { get(_t, name) {
-      if (name === "getPropertyValue") return (p) => (inline.getPropertyValue ? inline.getPropertyValue(p) : "") || "";
+      if (name === "getPropertyValue") return (p) => value(p);
+      if (name === "getPropertyPriority") return () => "";
+      if (name === "length") return 0;
+      if (name === "cssText") return "";
       if (typeof name !== "string") return undefined;
-      return inline[name] || (name === "display" ? "block" : name === "visibility" ? "visible" : "");
+      return value(name);
     } });
   };
   // the entries' own class, as browsers have it: polyfills test for it
@@ -1167,8 +1250,29 @@ function install(html) {
   // where Merlin Engine laid the element out, as the window sees it now
   proto.getBoundingClientRect = function () {
     const box = geometry.get(ids.get(this));
-    if (!box) return { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, toJSON() { return this; } };
-    const [x, y, width, height, fixed] = box;
+    if (!box) {
+      noteUnmeasured(this);
+      return { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, toJSON() { return this; } };
+    }
+    noteMeasured(this, box);
+    let [x, y, width, height, fixed] = box;
+    // a fixed box placed by its own style's left and top in pixels is where
+    // they put it now, as a browser would lay it out at once: Polymer's
+    // dialogs set top: 0 and measure, to centre themselves, and had been
+    // told where the last layout had them, moving further off each time
+    try {
+      const own = this.style;
+      if (own && own.position === "fixed") {
+        const px = (value) => /^-?[\d.]+px$/.test(String(value || "").trim()) ? parseFloat(value) : null;
+        const worked = computed.get(ids.get(this)) || {};
+        const left = px(own.left), top = px(own.top);
+        if (left !== null) { x = left + (px(worked["margin-left"]) || 0); fixed = true; }
+        if (top !== null) { y = top + (px(worked["margin-top"]) || 0); fixed = true; }
+        const tallest = px(own.maxHeight), widest = px(own.maxWidth);
+        if (tallest !== null && tallest >= 0) height = Math.min(height, tallest);
+        if (widest !== null && widest >= 0) width = Math.min(width, widest);
+      }
+    } catch (_) { /* as laid out */ }
     const top = fixed ? y : y - state.scrollY, left = fixed ? x : x - state.scrollX;
     return { x: left, y: top, top, left, right: left + width, bottom: top + height, width, height, toJSON() { return this; } };
   };
@@ -1191,7 +1295,9 @@ function install(html) {
       const panel = panels.get(ids.get(this));
       if (panel && (name === "clientHeight" || name === "scrollHeight"))
         return Math.round(name === "clientHeight" ? panel[1] : panel[2]);
-      const box = geometry.get(ids.get(this)); return box ? Math.round(box[index]) : 0; } });
+      const box = geometry.get(ids.get(this));
+      if (!box) noteUnmeasured(this);
+      return box ? Math.round(box[index]) : 0; } });
   }
   // A panel that scrolls inside the page: its position read and set, as
   // scrollTop and scrollTo; the page's own for the root and body.
@@ -3154,6 +3260,11 @@ function dispatch(message) {
   if (message.type === "geometry") {
     geometry.clear();
     for (const [id, box] of Object.entries(message.boxes || {})) geometry.set(Number(id), box);
+    if (message.styles) {
+      computed.clear();
+      for (const [id, values] of Object.entries(message.styles)) computed.set(Number(id), values);
+    }
+    remeasured();
     panels.clear();
     for (const [id, panel] of Object.entries(message.panels || {})) panels.set(Number(id), panel);
     if (message.height) state.height = message.height;

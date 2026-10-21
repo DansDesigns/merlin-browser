@@ -5870,9 +5870,13 @@ document.body.appendChild(copy);
 var placed = document.body.querySelector('x-card');
 var innerCopy = document.body.querySelector('template#inner').content.firstChild.outerHTML;
 var box = document.getElementById('box'); box.innerText = 'one\ntwo';
+var probe = document.createElement('div'); document.body.appendChild(probe);
+var cs = getComputedStyle(probe);
+probe.style.position = 'fixed'; probe.style.top = '40px'; probe.style.left = '12px';
+var styled = [cs.top, cs.maxHeight, cs.getPropertyValue('min-width'), getComputedStyle(probe).display].join(',');
 document.getElementById('tpl').textContent = [beforeImport, made, heard.length, placed instanceof Card,
   innerCopy, box.innerHTML, typeof IntersectionObserverEntry,
-  'intersectionRatio' in IntersectionObserverEntry.prototype].join(' ');
+  'intersectionRatio' in IntersectionObserverEntry.prototype, styled].join(' ');
 setTimeout("document.getElementById('timer').textContent = 'string ran'", 50);
 (async function () {
   var resp = await fetch('/stream');
@@ -5961,7 +5965,15 @@ setTimeout("document.getElementById('timer').textContent = 'string ran'", 50);
               "i</i>" in text("tpl") and "[[z]]" not in text("tpl"), text("tpl"))
         check("innerText can be set, a line break a <br>", "one<br>two" in text("tpl"), text("tpl"))
         check("IntersectionObserverEntry is there, as polyfills look for it",
-              text("tpl").endswith("function true"), text("tpl"))
+              "function true" in text("tpl"), text("tpl"))
+        check("getComputedStyle() gives CSS's initial values, not \"\" (YouTube's cookie dialog)",
+              text("tpl").endswith("40px,none,0px,block"), text("tpl"))
+        element = view._document.root
+        view._hover_linger = {id(element): (element, time.monotonic() + 0.4)}
+        before = view._hover_linger[id(element)][1]
+        view._pause_lingering(0.5)
+        check("a menu lingering open waits out the time Merlin spent laying the page out (AlterniTech's)",
+              abs(view._hover_linger[id(element)][1] - before - 0.5) < 0.01, str(view._hover_linger))
     finally:
         view.shutdown()
         server.shutdown()

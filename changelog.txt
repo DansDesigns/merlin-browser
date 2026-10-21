@@ -5,6 +5,22 @@ Newest first. Each entry starts with its version on its own line, which is how
 the updater finds the notes for a release. The version number itself lives in
 version.txt and nowhere else.
 
+1.8.41
+  Merlin Engine:
+  - YouTube's cookie dialog sits in the middle of the window, at the top,
+    with its buttons inside it. getComputedStyle() now gives the values
+    Merlin's own layout worked out (and CSS's starting values for anything
+    not set), not empty strings; YouTube centres the dialog from them.
+  - When an element a page measured before it was laid out gets its size,
+    the page is told with a resize event, as YouTube waits for one to place
+    the dialog again.
+  - A box a page places with position: fixed and left/top in its style
+    reports that place from getBoundingClientRect() straight away.
+  - Drop-down menus that open on hover stay open while the mouse crosses
+    the gap below the menu item, even on big pages (AlterniTech's). The
+    time Merlin spends laying the page out after a hover no longer counts
+    towards the moment the menu is allowed to close.
+
 1.8.40
   Merlin Engine:
   - YouTube's search results show their titles, channel names, details and

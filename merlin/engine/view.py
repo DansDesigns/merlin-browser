@@ -2114,7 +2114,8 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
         if self._script is None or self._display is None:
             return
         self._script.send({"type": "geometry", "boxes": self._geometry_now(),
-                           "height": float(self.height()), "panels": self._panels_now()})
+                           "height": float(self.height()), "panels": self._panels_now(),
+                           "styles": self._styles_now()})
 
     def _panels_now(self) -> dict:
         """Each scrolling panel's position, shown height and whole height."""
@@ -2125,6 +2126,93 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
                 panels[known] = [self._display.panel_offset(panel), panel["area"].height(),
                                  panel["area"].height() + panel["max"]]
         return panels
+
+    # what a script's getComputedStyle() is told: each element's values of
+    # these where they are not CSS's initial ones (those it knows itself)
+    COMPUTED_FOR_SCRIPTS = ("display", "position", "top", "right", "bottom", "left", "z-index",
+                            "max-width", "max-height", "min-width", "min-height",
+                            "margin-top", "margin-right", "margin-bottom", "margin-left",
+                            "padding-top", "padding-right", "padding-bottom", "padding-left",
+                            "visibility", "opacity", "overflow", "float", "box-sizing", "width", "height",
+                            "flex-direction", "transform", "pointer-events")
+
+    def _styles_now(self) -> dict:
+        """Computed styles for the page's scripts, by element: getComputedStyle()
+        had answered "" for anything not in an element's style attribute, and
+        YouTube's cookie dialog (Polymer's iron-fit) took top: "" for a
+        position the page had given it, and was never centred."""
+        found = {}
+        if self._document is None or not self._styles:
+            return found
+        from .css import expand_shorthand
+
+        def text(value):
+            if value is None:
+                return None
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, (int, float)):
+                return f"{round(float(value), 2):g}px"
+            if isinstance(value, tuple) and value and value[0] == "%":
+                return f"{value[1]:g}%"
+            if isinstance(value, str):
+                return value
+            return None
+
+        initial = {"display": "inline", "position": "static", "top": "auto", "right": "auto",
+                   "bottom": "auto", "left": "auto", "z-index": "auto", "max-width": "none",
+                   "max-height": "none", "min-width": "0px", "min-height": "0px", "visibility": "visible",
+                   "opacity": "1", "overflow": "visible", "float": "none", "box-sizing": "content-box",
+                   "width": "auto", "height": "auto", "flex-direction": "row", "transform": "none",
+                   "pointer-events": "auto"}
+        for element in self._document.root.elements():
+            known = element.attrs.get("data-mjs") if getattr(element, "attrs", None) else None
+            if not known:
+                continue
+            style = self._styles.get(element)
+            if not style:
+                continue
+            memo = self.__dict__.setdefault("_computed_memo", {})
+            kept = memo.get(id(style))
+            if kept is not None and kept[0] is style and kept[2] == element.attrs.get("style"):
+                if kept[1]:
+                    found[known] = kept[1]
+                continue
+            values = {}
+            # what the element's own style attribute sets is left to the
+            # script's side, which knows that attribute as it is now: a
+            # script that clears its own top (Polymer's dialogs, refitting)
+            # had been told the old one still held
+            own = set()
+            for part in str(element.attrs.get("style") or "").split(";"):
+                name, _colon, rest = part.partition(":")
+                name = name.strip().lower()
+                if name and rest.strip():
+                    try:
+                        own.update(real for real, _v in expand_shorthand(name, rest.strip()))
+                    except Exception:                      # noqa: BLE001
+                        own.add(name)
+            for name in self.COMPUTED_FOR_SCRIPTS:
+                if name in own:
+                    continue
+                value = style.get(name)
+                if name == "opacity":
+                    shown = None if not isinstance(value, float) or value >= 0.999 else f"{value:g}"
+                elif name == "z-index":
+                    shown = str(value) if value not in (None, "", "auto") else None
+                elif name == "transform":
+                    shown = None
+                else:
+                    shown = text(value)
+                if shown is None or shown == initial.get(name) or shown in ("0px",) and name.startswith(("margin", "padding")):
+                    continue
+                values[name] = shown
+            if len(memo) > 50000:
+                memo.clear()
+            memo[id(style)] = (style, values, element.attrs.get("style"))
+            if values:
+                found[known] = values
+        return found
 
     def _geometry_now(self) -> dict:
         boxes = {}
@@ -4339,11 +4427,28 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
     def _restyle_hover(self) -> None:
         self._hover_timer_on = False
         relevant, self._hover_pending = getattr(self, "_hover_pending", None) or [], []
+        started = time.monotonic()
         if self._hover_styles(relevant):
             self._layout()
             self.update()
         else:
             self._hover_retry()
+        self._pause_lingering(time.monotonic() - started)
+
+    def _pause_lingering(self, seconds: float) -> None:
+        """A menu lingering open (see _with_lingering) waits out the time
+        Merlin spent styling and laying out the page, as its transition would
+        not have run on meanwhile in a browser: the pointer's way across the
+        gap to the menu arrives only once that work is done. On a page as big
+        as AlterniTech's, half a second of it had used up the menu's whole
+        wait, and it was closed before the pointer reached it."""
+        linger = getattr(self, "_hover_linger", None)
+        if not linger or seconds < 0.02:
+            return
+        for key, (element, until) in list(linger.items()):
+            linger[key] = (element, until + seconds)
+        soonest = min(until for _e, until in linger.values())
+        QTimer.singleShot(max(1, int((soonest - time.monotonic()) * 1000) + 20), self._hover_linger_ended)
 
     def _hover_retry(self) -> None:
         wanted = getattr(self, "_hover_wanted", None)
@@ -4506,7 +4611,10 @@ class MerlinView(QWidget, FramesMixin, MediaMixin, SitePlayMixin):
     def _hover_linger_ended(self) -> None:
         linger = getattr(self, "_hover_linger", None) or {}
         now = time.monotonic()
-        for key in [k for k, (_e, until) in linger.items() if until <= now + 0.005]:
+        ended = [k for k, (_e, until) in linger.items() if until <= now + 0.005]
+        if not ended:
+            return                               # its wait was made longer: not yet
+        for key in ended:
             del linger[key]
         if self._display is not None and self._document is not None:
             self._update_hover(getattr(self, "_hover_at", None))
